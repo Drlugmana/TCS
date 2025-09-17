@@ -1,0 +1,43 @@
+// --- Calculo SLA (con fórmulas de Excel) ---
+var slaSheet = package.Workbook.Worksheets.Add("Calculo SLA");
+
+// Encabezados
+slaSheet.Cells["A1"].Value = "Métrica";
+slaSheet.Cells["B1"].Value = "Valor";
+slaSheet.Cells["A1:B1"].Style.Font.Bold = true;
+
+// Filas de métricas (valores base)
+slaSheet.Cells["A2"].Value = "Total servidores administrados por TCS";
+slaSheet.Cells["B2"].Value = _serversWithEntities.Count + _serversNoMatch.Count;
+
+slaSheet.Cells["A3"].Value = "Total servidores administrados por TCS monitoreadas en Dynatrace";
+slaSheet.Cells["B3"].Value = _serversWithEntities.Count;
+
+slaSheet.Cells["A4"].Value = "Casos excepcionados";
+slaSheet.Cells["B4"].Value = _excepcionadosDetallados.Count; // usamos la lista detallada
+
+// Porcentajes con fórmulas
+slaSheet.Cells["A5"].Value = "% Cobertura Monitoreo";
+// Fórmula: Monitoreados / (Total - Excepcionados)
+slaSheet.Cells["B5"].Formula = "(B3)/(B2-B4)";
+slaSheet.Cells["B5"].Style.Numberformat.Format = "0.00%";
+
+slaSheet.Cells["A6"].Value = "% No Monitoreado";
+// Fórmula: 1 - Cobertura
+slaSheet.Cells["B6"].Formula = "1-B5";
+slaSheet.Cells["B6"].Style.Numberformat.Format = "0.00%";
+
+// Estética ligera
+slaSheet.Cells["A1:B6"].AutoFitColumns();
+slaSheet.Cells["A2:A6"].Style.Font.Bold = false;
+slaSheet.Cells["A1:B1"].Style.Border.Bottom.Style = OfficeOpenXml.Style.ExcelBorderStyle.Thin;
+
+// Opcional: bordes suaves para toda la tabla
+var rng = slaSheet.Cells["A1:B6"];
+rng.Style.Border.Top.Style = OfficeOpenXml.Style.ExcelBorderStyle.Hair;
+rng.Style.Border.Left.Style = OfficeOpenXml.Style.ExcelBorderStyle.Hair;
+rng.Style.Border.Right.Style = OfficeOpenXml.Style.ExcelBorderStyle.Hair;
+rng.Style.Border.Bottom.Style = OfficeOpenXml.Style.ExcelBorderStyle.Hair;
+
+// Mover hoja al inicio como en tu flujo actual
+package.Workbook.Worksheets.MoveToStart("Calculo SLA");
