@@ -1,0 +1,683 @@
+using Azure.Core;
+using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
+using OfficeOpenXml;
+using ReporteCoberturaSLA.DAL;
+using ReporteCoberturaSLA.Models.Cmdb;
+using ReporteCoberturaSLA.Models.Config;
+using ReporteCoberturaSLA.Models.EntityModels;
+using System.Collections.Concurrent;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Threading;
+
+namespace ReporteCoberturaSLA
+{
+    class Program
+    {
+        private static string _connectionString = string.Empty;
+        private static ApiCmdbSettings _apiSettings = new ApiCmdbSettings();
+
+        private static List<ServerWithEntities> _serversWithEntities = new();
+        private static List<Server> _serversNoMatch = new();
+        private static List<EntitySchema> _serversNoMatchDyn = new();
+
+        // NUEVO: Excepcionados con detalle (para hoja igual a Monitoreados)
+        private static List<ServerWithEntities> _excepcionadosDetallados = new();
+
+        // ===================== NORMALIZACIÓN Y LISTA “NO APLICA” =====================
+
+        // Normaliza cadenas para comparar (evita fallos por comillas, espacios, símbolos, mayúsculas)
+        private static string Normalize(string? s) =>
+            (s ?? "")
+                .Replace("\"", "")
+                .Replace("’", "'")
+                .Replace("®", "")
+                .Replace("Â", "")
+                .Replace("  ", " ")
+                .Trim()
+                .ToUpperInvariant();
+
+        // Lista original de “Sistema Operativo-Versión” que NO aplica monitoreo (obsoleto)
+        private static readonly string[] _osNoAplicaRaw = new[]
+        {
+            " - 17.1.1, build 0.0.6",
+            " - BIG-IP 16.1.3.2, build 0.0.4",
+            " - BIG-IP 16.1.3.5, build 0.0.5",
+            " - BIG-IP 17.1.1, Build 0.0.6",
+            " - BIG-IP 17.1.1.1, build 0.0.2",
+            " - PowerEdge R320",
+            "Acropolis Hypervisor(AHV) - el7.nutanix.20220304.511",
+            "Acropolis Hypervisor(AHV) - el8.nutanix.20230302.102005",
+            "Acropolis Operating System (AOS) - ",
+            "Acropolis Operating System (AOS) - 6.5.5.1",
+            "Acropolis Operating System (AOS) Version 6.5.5.1",
+            "ESX - 6.0.0",
+            "ESX - 6.7.0",
+            "ESX - 7.0.3",
+            "ESX - VMware ESXi 6.5.0 build-19997716",
+            "ESX - VMware ESXi 6.5.0 build-20502893",
+            "ESX - VMware ESXi 6.7.0 build-19997733",
+            "ESX - VMware ESXi 7.0.3 build-21424296",
+            "ESX - VMware ESXi 7.0.3 build-21930508",
+            "ESX - VMware ESXi 7.0.3 build-23307199",
+            "ESX - VMware ESXi 7.0.3 build-23794027",
+            "ESX - VMware ESXi 7.0.3 build-24411414",
+            "ESX - VMware ESXi 7.0.3 build-24585291",
+            "FireMon Operating System(FMOS) - 2023.1.11",
+            "FireMon Operating System(FMOS) Version 2023.1.11",
+            "Flow Sensor - 7.5.1",
+            "HP/UX - '-",
+            "HP/UX - B.11.11",
+            "HP/UX - B.11.31",
+            "i/IBM - SV860_FW860.B1 (243)",
+            "i/IBM - VH950_175(FW950.90)",
+            "i/IBM - VH950_FW950.40 (99)",
+            "i/IBM - VH950_FW950.D0(175)",
+            "i/IBM - VL950_FW950.71 (124)",
+            "i/IBM - VL950_FW950.C1(168)",
+            "i/IBM - VL950_FW950.D0(175)",
+            "IBM DataPower Gateway - IDG.10.5.0.13",
+            "IBM DataPower Gateway - IDG.10.6.0.2",
+            "IBM DataPower Gateway - XI52.7.5.2.20",
+            "IBM DataPower Gateway Version IDG.10.6.0.2",
+            "IBM DataPower Gateway Version XI52.7.5.2.20",
+            "Linux - ",
+            "Linux - 10.2",
+            "Linux - 17.1.1, build 0.0.6",
+            "Linux - 20.6.3.2",
+            "Linux - 337",
+            "Linux - 4.2.1",
+            "Linux - 7.2.5.2",
+            "Linux - 7.5.1",
+            "Linux - 7.6",
+            "Linux - 7.7.3",
+            "Linux - 7.9",
+            "Linux - 8.1.3.0-31-21052",
+            "Linux - 8.1.3.1-38-21632",
+            "Linux - 8.10",
+            "Linux - 8.2",
+            "Linux - 8.7.0.3",
+            "Linux - 8.76",
+            "Linux - 9.1.0.1",
+            "Linux - A8.60",
+            "Linux - A8.61",
+            "Linux - AES 8.1.3.8.0.4",
+            "Linux - BIG-IP 16.1.3.2, build 0.0.4",
+            "Linux - BIG-IP 16.1.3.5, build 0.0.5",
+            "Linux - BIG-IP 17.1.1, build 0.0.6",
+            "Linux - BIG-IP 17.1.1.1, build 0.0.2",
+            "Linux - BIG-IP 17.1.1.3, build 0.0.5",
+            "Linux - BIG-IP 17.1.2.1, build 0.0.2",
+            "Linux - BIG-IP 8.2.0, build 0.0.310",
+            "Linux - CentOS 4/5/6 (64-bit)",
+            "Linux - Centos 7",
+            "Linux - CSSP 1.0",
+            "Linux - FMOS 9.6.2",
+            "Linux - Linux 4.2.0-16 generic",
+            "Linux - Other 2.6.x Linux (64-bit)",
+            "Linux - Other 3.x Linux (64-bit)",
+            "Linux - Other 3.x or later Linux (64-bit)",
+            "Linux - Other Linux (64-bit)",
+            "Linux - Standard_D2s_v3",
+            "Linux - Ubuntu Linux (64-bit)",
+            "Linux - VMware ESXi 7.0.3 build-24411414",
+            "Linux - VMware ESXi 7.0.3 build-24585291",
+            "Linux - VMware ESXi 7.0.3 build-24614210",
+            "Linux Centos - 8",
+            "Linux Centos - Other 3.x Linux (64-bit)",
+            "Linux Oracle - 24.1.11.0.0.250413",
+            "Linux Oracle - 7",
+            "Linux Oracle - 7.4",
+            "Linux Oracle - 8.10",
+            "Linux Oracle - 8.7",
+            "Linux Oracle - 9.2",
+            "Linux Oracle - 9.4",
+            "Linux Oracle Version 8.10",
+            "Linux Oracle Version 9.2",
+            "Linux Oracle Version 9.4",
+            "Linux SuSE - 11",
+            "Linux SuSE - 7.7.3",
+            "Linux Ubuntu - 16.04.7",
+            "Linux Ubuntu - 18.04.5",
+            "Linux Ubuntu - 18.04.6",
+            "Linux Ubuntu - 19.10",
+            "Linux Ubuntu - 24.04",
+            "Linux Ubuntu - Ubuntu Linux (64-bit)",
+            "Linux Ubuntu Version 19.10",
+            "Linux Version ",
+            "Linux Version 4.2.1",
+            "Linux Version 7.5.1",
+            "Linux Version 7.6",
+            "Linux Version 7.9",
+            "Linux Version 8.1.3.0-31-21052",
+            "Linux Version 8.7.0.3",
+            "Linux Version 8.76",
+            "Linux Version AES 8.1.3.8.0.4",
+            "Linux Version CentOS 4/5/6 (64-bit)",
+            "Linux Version FMOS 9.6.2",
+            "Linux Version Other 3.x or later Linux (64-bit)",
+            "Linux Version VMware ESXi 7.0.3 build-24411414",
+            "Linux Version VMware ESXi 7.0.3 build-24585291",
+            "Linux Version VMware ESXi 7.0.3 build-24614210",
+            "Microsoft Hyper-V Server 2016 - 10.0.14393",
+            "N/a - ",
+            "N/a - 6.1.2.300",
+            "N/a - 8.2.1.18",
+            "N/a - 8.5.0.13",
+            "N/a - 88-08-15-60/00",
+            "N/a - 88-08-16-60/00",
+            "N/a - 9.3 bundle 89.33.51.0",
+            "N/a - 9.4 bundle 89.41.25.0",
+            "N/a - 9.6.0.214",
+            "N/a - 9.6.2.37",
+            "N/a - R9.3 SP3 - 89.33.45.0",
+            "OS/400 - V7R2M0",
+            "OS/400 - V7R4M0",
+            "OVA Deep Discovery Analyzer - 6.5.0.1168",
+            "OVA Deep Discovery Inspector - '-",
+            "Ova Linux Certes CEP1000-VSE-AC - CEP1000",
+            "SAN - Conexión por canal de fibra",
+            "Solaris - 10.0",
+            "Solaris - 11.4.74.176.3",
+            "Solaris - 11.4.79.189.2",
+            "Solaris - 11.4.81.195.2",
+            "Solaris Version 11.4.74.176.3",
+            "Tipo de dispositivo",
+            "UDP Director - 7.5.1",
+            "VMware Photon OS - 4.0",
+            "VMware Photon OS Version 4.0",
+            "VMware, Inc. - "
+        };
+
+        // Conjunto normalizado para comparación O(1)
+        private static readonly HashSet<string> _osNoAplica =
+            new HashSet<string>(_osNoAplicaRaw.Select(Normalize));
+
+        // ¿La entidad cae en la lista “No aplica monitoreo” por SO obsoleto?
+        private static bool EsNoAplica(EntitySchema latest)
+        {
+            string osVersion  = latest.Properties?.OsVersion ?? "";
+            string installer  = latest.Properties?.InstallerVersion ?? "";
+            string detected   = latest.Properties?.DetectedName ?? "";
+            string osType     = latest.Properties?.OsType ?? "";
+
+            // Columna unificada (OS Version, Installer Version)
+            string soVersionUnificada = string.Join(", ",
+                new[] { osVersion, installer }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+            // Candidatos que empatan con el formato de la lista
+            var candidates = new[]
+            {
+                $"{detected} - {osVersion}",
+                $"{osType} - {osVersion}",
+                soVersionUnificada
+            };
+
+            return candidates.Select(Normalize).Any(c => _osNoAplica.Contains(c));
+        }
+
+        // Encabezados estándar (Monitoreados y Excepcionados)
+        private static string[] GetMonitoredHeaders() => new[]
+        {
+            "Server Name", "Server Class", "Server Group",
+            "Tenant", "Environment", "Entity Id", "Type",
+            "Display Name", "First Seen", "Last Seen",
+            "Installer Tracked Download", "Physical Memory",
+            "Standalone", "Standalone Special AgentsOnly",
+            "Logical Cpu Cores", "Is Monitoring Candidate",
+            "Cpu Cores", "Memory Total", "Installer Support Alert",
+            "Ip Address", "Management Zones", "Tags Key", "Tags String Representation",
+            "Tags Value", "OS Type", "Detected Name", "State", "OneAgent Custom Host Name",
+            "HypervisorType", "Bitness", "OS Architecture",
+            "OS Version", "Installer Version",
+            "Sistema Operativo-Versión", // NUEVA
+            "Network Zone", "Auto Injection", "Monitoring Mode", "Host Group Name"
+        };
+
+        // ============================================================================
+
+        public static async Task Main(string[] args)
+        {
+            LoadConfig();
+            Console.WriteLine("Obteniendo lista de servidores de la cmdb");
+            var serverList = await GetCmdbServersList();
+            Console.WriteLine($"Se encontraron {serverList.Count} servidores en la cmdb");
+            Console.WriteLine("Realizando cruce de datos para generacion de reporte");
+            await MatchEntitiesInfo(serverList);
+            Console.Write($"Se han detectado {_serversWithEntities.Count} entidades monitoreadas por Dynatrace y registradas en la CMDB");
+            GenerateReport();
+        }
+
+        public static void LoadConfig()
+        {
+            var configuration = new ConfigurationBuilder()
+                 .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
+                 .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
+                 .Build();
+            _connectionString = configuration.GetConnectionString("Connection");
+            configuration.GetSection("ApiCmdb").Bind(_apiSettings);
+        }
+
+        public static async Task<List<Server>> GetCmdbServersList()
+        {
+            HttpClient httpClient = new();
+
+            try
+            {
+                var byteArray = Encoding.ASCII.GetBytes($"{_apiSettings.User}:{_apiSettings.Password}");
+                httpClient.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Basic", Convert.ToBase64String(byteArray));
+                httpClient.DefaultRequestHeaders.Accept.Clear();
+                httpClient.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+
+                HttpResponseMessage response = await httpClient.GetAsync(_apiSettings.Url);
+
+                if (response.IsSuccessStatusCode)
+                {
+                    string responseBody = await response.Content.ReadAsStringAsync();
+                    var apiResponse = JsonConvert.DeserializeObject<CmdbResponse>(responseBody);
+                    var serverList = apiResponse?.Result ?? new List<Server>();
+
+                    var uniqueServerList = serverList
+                        .Where(s => s != null && s.Name != null)
+                        .Select(s =>
+                        {
+                            s.Name = s.Name.ToUpper();
+                            return s;
+                        })
+                        .GroupBy(s => s.Name)
+                        .Select(g => g.First())
+                        .ToList();
+
+                    return uniqueServerList;
+                }
+
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error al obtener los datos. Excepcion {ex}");
+            }
+
+            return new List<Server>();
+        }
+
+        public static async Task MatchEntitiesInfo(List<Server> serverList)
+        {
+            EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
+            var entitiesList = await entitiesDB.GetEntities();
+
+            var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>();
+
+            foreach (var kvp in entitiesList)
+            {
+                var keyHostname = kvp.Key.Split('.')[0].Trim().ToUpper();
+                normalizedEntities.TryAdd(keyHostname, kvp.Value);
+            }
+
+            Parallel.ForEach(serverList, server =>
+            {
+                if (!string.IsNullOrEmpty(server.Name))
+                {
+                    string hostname = server.Name.Trim().ToUpper();
+                    bool matchFound = false;
+
+                    if (normalizedEntities.TryGetValue(hostname, out var matchedEntities))
+                    {
+                        _serversWithEntities.Add(new ServerWithEntities
+                        {
+                            Server = server,
+                            Entities = matchedEntities
+                        });
+
+                        normalizedEntities.TryRemove(hostname, out _);
+                        matchFound = true;
+                    }
+
+                    if (!matchFound)
+                    {
+                        _serversNoMatch.Add(server);
+                    }
+                }
+
+                Console.Write("Procesando servidores: {0}/{1}", serverList.IndexOf(server) + 1, serverList.Count);
+            });
+
+            foreach (var remainingEntities in normalizedEntities.Values)
+            {
+                foreach (var entity in remainingEntities)
+                {
+                    _serversNoMatchDyn.Add(entity);
+                }
+            }
+
+            _serversNoMatchDyn = _serversNoMatchDyn
+             .Where(entity => entity.ManagementZones != null &&
+             entity.ManagementZones.Any(zone => zone.Name != null &&
+             zone.Name.IndexOf("Premise", StringComparison.OrdinalIgnoreCase) >= 0))
+             .ToList();
+
+            Console.WriteLine();
+            Console.WriteLine($"Entidades match {_serversWithEntities.Count}");
+            Console.WriteLine($"Entidades que no hicieron match en cmdb {_serversNoMatch.Count}");
+            Console.WriteLine($"Entidades que no hicieron match en dynatrace {_serversNoMatchDyn.Count}");
+        }
+
+        public static void GenerateReport()
+        {
+            ExcelPackage.License.SetNonCommercialPersonal("ecbp");
+            using var package = new ExcelPackage();
+
+            CreateMonitoredSheet(package);
+            CreateNoMatchCmdbServerSheet(package);
+            CreateNoMatchDynatraceServerSheet(package);
+
+            // NUEVO: Excepcionados con mismas columnas
+            CreateExcepcionadosSheet(package);
+
+            // Calculo SLA actualizado (usa excepcionados detallados)
+            var slaSheet = package.Workbook.Worksheets.Add("Calculo SLA");
+            int totalServidores = _serversWithEntities.Count + _serversNoMatch.Count;
+            int excepcionados = _excepcionadosDetallados.Count;
+            double cobertura = (totalServidores - excepcionados) > 0
+                ? Math.Round((double)_serversWithEntities.Count / (totalServidores - excepcionados) * 100, 2)
+                : 0;
+
+            slaSheet.Cells["A1"].Value = "Métrica";
+            slaSheet.Cells["B1"].Value = "Valor";
+            slaSheet.Cells["A2"].Value = "Total servidores administrados por TCS";
+            slaSheet.Cells["B2"].Value = totalServidores;
+            slaSheet.Cells["A3"].Value = "Total servidores monitoreados por Dynatrace";
+            slaSheet.Cells["B3"].Value = _serversWithEntities.Count;
+            slaSheet.Cells["A4"].Value = "Total excepcionados";
+            slaSheet.Cells["B4"].Value = excepcionados;
+            slaSheet.Cells["A5"].Value = "Porcentaje de cobertura de monitoreo";
+            slaSheet.Cells["B5"].Value = cobertura + "%";
+
+            package.Workbook.Worksheets.MoveToStart("Calculo SLA");
+
+            var fileInfo = new FileInfo("servers_with_entities.xlsx");
+            package.SaveAs(fileInfo);
+            Console.WriteLine("Excel file 'servers_with_entities.xlsx' has been created successfully.");
+        }
+
+        public static void CreateMonitoredSheet(ExcelPackage package)
+        {
+            var worksheet = package.Workbook.Worksheets.Add("Monitoreados");
+            var headers = GetMonitoredHeaders();
+
+            // Headers
+            for (int i = 0; i < headers.Length; i++)
+            {
+                worksheet.Cells[1, i + 1].Value = headers[i];
+                worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+            }
+
+            int row = 2;
+
+            foreach (var serverWithEntities in _serversWithEntities)
+            {
+                var server = serverWithEntities.Server;
+                var latest = serverWithEntities.Entities.OrderByDescending(e => e.LastSeen).FirstOrDefault();
+
+                if (latest == null) continue;
+
+                // 1) Nombre: POE / CLON_POE → Excepcionados
+                if (server.Name.StartsWith("POE", StringComparison.OrdinalIgnoreCase) ||
+                    server.Name.StartsWith("CLON_POE", StringComparison.OrdinalIgnoreCase))
+                {
+                    _excepcionadosDetallados.Add(serverWithEntities);
+                    continue;
+                }
+
+                // 2) SO obsoleto → Excepcionados
+                if (EsNoAplica(latest))
+                {
+                    _excepcionadosDetallados.Add(serverWithEntities);
+                    continue;
+                }
+
+                // Unificada
+                string osv = (latest.Properties?.OsVersion ?? "").Trim();
+                string iv  = (latest.Properties?.InstallerVersion ?? "").Trim();
+                string soVersionUnificada = string.Join(", ",
+                    new[] { osv, iv }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+                // Escribir fila
+                worksheet.Cells[row, 1].Value  = server.Name;
+                worksheet.Cells[row, 2].Value  = server.Class;
+                worksheet.Cells[row, 3].Value  = server.Group;
+                worksheet.Cells[row, 4].Value  = latest.Tenant;
+                worksheet.Cells[row, 5].Value  = latest.Environment;
+                worksheet.Cells[row, 6].Value  = latest.EntityId;
+                worksheet.Cells[row, 7].Value  = latest.Type;
+                worksheet.Cells[row, 8].Value  = latest.DisplayName;
+                worksheet.Cells[row, 9].Value  = latest.FirstSeen;
+                worksheet.Cells[row, 9].Style.Numberformat.Format  = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 10].Value = latest.LastSeen;
+                worksheet.Cells[row, 10].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 11].Value = latest.Properties?.InstallerTrackedDownload == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 12].Value = latest.Properties?.PhysicalMemory?.ToString() ?? "";
+                worksheet.Cells[row, 13].Value = latest.Properties?.Standalone == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 14].Value = latest.Properties?.StandaloneSpecialAgentsOnly == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 15].Value = latest.Properties?.LogicalCpuCores?.ToString() ?? "";
+                worksheet.Cells[row, 16].Value = latest.Properties?.IsMonitoringCandidate == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 17].Value = latest.Properties?.CpuCores?.ToString() ?? "";
+                worksheet.Cells[row, 18].Value = latest.Properties?.MemoryTotal?.ToString() ?? "";
+                worksheet.Cells[row, 19].Value = latest.Properties?.InstallerSupportAlert == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 20].Value = string.Join(",", latest.Properties?.IpAddress ?? new List<string>());
+                worksheet.Cells[row, 21].Value = string.Join(",", latest.ManagementZones?.Where(m => m.Name != null).Select(m => m.Name) ?? new List<string>());
+                worksheet.Cells[row, 22].Value = string.Join(",", latest.Tags?.Where(t => t.Key != null).Select(t => t.Key) ?? new List<string>());
+                worksheet.Cells[row, 23].Value = string.Join(",", latest.Tags?.Where(t => t.StringRepresentation != null).Select(t => t.StringRepresentation) ?? new List<string>());
+                worksheet.Cells[row, 24].Value = string.Join(",", latest.Tags?.Where(t => t.Value != null).Select(t => t.Value) ?? new List<string>());
+                worksheet.Cells[row, 25].Value = latest.Properties?.OsType ?? "";
+                worksheet.Cells[row, 26].Value = latest.Properties?.DetectedName ?? "";
+                worksheet.Cells[row, 27].Value = latest.Properties?.State ?? "";
+                worksheet.Cells[row, 28].Value = latest.Properties?.OneAgentCustomHostName ?? "";
+                worksheet.Cells[row, 29].Value = latest.Properties?.HypervisorType ?? "";
+                worksheet.Cells[row, 30].Value = latest.Properties?.Bitness ?? "";
+                worksheet.Cells[row, 31].Value = latest.Properties?.OsArchitecture ?? "";
+                worksheet.Cells[row, 32].Value = osv;
+                worksheet.Cells[row, 33].Value = iv;
+                worksheet.Cells[row, 34].Value = soVersionUnificada; // NUEVA
+                worksheet.Cells[row, 35].Value = latest.Properties?.NetworkZone ?? "";
+                worksheet.Cells[row, 36].Value = latest.Properties?.AutoInjection ?? "";
+                worksheet.Cells[row, 37].Value = latest.Properties?.MonitoringMode ?? "";
+                worksheet.Cells[row, 38].Value = latest.Properties?.HostGroupName ?? "";
+                row++;
+            }
+        }
+
+        private static void CreateExcepcionadosSheet(ExcelPackage package)
+        {
+            var worksheet = package.Workbook.Worksheets.Add("Excepcionados");
+            var headers = GetMonitoredHeaders();
+
+            // Headers
+            for (int i = 0; i < headers.Length; i++)
+            {
+                worksheet.Cells[1, i + 1].Value = headers[i];
+                worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+            }
+
+            int row = 2;
+
+            foreach (var serverWithEntities in _excepcionadosDetallados)
+            {
+                var server = serverWithEntities.Server;
+                var latest = serverWithEntities.Entities.OrderByDescending(e => e.LastSeen).FirstOrDefault();
+                if (latest == null) continue;
+
+                string osv = (latest.Properties?.OsVersion ?? "").Trim();
+                string iv  = (latest.Properties?.InstallerVersion ?? "").Trim();
+                string soVersionUnificada = string.Join(", ",
+                    new[] { osv, iv }.Where(s => !string.IsNullOrWhiteSpace(s)));
+
+                worksheet.Cells[row, 1].Value  = server.Name;
+                worksheet.Cells[row, 2].Value  = server.Class;
+                worksheet.Cells[row, 3].Value  = server.Group;
+                worksheet.Cells[row, 4].Value  = latest.Tenant;
+                worksheet.Cells[row, 5].Value  = latest.Environment;
+                worksheet.Cells[row, 6].Value  = latest.EntityId;
+                worksheet.Cells[row, 7].Value  = latest.Type;
+                worksheet.Cells[row, 8].Value  = latest.DisplayName;
+                worksheet.Cells[row, 9].Value  = latest.FirstSeen;
+                worksheet.Cells[row, 9].Style.Numberformat.Format  = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 10].Value = latest.LastSeen;
+                worksheet.Cells[row, 10].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 11].Value = latest.Properties?.InstallerTrackedDownload == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 12].Value = latest.Properties?.PhysicalMemory?.ToString() ?? "";
+                worksheet.Cells[row, 13].Value = latest.Properties?.Standalone == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 14].Value = latest.Properties?.StandaloneSpecialAgentsOnly == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 15].Value = latest.Properties?.LogicalCpuCores?.ToString() ?? "";
+                worksheet.Cells[row, 16].Value = latest.Properties?.IsMonitoringCandidate == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 17].Value = latest.Properties?.CpuCores?.ToString() ?? "";
+                worksheet.Cells[row, 18].Value = latest.Properties?.MemoryTotal?.ToString() ?? "";
+                worksheet.Cells[row, 19].Value = latest.Properties?.InstallerSupportAlert == true ? "Verdadero" : "Falso";
+                worksheet.Cells[row, 20].Value = string.Join(",", latest.Properties?.IpAddress ?? new List<string>());
+                worksheet.Cells[row, 21].Value = string.Join(",", latest.ManagementZones?.Where(m => m.Name != null).Select(m => m.Name) ?? new List<string>());
+                worksheet.Cells[row, 22].Value = string.Join(",", latest.Tags?.Where(t => t.Key != null).Select(t => t.Key) ?? new List<string>());
+                worksheet.Cells[row, 23].Value = string.Join(",", latest.Tags?.Where(t => t.StringRepresentation != null).Select(t => t.StringRepresentation) ?? new List<string>());
+                worksheet.Cells[row, 24].Value = string.Join(",", latest.Tags?.Where(t => t.Value != null).Select(t => t.Value) ?? new List<string>());
+                worksheet.Cells[row, 25].Value = latest.Properties?.OsType ?? "";
+                worksheet.Cells[row, 26].Value = latest.Properties?.DetectedName ?? "";
+                worksheet.Cells[row, 27].Value = latest.Properties?.State ?? "";
+                worksheet.Cells[row, 28].Value = latest.Properties?.OneAgentCustomHostName ?? "";
+                worksheet.Cells[row, 29].Value = latest.Properties?.HypervisorType ?? "";
+                worksheet.Cells[row, 30].Value = latest.Properties?.Bitness ?? "";
+                worksheet.Cells[row, 31].Value = latest.Properties?.OsArchitecture ?? "";
+                worksheet.Cells[row, 32].Value = osv;
+                worksheet.Cells[row, 33].Value = iv;
+                worksheet.Cells[row, 34].Value = soVersionUnificada; // NUEVA
+                worksheet.Cells[row, 35].Value = latest.Properties?.NetworkZone ?? "";
+                worksheet.Cells[row, 36].Value = latest.Properties?.AutoInjection ?? "";
+                worksheet.Cells[row, 37].Value = latest.Properties?.MonitoringMode ?? "";
+                worksheet.Cells[row, 38].Value = latest.Properties?.HostGroupName ?? "";
+                row++;
+            }
+        }
+
+        public static void CreateNoMatchCmdbServerSheet(ExcelPackage package)
+        {
+            var worksheet = package.Workbook.Worksheets.Add("No Monitoreados Cmdb");
+            var headers = new[]
+            {
+                "Server Name", "Server Class", "Server Group","Operational State", "Environment", "Related Application", "Owned By", "Manufacturer"
+            };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                worksheet.Cells[1, i + 1].Value = headers[i];
+                worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+            }
+            // Lista de clases válidas
+            var allowedClasses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "cmdb_ci_aix_server",
+                "cmdb_ci_datapower_server",
+                "cmdb_ci_db_mssql_database",
+                "cmdb_ci_esx_server",
+                "cmdb_ci_hpux_server",
+                "cmdb_ci_linux_server",
+                "cmdb_ci_lpar_instance",
+                "cmdb_ci_nutanix_vm_instance",
+                "cmdb_ci_oracle_database",
+                "cmdb_ci_solaris_server",
+                "cmdb_ci_vmware_instance",
+                "cmdb_ci_win_cluster_node",
+                "cmdb_ci_win_server",
+                "Instancia de máquina virtual (VM) VMware",
+                "Servidor AIX",
+                "Servidor de alojamiento de DataPower",
+                "Servidor de Windows",
+                "Servidor ESX",
+                "Servidor HPUX",
+                "Servidor Linux",
+                "Servidor Solaris"
+            };
+
+            int row = 2;
+            foreach (var server in _serversNoMatch)
+            {
+                // Aplicar los dos filtros
+                if (!string.IsNullOrEmpty(server.Class) &&
+                    allowedClasses.Contains(server.Class.Trim()) &&
+                    server.OperationalState?.Trim().Equals("Operativo", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    worksheet.Cells[row, 1].Value = server.Name;
+                    worksheet.Cells[row, 2].Value = server.Class;
+                    worksheet.Cells[row, 3].Value = server.Group;
+                    worksheet.Cells[row, 4].Value = server.OperationalState;
+                    worksheet.Cells[row, 5].Value = server.Environment;
+                    worksheet.Cells[row, 6].Value = server.RelatedApplication;
+                    worksheet.Cells[row, 7].Value = server.OwnedBy;
+                    worksheet.Cells[row, 8].Value = server.Manufacturer;
+                    row++;
+                }
+            }
+        }
+
+        public static void CreateNoMatchDynatraceServerSheet(ExcelPackage package)
+        {
+            var worksheet = package.Workbook.Worksheets.Add("No Monitoreados Dynatrace");
+            var headers = new[]
+            {
+                "Tenant", "Environment", "Entity Id", "Type",
+                "Display Name", "First Seen", "Last Seen",
+                "Installer Tracked Download", "Physical Memory",
+                "Standalone", "Standalone Special AgentsOnly",
+                "Logical Cpu Cores", "Is Monitoring Candidate",
+                "Cpu Cores", "Memory Total", "Installer Support Alert",
+                "Ip Address", "Management Zones", "Tags Key", "Tags String Representation",
+                "Tags Value", "OS Type", "Detected Name", "State", "OneAgent Custom Host Name",
+                "HypervisorType", "Bitness", "OS Architecture", "OS Version", "Installer Version",
+                "Network Zone", "Auto Injection", "Monitoring Mode", "Host Group Name"
+            };
+            for (int i = 0; i < headers.Length; i++)
+            {
+                worksheet.Cells[1, i + 1].Value = headers[i];
+                worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+            }
+            int row = 2;
+            foreach (var entity in _serversNoMatchDyn)
+            {
+                worksheet.Cells[row, 1].Value = entity.Tenant;
+                worksheet.Cells[row, 2].Value = entity.Environment;
+                worksheet.Cells[row, 3].Value = entity.EntityId;
+                worksheet.Cells[row, 4].Value = entity.Type;
+                worksheet.Cells[row, 5].Value = entity.DisplayName;
+                worksheet.Cells[row, 6].Value = entity.FirstSeen;
+                worksheet.Cells[row, 6].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 7].Value = entity.LastSeen;
+                worksheet.Cells[row, 7].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
+                worksheet.Cells[row, 8].Value = entity.Properties?.InstallerTrackedDownload ?? (object)DBNull.Value;
+                worksheet.Cells[row, 9].Value = entity.Properties?.PhysicalMemory ?? (object)DBNull.Value;
+                worksheet.Cells[row, 10].Value = entity.Properties?.Standalone ?? (object)DBNull.Value;
+                worksheet.Cells[row, 11].Value = entity.Properties?.StandaloneSpecialAgentsOnly ?? (object)DBNull.Value;
+                worksheet.Cells[row, 12].Value = entity.Properties?.LogicalCpuCores ?? (object)DBNull.Value;
+                worksheet.Cells[row, 13].Value = entity.Properties?.IsMonitoringCandidate ?? (object)DBNull.Value;
+                worksheet.Cells[row, 14].Value = entity.Properties?.CpuCores ?? (object)DBNull.Value;
+                worksheet.Cells[row, 15].Value = entity.Properties?.MemoryTotal ?? (object)DBNull.Value;
+                worksheet.Cells[row, 16].Value = entity.Properties?.InstallerSupportAlert ?? (object)DBNull.Value;
+                worksheet.Cells[row, 17].Value = string.Join(",", entity.Properties?.IpAddress ?? new List<string>());
+                worksheet.Cells[row, 18].Value = entity.ManagementZones != null ? string.Join(", ", entity.ManagementZones.Where(e => e.Name != null).Select(e => e.Name)) : "";
+                worksheet.Cells[row, 19].Value = string.Join(", ", entity.Tags.Where(e => e.Key != null).Select(e => e.Key));
+                worksheet.Cells[row, 20].Value = string.Join(", ", entity.Tags.Where(e => e.StringRepresentation != null).Select(e => e.StringRepresentation));
+                worksheet.Cells[row, 21].Value = string.Join(", ", entity.Tags.Where(e => e.Value != null).Select(e => e.Value));
+                worksheet.Cells[row, 22].Value = entity.Properties?.OsType ?? "";
+                worksheet.Cells[row, 23].Value = entity.Properties?.DetectedName ?? "";
+                worksheet.Cells[row, 24].Value = entity.Properties?.State ?? "";
+                worksheet.Cells[row, 25].Value = entity.Properties?.OneAgentCustomHostName ?? "";
+                worksheet.Cells[row, 26].Value = entity.Properties?.HypervisorType ?? "";
+                worksheet.Cells[row, 27].Value = entity.Properties?.Bitness ?? "";
+                worksheet.Cells[row, 28].Value = entity.Properties?.OsArchitecture ?? "";
+                worksheet.Cells[row, 29].Value = entity.Properties?.OsVersion ?? "";
+                worksheet.Cells[row, 30].Value = entity.Properties?.InstallerVersion ?? "";
+                worksheet.Cells[row, 31].Value = entity.Properties?.NetworkZone ?? "";
+                worksheet.Cells[row, 32].Value = entity.Properties?.AutoInjection ?? "";
+                worksheet.Cells[row, 33].Value = entity.Properties?.MonitoringMode ?? "";
+                worksheet.Cells[row, 34].Value = entity.Properties?.HostGroupName ?? "";
+
+                row++;
+            }
+        }
+    }
+}
