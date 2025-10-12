@@ -1,1 +1,20 @@
-public JurisdictionDto? Jurisdiction { get; set; }
+using Microsoft.Extensions.ML;
+using RestAPIDynatrace.ML.Clases;
+
+namespace RestAPIDynatrace.ML.Functions
+{
+    // Usa PredictionEnginePool (mejor rendimiento y thread-safe)
+    public static class MLModelInitializer
+    {
+        public static void AddJurisdictionModel(this IServiceCollection services, IConfiguration cfg)
+        {
+            var path = cfg["JurisdictionModel:Path"]; // p.ej. "ML/Models/jurisdiction_model.zip"
+            if (string.IsNullOrWhiteSpace(path))
+                throw new InvalidOperationException("JurisdictionModel:Path no está configurado.");
+
+            services.AddPredictionEnginePool<JurisdictionInput, JurisdictionPrediction>()
+                    .FromFile(modelName: "jurisdiction", filePath: path);
+        }
+    }
+}
+
