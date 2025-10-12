@@ -1,3 +1,133 @@
 
+using System.Text;
+using System.Reflection;
+using RestAPIDynatrace.Models;          // ProblemDynatraceResponse, JurisdictionDto
+using RestAPIDynatrace.ML.Clases;       // JurisdictionInput / JurisdictionPrediction
+using RestAPIDynatrace.ML.Functions;    // MLModelInitializer
+
+namespace RestAPIDynatrace.ML.Functions
+{
+    public static class MLFunctions
+    {
+        private const string ModelVersion = "jurisdiction_model:1.0";
+
+        // ===== API nueva: recibe el problema y devuelve la jurisdicción
+        public static JurisdictionDto ClassifyProblem(ProblemDynatraceResponse p)
+        {
+            var engine   = MLModelInitializer.GetEngine();
+            var fullText = BuildText(p);
+
+            var pred  = engine.Predict(new JurisdictionInput { Text = fullText });
+            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
+            var isTcs = label == "TCS";
+
+            float score = pred.Probability;
+            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
+
+            return new JurisdictionDto
+            {
+                IsTcs       = isTcs,
+                Label       = isTcs ? "TCS" : "NO_TCS",
+                Score       = score,
+                Version     = ModelVersion,
+                ClassifiedAt= DateTimeOffset.UtcNow
+            };
+        }
+
+        // ===== Helper: construye el mismo texto que leería un analista humano
+        private static string BuildText(ProblemDynatraceResponse p)
+        {
+            var sb = new StringBuilder();
+
+            // Campos de cabecera
+            Append(sb, p.title);
+            Append(sb, p.shortDescription);
+            Append(sb, p.impactLevel);
+            Append(sb, p.severityLevel);
+            Append(sb, p.status);
+
+            // ServiceNow
+            if (p.incidentServiceNow != null)
+            {
+                // intenta ShortDescription/Description/Resumen
+                Append(sb, TryGet(p.incidentServiceNow, "ShortDescription", "Description", "Resumen", "Detalle"));
+                // número de ticket
+                Append(sb, TryGet(p.incidentServiceNow, "Number"));
+            }
+
+            // Evidencia / Comentarios / Análisis de impacto
+            if (p.evidenceDetails != null)
+                Append(sb, TryGet(p.evidenceDetails, "Details", "Description", "Text", "EvidenceText"));
+
+            if (p.recentComments != null)
+                Append(sb, TryGet(p.recentComments, "Comments", "Text", "LastComment"));
+
+            if (p.impactAnalysis != null)
+                Append(sb, TryGet(p.impactAnalysis, "Summary", "Description", "Text"));
+
+            // Entidades afectadas / impactadas (usa nombres comunes si existen)
+            AppendFromListObj(sb, p.affectedEntities,  "displayName", "name", "entityName", "hostname", "serverName");
+            AppendFromListObj(sb, p.impactedEntities,  "displayName", "name", "entityName", "hostname", "serverName");
+
+            // Etiquetas y zonas
+            AppendFromListObj(sb, p.entityTags,        "key", "value", "context", "stringRepresentation");
+            AppendFromListObj(sb, p.managementZones,   "name", "id");
+
+            // Clusters / Namespaces
+            AppendFromList(sb, p.clusterName);
+            AppendFromList(sb, p.namespaceName);
+
+            // (Opcional) agrega tenant/environment/displayId si quieres dar más contexto
+            Append(sb, p.tenant);
+            Append(sb, p.environment);
+            Append(sb, p.displayId);
+
+            return sb.ToString().Trim();
+        }
+
+        // ============ utilidades ============
+
+        private static void Append(StringBuilder sb, string? s)
+        {
+            if (!string.IsNullOrWhiteSpace(s))
+            {
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(s);
+            }
+        }
+
+        private static void AppendFromList(StringBuilder sb, IEnumerable<string>? items)
+        {
+            if (items == null) return;
+            var txt = string.Join(' ', items.Where(x => !string.IsNullOrWhiteSpace(x)));
+            Append(sb, txt);
+        }
+
+        // Para listas de objetos: intenta tomar la 1a propiedad no vacía de la lista de nombres dada
+        private static void AppendFromListObj<T>(StringBuilder sb, IEnumerable<T>? items, params string[] propNames)
+        {
+            if (items == null) return;
+            foreach (var it in items)
+            {
+                var val = TryGet(it!, propNames);
+                Append(sb, val);
+            }
+        }
+
+        // Lectura robusta por reflexión, ignorando may/min
+        private static string? TryGet(object obj, params string[] propNames)
+        {
+            var t = obj.GetType();
+            foreach (var name in propNames)
+            {
+                var pi = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+                if (pi == null) continue;
+                var val = pi.GetValue(obj)?.ToString();
+                if (!string.IsNullOrWhiteSpace(val)) return val;
+            }
+            return null;
+        }
+    }
+}
 
            
