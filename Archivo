@@ -1,21 +1,63 @@
-using Microsoft.Extensions.ML;
-using RestAPIDynatrace.ML.Clases;
+using RestAPIDynatrace.ML.Clases;      // JurisdictionInput / JurisdictionPrediction
+using RestAPIDynatrace.ML.Functions;   // MLModelInitializer.GetEngine()
+using RestAPIDynatrace.Models;         // Problem, JurisdictionDto
 
 namespace RestAPIDynatrace.ML.Functions
 {
-    // Usa PredictionEnginePool (mejor rendimiento y thread-safe)
-    public static class MLModelInitializer
+    public static class MLFunctions
     {
-        public static void AddJurisdictionModel(this IServiceCollection services, IConfiguration cfg)
-        {
-            var path = cfg["JurisdictionModel:Path"]; // p.ej. "ML/Models/jurisdiction_model.zip"
-            if (string.IsNullOrWhiteSpace(path))
-                throw new InvalidOperationException("JurisdictionModel:Path no está configurado.");
+        private const string ModelVersion = "jurisdiction_model:1.0";
 
-            services.AddPredictionEnginePool<JurisdictionInput, JurisdictionPrediction>()
-                    .FromFile(modelName: "jurisdiction", filePath: path);
+        // ---- 1) API nueva: recibe un Problem y devuelve JurisdictionDto
+        public static JurisdictionDto ClassifyProblem(Problem p)
+        {
+            var engine = MLModelInitializer.GetEngine();
+
+            // Usa EXACTAMENTE el texto con el que entrenaste el modelo robusto
+            var fullText = BuildText(p);
+
+            var pred = engine.Predict(new JurisdictionInput { Text = fullText });
+
+            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
+            bool isTcs = label == "TCS";
+
+            // tomar Probability si viene; si no, max(Score)
+            float score = pred.Probability;
+            if ((pred.Score?.Length ?? 0) > 0)
+                score = pred.Score.Max();
+
+            return new JurisdictionDto
+            {
+                IsTcs = isTcs,
+                Label = isTcs ? "TCS" : "NO_TCS",
+                Score = score,
+                Version = ModelVersion,
+                ClassifiedAt = DateTimeOffset.UtcNow
+            };
+        }
+
+        // ---- 2) Mantén compatibilidad con tu firma vieja (por título)
+        // Devuelve "TCS" / "NO_TCS" para que no rompa llamadas antiguas
+        public static string PredictIssue(string title)
+        {
+            var engine = MLModelInitializer.GetEngine();
+            var pred = engine.Predict(new JurisdictionInput { Text = title ?? "" });
+            return string.Equals(pred.PredictedLabel, "TCS", StringComparison.OrdinalIgnoreCase) ? "TCS" : "NO_TCS";
+        }
+
+        // ---- Helper: arma el texto como lo usaste en entrenamiento
+        private static string BuildText(Problem p)
+        {
+            var parts = new List<string?>
+            {
+                p.Title,
+                p.Details,          // o p.Description, según tu modelo
+                p.ImpactLevel,      // opcional
+                p.Severity          // opcional
+                // string.Join(' ', p.Tags ?? Enumerable.Empty<string>()) // si aplica
+            };
+            return string.Join(' ', parts.Where(s => !string.IsNullOrWhiteSpace(s))).Trim();
         }
     }
 }
-
 
