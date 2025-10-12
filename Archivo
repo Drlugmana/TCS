@@ -10,3 +10,33 @@ namespace RestAPIDynatrace.Models
         public DateTimeOffset ClassifiedAt { get; set; }
     }
 }
+
+
+
+using Microsoft.ML.Data;
+
+namespace RestAPIDynatrace.ML.Clases
+{
+    // INPUT del nuevo modelo:
+    // Normalmente el modelo se entrenó con UN solo texto (descripción completa).
+    // Si tu pipeline exigiera otro nombre de columna, ajusta el ColumnName.
+    public class JurisdictionInput
+    {
+        [ColumnName("Text")] // <-- cambia a "Description" o el nombre real si tu pipeline lo exige
+        public string Text { get; set; } = "";
+    }
+
+    // OUTPUT del nuevo modelo:
+    // Model Builder suele exponer PredictedLabel + (Score o Probability).
+    public class JurisdictionPrediction
+    {
+        [ColumnName("PredictedLabel")]
+        public string PredictedLabel { get; set; } = "";
+
+        // En algunos modelos viene como vector de puntuaciones (Score)
+        public float[]? Score { get; set; }
+
+        // En otros, como Probability (binario)
+        public float Probability { get; set; }
+    }
+}
