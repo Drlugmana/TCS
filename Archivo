@@ -61,3 +61,45 @@ namespace RestAPIDynatrace.ML.Functions
     }
 }
 
+
+
+
+using System;
+using System.IO;
+using Microsoft.ML;
+using RestAPIDynatrace.ML.Clases; // JurisdictionInput / JurisdictionPrediction
+
+namespace RestAPIDynatrace.ML.Functions
+{
+    /// <summary>
+    /// Inicializador simple (sin PredictionEnginePool).
+    /// Crea un único PredictionEngine para inferencia.
+    /// </summary>
+    public static class MLModelInitializer
+    {
+        // 🔧 Ajusta la ruta si tu zip está en otro sitio
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "ML", "Models", "jurisdiction_model.zip");
+
+        private static readonly MLContext _ml = new(seed: 0);
+        private static PredictionEngine<JurisdictionInput, JurisdictionPrediction>? _engine;
+
+        static MLModelInitializer()
+        {
+            // Carga el modelo y crea el PredictionEngine
+            var model = _ml.Model.Load(_modelPath, out _);
+            _engine = _ml.Model.CreatePredictionEngine<JurisdictionInput, JurisdictionPrediction>(model);
+        }
+
+        /// <summary>
+        /// Devuelve el engine para predecir (usado por MLFunctions).
+        /// </summary>
+        public static PredictionEngine<JurisdictionInput, JurisdictionPrediction> GetEngine()
+        {
+            if (_engine is null)
+                throw new InvalidOperationException("El modelo ML no fue inicializado correctamente.");
+            return _engine;
+        }
+    }
+}
+
