@@ -1,0 +1,12 @@
+JurisdictionDto.cs
+namespace RestAPIDynatrace.Models
+{
+    public class JurisdictionDto
+    {
+        public bool IsTcs { get; set; }
+        public string Label { get; set; } = "";      // "TCS" o "NO_TCS"
+        public float Score { get; set; }             // Probabilidad 0–1
+        public string Version { get; set; } = "";    // Ej: "jurisdiction_model:1.0"
+        public DateTimeOffset ClassifiedAt { get; set; }
+    }
+}
