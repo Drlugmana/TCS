@@ -1,8 +1,8 @@
 import { useEffect, useState } from 'react';
 import { fetchProblemsPage } from '../api/problems';
-import { esTCS } from '../utils/jurisdiction';
+import { esNoTCS } from '../utils/jurisdiction';
 
-export default function TCSProblems() {
+export default function OtherProblems() {
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -11,7 +11,7 @@ export default function TCSProblems() {
     (async () => {
       try {
         const data = await fetchProblemsPage(1, 50);
-        setItems(data.filter(esTCS));
+        setItems(data.filter(esNoTCS));
       } catch (e) {
         setError(e.message);
       } finally {
@@ -22,7 +22,7 @@ export default function TCSProblems() {
 
   if (loading) return <h2>Cargando…</h2>;
   if (error) return <h2 style={{color:'#c00'}}>Error: {error}</h2>;
-  if (items.length === 0) return <h2>No hay problemas TCS actualmente.</h2>;
+  if (items.length === 0) return <h2>No hay problemas de terceros actualmente.</h2>;
 
   return (
     <div>
