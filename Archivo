@@ -1,33 +1,104 @@
-// src/utils/jurisdiction.js
-export function getJurisdictionObject(p) {
-  // Detectar campo válido
-  const j =
-    p?.juris ??
-    p?.Jurisdiction ??
-    p?.jurisdiction ??
-    p?.jurisdictionDto ??
-    null;
+import React from "react";
+import useOpenProblems from "./hooks/useOpenProblems";
+import ProblemCard from "./components/ProblemCard";
+import UsernameInput from "./components/UsernameInput";
+import { useUser } from "./context/UserContext";
+import { calcularCriticidad, getSlaMinutes } from "./utils/slaUtils";
+import { esTCS } from "./utils/jurisdiction";
 
-  // Si viene como string ("TCS" o "No TCS")
-  if (typeof j === "string") {
-    const label = j.trim().toUpperCase();
-    const isTcs = label.includes("TCS") && !label.includes("NO");
-    return { isTcs, label };
-  }
+export default function TCSProblems() {
+  const { problems, loading, error } = useOpenProblems(5000);
+  const { username } = useUser();
 
-  // Si viene como objeto (por compatibilidad)
-  if (j && typeof j === "object") {
-    const label = (j.label ?? j.name ?? "").toString().toUpperCase();
-    const isTcs =
-      typeof j.isTcs === "boolean"
-        ? j.isTcs
-        : label.includes("TCS") && !label.includes("NO");
-    return { isTcs, label };
-  }
+  // 🔧 Nuevo filtro
+  const tcsProblems = problems.filter(esTCS);
 
-  return { isTcs: undefined, label: "" };
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+  if (tcsProblems.length === 0)
+    return <h2>No hay problemas TCS actualmente.</h2>;
+
+  // Ordenar por SLA
+  const sortedProblems = [...tcsProblems].sort((a, b) => {
+    const startA = new Date(a.startTime);
+    const startB = new Date(b.startTime);
+
+    const criticidadA = calcularCriticidad(a.affectedCI || []);
+    const criticidadB = calcularCriticidad(b.affectedCI || []);
+
+    const slaA = getSlaMinutes(criticidadA) * 60 * 1000;
+    const slaB = getSlaMinutes(criticidadB) * 60 * 1000;
+
+    const remainingA = slaA - (Date.now() - startA.getTime());
+    const remainingB = slaB - (Date.now() - startB.getTime());
+
+    return remainingA - remainingB;
+  });
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h1 style={{ textAlign: "center" }}>Problemas TCS</h1>
+      <UsernameInput />
+      {sortedProblems.map((problem) => (
+        <ProblemCard
+          key={problem.problemId}
+          problem={problem}
+          username={username}
+        />
+      ))}
+    </div>
+  );
 }
 
-// Filtros globales reutilizables
-export const esTCS = (p) => getJurisdictionObject(p).isTcs === true;
-export const esNoTCS = (p) => getJurisdictionObject(p).isTcs === false;
+------
+
+
+import React from "react";
+import useOpenProblems from "./hooks/useOpenProblems";
+import ProblemCard from "./components/ProblemCard";
+import UsernameInput from "./components/UsernameInput";
+import { useUser } from "./context/UserContext";
+import { calcularCriticidad, getSlaMinutes } from "./utils/slaUtils";
+import { esNoTCS } from "./utils/jurisdiction";
+
+export default function OtherProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(5000);
+
+  const otherProblems = problems.filter(esNoTCS);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+  if (otherProblems.length === 0)
+    return <h2>No hay problemas de terceros actualmente.</h2>;
+
+  const sortedProblems = [...otherProblems].sort((a, b) => {
+    const startA = new Date(a.startTime);
+    const startB = new Date(b.startTime);
+
+    const criticidadA = calcularCriticidad(a.affectedCI || []);
+    const criticidadB = calcularCriticidad(b.affectedCI || []);
+
+    const slaA = getSlaMinutes(criticidadA) * 60 * 1000;
+    const slaB = getSlaMinutes(criticidadB) * 60 * 1000;
+
+    const remainingA = slaA - (Date.now() - startA.getTime());
+    const remainingB = slaB - (Date.now() - startB.getTime());
+
+    return remainingA - remainingB;
+  });
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h1 style={{ textAlign: "center" }}>Problemas Otros</h1>
+      <UsernameInput />
+      {sortedProblems.map((problem) => (
+        <ProblemCard
+          key={problem.problemId}
+          problem={problem}
+          username={username}
+        />
+      ))}
+    </div>
+  );
+}
