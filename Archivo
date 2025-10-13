@@ -1,1 +1,165 @@
 
+// src/components/ProblemCard.jsx
+import React, { useEffect, useState } from 'react';
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  calcularCriticidad,
+  getButtonColorByPercent,
+} from '../utils/jurisdiction';
+
+export default function ProblemCard({ problem, username }) {
+  // --- 1) Destructuring seguro de los campos que vienen del backend
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    environment,
+    affectedCI = [],
+    tenant,
+    problemId,
+    jurisdiction, // <<--- nuevo objeto del backend { isTcs: bool, label: string, confidence: float, score: [...] }
+  } = problem ?? {};
+
+  // --- 2) Lógica de TCS / NO TCS (prioriza booleano; si no existe, usa el label)
+  const isTcs =
+    typeof jurisdiction?.isTcs === 'boolean'
+      ? jurisdiction.isTcs
+      : (jurisdiction?.label ?? '').toString().toUpperCase() === 'TCS';
+
+  const label = isTcs ? 'TCS' : 'NO TCS';
+
+  // confidence puede venir 0..1 o en %; aquí lo mostramos como %
+  const confidence =
+    typeof jurisdiction?.confidence === 'number'
+      ? jurisdiction.confidence <= 1
+        ? Math.round(jurisdiction.confidence * 100)
+        : Math.round(jurisdiction.confidence)
+      : null;
+
+  // --- 3) Badge de color (igual diseño)
+  const badgeStyle = {
+    padding: '0.25rem 0.5rem',
+    borderRadius: '999px',
+    fontSize: '0.8rem',
+    fontWeight: 700,
+    backgroundColor: isTcs ? '#1b5e20' : '#b71c1c',
+    color: '#fff',
+    marginRight: '0.5rem',
+  };
+
+  // --- 4) Cálculos existentes (SLA, timer, colores)
+  const criticidad = calcularCriticidad(affectedCI);
+  const criticidadIcon = `/severidad${criticidad}.svg`;
+  const environmentIcon =
+    environment === 'Productivo' ? '/icon-productivo.svg' : '/icon-noproductivo.svg';
+
+  const slaMinutes = getSlaMinutes(criticidad);
+  const start = new Date(startTime);
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const elapsedMs = now - start;
+  const elapsedMinutes = elapsedMs / 60000;
+  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
+  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const totalSeconds = Math.floor(minutes * 60);
+    const secs = totalSeconds % 60;
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const hrs = Math.floor(totalSeconds / 3600);
+    return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(
+      secs
+    ).padStart(2, '0')}`;
+  };
+
+  const uniqueNames = [...new Set((affectedCI ?? []).map((ci) => ci.name).filter(Boolean))];
+  const equipos = uniqueNames.join(', ');
+
+  const isDisabled = !username;
+
+  // --- 5) Link a Dynatrace (siempre que vengan tenant y problemId)
+  const dynatraceUrl =
+    tenant && problemId
+      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+      : null;
+
+  // --- 6) Render (mismo diseño)
+  return (
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderRadius: '12px',
+        padding: '1rem 1.5rem',
+        marginBottom: '1rem',
+        backgroundColor: bgColor,
+        boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+      }}
+    >
+      {/* Iconos */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
+        <img src={criticidadIcon} alt={`S${criticidad}`} width="40" height="40" title={`S${criticidad}`} />
+        <img src={environmentIcon} alt={environment} width="36" height="36" title={environment} />
+      </div>
+
+      {/* Información del problema */}
+      <div style={{ flex: 1, paddingLeft: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <span style={badgeStyle}>{label}</span>
+          {typeof confidence === 'number' && (
+            <span style={{ opacity: 0.75 }}>confianza: <strong>{confidence}%</strong></span>
+          )}
+        </div>
+
+        <p style={{ margin: 0 }}>
+          <strong>Severidad Dynatrace:</strong> {severityLevel}
+        </p>
+        <p style={{ margin: 0 }}>
+          <strong>Impacto:</strong> {impactLevel}
+        </p>
+        <p style={{ margin: 0 }}>
+          <strong>Inicio:</strong> {start.toLocaleString()}
+        </p>
+        <p style={{ margin: 0 }}>
+          <strong>Criticidad CI:</strong> {criticidad}
+        </p>
+        <p style={{ margin: 0 }}>
+          <strong>Equipos afectados:</strong> {equipos || '—'}
+        </p>
+      </div>
+
+      {/* Temporizador y botón */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{formatTime(remainingMinutes)}</div>
+
+        <button
+          disabled={isDisabled || !dynatraceUrl}
+          onClick={() => dynatraceUrl && window.open(dynatraceUrl, '_blank')}
+          style={{
+            padding: '0.5rem 1rem',
+            borderRadius: '6px',
+            color: '#fff',
+            border: 'none',
+            backgroundColor: isDisabled || !dynatraceUrl ? '#8b8b8b' : buttonColor,
+            cursor: isDisabled || !dynatraceUrl ? 'not-allowed' : 'pointer',
+            marginTop: 8,
+          }}
+          title={!username ? 'Ingresa tu usuario para habilitar' : 'Revisar en Dynatrace'}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
