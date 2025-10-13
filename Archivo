@@ -7,27 +7,35 @@ public IActionResult Health([FromServices] IConfiguration cfg)
 
     var results = new List<string>();
 
-    // 1) Modelo en disco
-    results.Add(File.Exists(full) ? "Model: OK" : $"Model: MISSING at {full}");
+    // 1) Verificación del modelo en disco
+    if (System.IO.File.Exists(full))
+        results.Add($"Model: OK ✅ (found at {full})");
+    else
+        results.Add($"Model: MISSING ❌ (expected at {full})");
 
-    // 2) Inference mínima (sin red)
+    // 2) Verificación de inferencia del modelo ML
     try
     {
-        var eng = MLModelInitializer.GetEngine(); // o usa tu pool
-        var pred = eng.Predict(new JurisdictionInput { Text = "ping" });
-        results.Add($"Inference: OK ({pred.PredictedLabel})");
+        var engine = MLModelInitializer.GetEngine();
+        var pred = engine.Predict(new JurisdictionInput { Text = "test example" });
+        results.Add($"Inference: OK ✅ (PredictedLabel = {pred.PredictedLabel})");
     }
-    catch (Exception ex) { results.Add($"Inference: FAIL ({ex.GetType().Name})"); }
+    catch (Exception ex)
+    {
+        results.Add($"Inference: FAIL ❌ ({ex.GetType().Name}: {ex.Message})");
+    }
 
-    // 3) Conectividad externa (opcional, si usas API externas)
+    // 3) (Opcional) Comprobación de conectividad externa
     try
     {
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        // Cambia por tu base URL real
-        var resp = http.GetAsync("https://tu-api-externa/health").Result;
-        results.Add($"External: {(resp.IsSuccessStatusCode ? "OK" : $"FAIL ({(int)resp.StatusCode})")}");
+        var resp = http.GetAsync("https://www.google.com").Result;
+        results.Add(resp.IsSuccessStatusCode ? "Internet: OK 🌐" : "Internet: FAIL ❌");
     }
-    catch (Exception ex) { results.Add($"External: FAIL ({ex.GetType().Name})"); }
+    catch (Exception ex)
+    {
+        results.Add($"Internet: FAIL ❌ ({ex.GetType().Name})");
+    }
 
-    return Ok(new { checks = results });
+    return Ok(new { results });
 }
