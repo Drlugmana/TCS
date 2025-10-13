@@ -1,149 +1,33 @@
 
-// using ... (deja los usings que ya tienes arriba)
-
-namespace RestAPIDynatrace.ML.Functions
+[HttpGet("health")]
+public IActionResult Health([FromServices] IConfiguration cfg)
 {
-    public static class MLFunctions
+    var rel = cfg["JurisdictionModel:Path"] ?? "ML/Models/jurisdiction_model.zip";
+    var full = Path.GetFullPath(rel, AppContext.BaseDirectory);
+
+    var results = new List<string>();
+
+    // 1) Modelo en disco
+    results.Add(File.Exists(full) ? "Model: OK" : $"Model: MISSING at {full}");
+
+    // 2) Inference mínima (sin red)
+    try
     {
-        private const string ModelVersion = "jurisdiction_model:1.0";
-
-        // ⬅️ Overload NUEVO para RestAPIDynatrace.Models.Problem
-        public static JurisdictionDto ClassifyProblem(Problem p)
-        {
-            var engine   = MLModelInitializer.GetEngine();
-            var fullText = BuildTextFromObject(p);
-
-            var pred  = engine.Predict(new JurisdictionInput { Text = fullText });
-            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
-            var isTcs = label == "TCS";
-
-            float score = pred.Probability;
-            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
-
-            return new JurisdictionDto
-            {
-                IsTcs        = isTcs,
-                Label        = isTcs ? "TCS" : "NO_TCS",
-                Score        = score,
-                Version      = ModelVersion,
-                ClassifiedAt = DateTimeOffset.UtcNow
-            };
-        }
-
-        // ⬅️ Tu método que ya tenías (para ProblemDynatraceResponse):
-        public static JurisdictionDto ClassifyProblem(ProblemDynatraceResponse p)
-        {
-            var engine   = MLModelInitializer.GetEngine();
-            var fullText = BuildTextFromObject(p);
-
-            var pred  = engine.Predict(new JurisdictionInput { Text = fullText });
-            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
-            var isTcs = label == "TCS";
-
-            float score = pred.Probability;
-            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
-
-            return new JurisdictionDto
-            {
-                IsTcs        = isTcs,
-                Label        = isTcs ? "TCS" : "NO_TCS",
-                Score        = score,
-                Version      = ModelVersion,
-                ClassifiedAt = DateTimeOffset.UtcNow
-            };
-        }
-
-        // ======= Builder genérico que funciona para ambos modelos =======
-        private static string BuildTextFromObject(object obj)
-        {
-            var sb = new System.Text.StringBuilder();
-
-            // helpers locales
-            static void Append(System.Text.StringBuilder s, string? t)
-            { if (!string.IsNullOrWhiteSpace(t)) { if (s.Length > 0) s.Append(' '); s.Append(t); } }
-
-            static string? GetProp(object o, params string[] names)
-            {
-                var t = o.GetType();
-                foreach (var n in names)
-                {
-                    var pi = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
-                    if (pi == null) continue;
-                    var val = pi.GetValue(o)?.ToString();
-                    if (!string.IsNullOrWhiteSpace(val)) return val;
-                }
-                return null;
-            }
-
-            static IEnumerable<object> GetList(object o, params string[] names)
-            {
-                var t = o.GetType();
-                foreach (var n in names)
-                {
-                    var pi = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
-                    if (pi == null) continue;
-                    if (pi.GetValue(o) is System.Collections.IEnumerable e)
-                        foreach (var it in e) if (it != null) yield return it;
-                }
-            }
-
-            static void AppendFromList(System.Text.StringBuilder s, IEnumerable<string>? items)
-            { if (items == null) return; Append(s, string.Join(' ', items.Where(x => !string.IsNullOrWhiteSpace(x)))); }
-
-            static void AppendFromObjList(System.Text.StringBuilder s, IEnumerable<object> items, params string[] candidateProps)
-            {
-                foreach (var it in items)
-                {
-                    var v = GetProp(it, candidateProps);
-                    if (!string.IsNullOrWhiteSpace(v)) Append(s, v);
-                }
-            }
-
-            // campos comunes en ambos modelos (según tus capturas)
-            Append(sb, GetProp(obj, "title"));
-            Append(sb, GetProp(obj, "shortDescription"));
-            Append(sb, GetProp(obj, "impactLevel"));
-            Append(sb, GetProp(obj, "severityLevel"));
-            Append(sb, GetProp(obj, "status"));
-
-            // incidentServiceNow
-            var isn = GetProp(obj, "incidentServiceNow");
-            var isnObj = (isn == null) ? null : obj.GetType().GetProperty("incidentServiceNow",
-                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
-            if (isnObj != null)
-            {
-                Append(sb, GetProp(isnObj, "ShortDescription", "Description", "Resumen", "Detalle"));
-                Append(sb, GetProp(isnObj, "Number", "Ticket"));
-            }
-
-            // evidenceDetails / recentComments / impactAnalysis
-            var evObj = obj.GetType().GetProperty("evidenceDetails", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
-            if (evObj != null) Append(sb, GetProp(evObj, "Details", "Description", "Text", "EvidenceText"));
-
-            var rcObj = obj.GetType().GetProperty("recentComments", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
-            if (rcObj != null) Append(sb, GetProp(rcObj, "Comments", "Text", "LastComment"));
-
-            var iaObj = obj.GetType().GetProperty("impactAnalysis", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
-            if (iaObj != null) Append(sb, GetProp(iaObj, "Summary", "Description", "Text"));
-
-            // listas de objetos
-            AppendFromObjList(sb, GetList(obj, "affectedEntities"), "displayName", "name", "entityName", "hostname", "serverName");
-            AppendFromObjList(sb, GetList(obj, "impactedEntities"), "displayName", "name", "entityName", "hostname", "serverName");
-            AppendFromObjList(sb, GetList(obj, "entityTags"), "key", "value", "context", "stringRepresentation");
-            AppendFromObjList(sb, GetList(obj, "managementZones"), "name", "id");
-
-            // listas de strings
-            var clusters   = obj.GetType().GetProperty("clusterName", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj) as IEnumerable<string>;
-            var namespaces = obj.GetType().GetProperty("namespaceName", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj) as IEnumerable<string>;
-            AppendFromList(sb, clusters);
-            AppendFromList(sb, namespaces);
-
-            // contexto
-            Append(sb, GetProp(obj, "tenant"));
-            Append(sb, GetProp(obj, "environment"));
-            Append(sb, GetProp(obj, "displayId"));
-
-            return sb.ToString().Trim();
-        }
+        var eng = MLModelInitializer.GetEngine(); // o usa tu pool
+        var pred = eng.Predict(new JurisdictionInput { Text = "ping" });
+        results.Add($"Inference: OK ({pred.PredictedLabel})");
     }
+    catch (Exception ex) { results.Add($"Inference: FAIL ({ex.GetType().Name})"); }
+
+    // 3) Conectividad externa (opcional, si usas API externas)
+    try
+    {
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
+        // Cambia por tu base URL real
+        var resp = http.GetAsync("https://tu-api-externa/health").Result;
+        results.Add($"External: {(resp.IsSuccessStatusCode ? "OK" : $"FAIL ({(int)resp.StatusCode})")}");
+    }
+    catch (Exception ex) { results.Add($"External: FAIL ({ex.GetType().Name})"); }
+
+    return Ok(new { checks = results });
 }
