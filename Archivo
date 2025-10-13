@@ -1,66 +1,51 @@
- // src/utils/jurisdiction.js
-export function getJurisdictionObject(p) {
-  // intenta varias rutas posibles (casing y nombres distintos)
-  const j =
-    p?.jurisdiction ??
-    p?.Jurisdiction ??
-    p?.jurisdiccion ??
-    p?.jurisdiccionDto ??
-    p?.jurisdictionDto ??
-    null;
+// src/api/problems.js
+const BASE = import.meta.env.VITE_API_URL?.replace(/\/+$/, ''); // sin slash final
+if (!BASE) throw new Error('VITE_API_URL no está definida');
 
-  // Si es string, normaliza a objeto
-  if (typeof j === 'string') {
-    const label = j.trim().toUpperCase();
-    return {
-      isTcs: label === 'TCS',
-      label,
-      score: undefined,
-      version: undefined,
-      classifiedAt: undefined,
-    };
+const PROBLEMS_BASE = `${BASE}/api/Problems`;
+
+async function toJsonOrThrow(res, ctx) {
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`${ctx} (HTTP ${res.status}) ${text}`.trim());
   }
-
-  // Si es boolean en el root (algunas APIs lo exponen plano)
-  if (typeof p?.isTcs === 'boolean') {
-    return {
-      isTcs: p.isTcs,
-      label: p.isTcs ? 'TCS' : 'NO_TCS',
-      score: p.score ?? undefined,
-      version: p.version ?? undefined,
-      classifiedAt: p.classifiedAt ?? undefined,
-    };
-  }
-
-  // Si es un objeto, intenta leer sus campos más comunes
-  if (j && typeof j === 'object') {
-    const label =
-      (j.label ?? j.Label ?? '').toString().trim().toUpperCase();
-    const isTcs =
-      typeof j.isTcs === 'boolean'
-        ? j.isTcs
-        : label
-          ? label === 'TCS'
-          : undefined;
-
-    return {
-      isTcs,
-      label: label || (isTcs === true ? 'TCS' : isTcs === false ? 'NO_TCS' : ''),
-      score: j.score ?? j.Score,
-      version: j.version ?? j.Version,
-      classifiedAt: j.classifiedAt ?? j.ClassifiedAt,
-    };
-  }
-
-  // Si no hay nada reconocible
-  return {
-    isTcs: undefined,
-    label: '',
-    score: undefined,
-    version: undefined,
-    classifiedAt: undefined,
-  };
+  return res.json();
 }
 
-export const esTCS = (p) => getJurisdictionObject(p).isTcs === true;
-export const esNoTCS = (p) => getJurisdictionObject(p).isTcs === false;
+function pickArray(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.items)) return payload.items;
+  if (Array.isArray(payload?.data)) return payload.data;
+  if (Array.isArray(payload?.result)) return payload.result;
+  return [];
+}
+
+export async function fetchProblemsPage(page = 1, pageSize = 50) {
+  const url = `${PROBLEMS_BASE}?page=${page}&pageSize=${pageSize}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const json = await toJsonOrThrow(res, `Error al obtener problemas de Productivo, página ${page}`);
+  const arr = pickArray(json);
+
+  // ayuda para depurar si viene vacío
+  if (arr.length === 0) {
+    console.warn('[fetchProblemsPage] Vacío. JSON recibido:', json);
+  } else {
+    console.debug('[fetchProblemsPage] Ejemplo problema:', arr[0]);
+  }
+  return arr;
+}
+
+// Si tienes endpoints específicos, ajusta aquí:
+export async function fetchAllOpenProblemIds() {
+  const url = `${PROBLEMS_BASE}/OpenProblemIds`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const json = await toJsonOrThrow(res, 'Error al obtener OpenProblemIds');
+  return pickArray(json);
+}
+
+export async function fetchProblemById(id) {
+  const url = `${PROBLEMS_BASE}/${encodeURIComponent(id)}`;
+  const res = await fetch(url, { headers: { Accept: 'application/json' } });
+  const json = await toJsonOrThrow(res, `Error al obtener problema ${id}`);
+  return json;
+}
