@@ -1,1 +1,32 @@
+import { useEffect, useRef, useState } from 'react';
+import { fetchAllOpenProblemsDetailed } from '../api/problems';
 
+export default function useOpenProblems(pollMs = 5000) {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const timerRef = useRef(null);
+
+  async function loadOnce() {
+    try {
+      setLoading(true);
+      setError('');
+      const all = await fetchAllOpenProblemsDetailed();
+      setProblems(all);
+    } catch (e) {
+      setError(e.message || String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    loadOnce();
+    if (pollMs > 0) {
+      timerRef.current = setInterval(loadOnce, pollMs);
+      return () => clearInterval(timerRef.current);
+    }
+  }, [pollMs]);
+
+  return { problems, loading, error };
+}
