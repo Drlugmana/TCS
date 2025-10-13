@@ -1,42 +1,33 @@
+// src/utils/jurisdiction.js
 export function getJurisdictionObject(p) {
-  // Detecta distintos formatos posibles del backend
+  // Detectar campo válido
   const j =
-    p?.jurisdiction ??
+    p?.juris ??
     p?.Jurisdiction ??
+    p?.jurisdiction ??
     p?.jurisdictionDto ??
-    p?.JurisdictionDto ??
-    p?.jurisdictionModel ??
-    p?.Jurisdiccion ??
     null;
 
-  // Si viene como texto
+  // Si viene como string ("TCS" o "No TCS")
   if (typeof j === "string") {
     const label = j.trim().toUpperCase();
-    return { isTcs: label.includes("TCS"), label };
+    const isTcs = label.includes("TCS") && !label.includes("NO");
+    return { isTcs, label };
   }
 
-  // Si viene como objeto con banderas o etiquetas
+  // Si viene como objeto (por compatibilidad)
   if (j && typeof j === "object") {
-    const label =
-      (j.label ?? j.Label ?? j.nombre ?? j.name ?? "").toString().toUpperCase();
+    const label = (j.label ?? j.name ?? "").toString().toUpperCase();
     const isTcs =
       typeof j.isTcs === "boolean"
         ? j.isTcs
         : label.includes("TCS") && !label.includes("NO");
-    return { isTcs, label: label || (isTcs ? "TCS" : "NO_TCS") };
+    return { isTcs, label };
   }
 
-  // Si la entidad tiene campos directos
-  if (typeof p?.isTcs === "boolean") {
-    return { isTcs: p.isTcs, label: p.isTcs ? "TCS" : "NO_TCS" };
-  }
-
-  // Caso por defecto
   return { isTcs: undefined, label: "" };
 }
 
-// Filtros globales
+// Filtros globales reutilizables
 export const esTCS = (p) => getJurisdictionObject(p).isTcs === true;
 export const esNoTCS = (p) => getJurisdictionObject(p).isTcs === false;
-
-
