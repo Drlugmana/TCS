@@ -1,1 +1,66 @@
 
+// src/utils/jurisdiction.js
+
+/**
+ * Devuelve el tiempo de SLA (en minutos) según la criticidad.
+ * S1 = 30 min, S2 = 60 min, S3 = 120 min, S4 = 240 min
+ */
+export function getSlaMinutes(criticidad) {
+  switch (criticidad) {
+    case 'S1':
+    case 1:
+      return 30;
+    case 'S2':
+    case 2:
+      return 60;
+    case 'S3':
+    case 3:
+      return 120;
+    case 'S4':
+    case 4:
+      return 240;
+    default:
+      return 60; // valor por defecto
+  }
+}
+
+/**
+ * Devuelve color de fondo (tarjeta) según el porcentaje restante del SLA.
+ * Verde → Amarillo → Rojo
+ */
+export function getColorByPercent(percent) {
+  if (percent >= 75) return '#b9f6ca';   // verde claro
+  if (percent >= 50) return '#fff59d';   // amarillo
+  if (percent >= 25) return '#ffcc80';   // naranja
+  return '#ef9a9a';                      // rojo
+}
+
+/**
+ * Devuelve color del botón según el porcentaje restante del SLA.
+ */
+export function getButtonColorByPercent(percent) {
+  if (percent >= 75) return '#2e7d32';   // verde oscuro
+  if (percent >= 50) return '#f9a825';   // amarillo oscuro
+  if (percent >= 25) return '#ef6c00';   // naranja oscuro
+  return '#c62828';                      // rojo oscuro
+}
+
+/**
+ * Calcula la criticidad (S1-S4) según los equipos afectados o severidad.
+ * Si no hay datos, devuelve "S4" por defecto.
+ */
+export function calcularCriticidad(affectedCI = []) {
+  if (!Array.isArray(affectedCI) || affectedCI.length === 0) {
+    return 'S4';
+  }
+
+  // Busca la criticidad más alta entre los CIs
+  const criticidades = affectedCI
+    .map(ci => (ci.criticidad || ci.criticality || '').toString().toUpperCase())
+    .filter(c => ['S1', 'S2', 'S3', 'S4'].includes(c));
+
+  if (criticidades.includes('S1')) return 'S1';
+  if (criticidades.includes('S2')) return 'S2';
+  if (criticidades.includes('S3')) return 'S3';
+  return 'S4';
+}
