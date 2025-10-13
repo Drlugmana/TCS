@@ -1,1 +1,65 @@
-VITE_API_URL=https://fpq6rkv3-44334.use.devtunnels.ms
+// src/api/problems.js
+// Se conecta al backend REST API Dynatrace
+
+const BASE = (import.meta.env && import.meta.env.VITE_API_URL)
+  ? String(import.meta.env.VITE_API_URL).replace(/\/$/, '')
+  : '';
+
+const PROBLEMS_BASE = BASE ? `${BASE}/api/Problems` : '';
+
+console.log('🔗 BASE from .env =', BASE);
+console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
+
+// Función genérica de fetch con manejo de errores
+async function getJson(url, errMsg) {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) {
+      const text = await r.text().catch(() => '');
+      throw new Error(`${errMsg} (HTTP ${r.status}) ${text}`);
+    }
+    return await r.json();
+  } catch (error) {
+    console.error(`❌ ${errMsg}:`, error);
+    throw error;
+  }
+}
+
+// ========================
+// FUNCIONES PRINCIPALES
+// ========================
+
+// 1️⃣ Obtener todos los problemas
+export async function fetchAllOpenProblems() {
+  if (!PROBLEMS_BASE)
+    throw new Error('VITE_API_URL no está definida. Revisa tu archivo .env y reinicia npm run dev.');
+  return getJson(`${PROBLEMS_BASE}`, 'Error al obtener problemas');
+}
+
+// 2️⃣ Obtener problemas detallados (verifica si la respuesta es array)
+export async function fetchAllOpenProblemsDetailed() {
+  const list = await fetchAllOpenProblems();
+  return Array.isArray(list) ? list : [];
+}
+
+// 3️⃣ Filtrar solo los problemas TCS
+export async function fetchTcsProblems() {
+  const all = await fetchAllOpenProblemsDetailed();
+  return all.filter((p) => {
+    const j = p?.jurisdiction ?? p?.Jurisdiction;
+    if (typeof j === 'string') return j.trim().toUpperCase().includes('TCS');
+    if (j && typeof j === 'object') return j.isTcs === true || j.IsTcs === true;
+    return false;
+  });
+}
+
+// 4️⃣ Filtrar los NO TCS
+export async function fetchNoTcsProblems() {
+  const all = await fetchAllOpenProblemsDetailed();
+  return all.filter((p) => {
+    const j = p?.jurisdiction ?? p?.Jurisdiction;
+    if (typeof j === 'string') return !j.trim().toUpperCase().includes('TCS');
+    if (j && typeof j === 'object') return j.isTcs === false || j.IsTcs === false;
+    return true;
+  });
+}
