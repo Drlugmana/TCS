@@ -1,41 +1,206 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using RestAPIDynatrace.ML.Clases;       // JurisdictionInput / JurisdictionPrediction
+using RestAPIDynatrace.Models;          // Problem, ProblemDynatraceResponse, JurisdictionDto
 
-[HttpGet("health")]
-public IActionResult Health([FromServices] IConfiguration cfg)
+namespace RestAPIDynatrace.ML.Functions
 {
-    var rel = cfg["JurisdictionModel:Path"] ?? "ML/Models/jurisdiction_model.zip";
-    var full = Path.GetFullPath(rel, AppContext.BaseDirectory);
-
-    var results = new List<string>();
-
-    // 1) Verificación del modelo en disco
-    if (System.IO.File.Exists(full))
-        results.Add($"Model: OK ✅ (found at {full})");
-    else
-        results.Add($"Model: MISSING ❌ (expected at {full})");
-
-    // 2) Verificación de inferencia del modelo ML
-    try
+    public static class MLFunctions
     {
-        var engine = MLModelInitializer.GetEngine();
-        var pred = engine.Predict(new JurisdictionInput { Text = "test example" });
-        results.Add($"Inference: OK ✅ (PredictedLabel = {pred.PredictedLabel})");
-    }
-    catch (Exception ex)
-    {
-        results.Add($"Inference: FAIL ❌ ({ex.GetType().Name}: {ex.Message})");
-    }
+        private const string ModelVersion = "jurisdiction_model:1.0";
 
-    // 3) (Opcional) Comprobación de conectividad externa
-    try
-    {
-        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(5) };
-        var resp = http.GetAsync("https://www.google.com").Result;
-        results.Add(resp.IsSuccessStatusCode ? "Internet: OK 🌐" : "Internet: FAIL ❌");
-    }
-    catch (Exception ex)
-    {
-        results.Add($"Internet: FAIL ❌ ({ex.GetType().Name})");
-    }
+        // ============================================================
+        // 1) Clasificación para RestAPIDynatrace.Models.Problem
+        // ============================================================
+        public static JurisdictionDto ClassifyProblem(Problem p)
+        {
+            var engine   = MLModelInitializer.GetEngine();
+            var fullText = BuildTextFromObject(p);
 
-    return Ok(new { results });
+            // El modelo fue entrenado con una columna llamada ShortDescription
+            var pred = engine.Predict(new JurisdictionInput
+            {
+                ShortDescription = string.IsNullOrWhiteSpace(GetProp(p, "ShortDescription", "shortDescription"))
+                    ? fullText
+                    : (GetProp(p, "ShortDescription", "shortDescription") ?? string.Empty)
+            });
+
+            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
+            bool isTcs = label == "TCS";
+
+            float score = pred.Probability;
+            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
+
+            return new JurisdictionDto
+            {
+                IsTcs        = isTcs,
+                Label        = isTcs ? "TCS" : "NO_TCS",
+                Score        = score,
+                Version      = ModelVersion,
+                ClassifiedAt = DateTimeOffset.UtcNow
+            };
+        }
+
+        // ============================================================
+        // 2) Clasificación para ProblemDynatraceResponse
+        // ============================================================
+        public static JurisdictionDto ClassifyProblem(ProblemDynatraceResponse p)
+        {
+            var engine   = MLModelInitializer.GetEngine();
+            var fullText = BuildTextFromObject(p);
+
+            var pred = engine.Predict(new JurisdictionInput
+            {
+                ShortDescription = string.IsNullOrWhiteSpace(GetProp(p, "ShortDescription", "shortDescription"))
+                    ? fullText
+                    : (GetProp(p, "ShortDescription", "shortDescription") ?? string.Empty)
+            });
+
+            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
+            bool isTcs = label == "TCS";
+
+            float score = pred.Probability;
+            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
+
+            return new JurisdictionDto
+            {
+                IsTcs        = isTcs,
+                Label        = isTcs ? "TCS" : "NO_TCS",
+                Score        = score,
+                Version      = ModelVersion,
+                ClassifiedAt = DateTimeOffset.UtcNow
+            };
+        }
+
+        // ============================================================
+        // 3) Compatibilidad: si todavía llaman PredictIssue(title)
+        // ============================================================
+        public static string PredictIssue(string title)
+        {
+            var engine = MLModelInitializer.GetEngine();
+            var pred   = engine.Predict(new JurisdictionInput
+            {
+                ShortDescription = title ?? string.Empty
+            });
+
+            return string.Equals(pred.PredictedLabel, "TCS", StringComparison.OrdinalIgnoreCase)
+                ? "TCS"
+                : "NO_TCS";
+        }
+
+        // ============================================================
+        // Helpers robustos (tolerantes a null y nombres distintos)
+        // ============================================================
+
+        // Construye un texto rico (fallback si no hay ShortDescription)
+        private static string BuildTextFromObject(object obj)
+        {
+            var sb = new StringBuilder();
+
+            // cabecera
+            Append(sb, GetProp(obj, "title"));
+            Append(sb, GetProp(obj, "shortDescription", "ShortDescription"));
+            Append(sb, GetProp(obj, "impactLevel"));
+            Append(sb, GetProp(obj, "severityLevel"));
+            Append(sb, GetProp(obj, "status"));
+
+            // incidentServiceNow: ShortDescription/Description + Number
+            var isn = GetObj(obj, "incidentServiceNow");
+            if (isn != null)
+            {
+                Append(sb, GetProp(isn, "ShortDescription", "Description", "Resumen", "Detalle"));
+                Append(sb, GetProp(isn, "Number", "Ticket"));
+            }
+
+            // evidenceDetails / recentComments / impactAnalysis
+            var ev = GetObj(obj, "evidenceDetails");
+            if (ev != null) Append(sb, GetProp(ev, "Details", "Description", "Text", "EvidenceText"));
+
+            var rc = GetObj(obj, "recentComments");
+            if (rc != null) Append(sb, GetProp(rc, "Comments", "Text", "LastComment"));
+
+            var ia = GetObj(obj, "impactAnalysis");
+            if (ia != null) Append(sb, GetProp(ia, "Summary", "Description", "Text"));
+
+            // listas de objetos
+            AppendFromObjList(sb, GetList(obj, "affectedEntities"),  "displayName", "name", "entityName", "hostname", "serverName");
+            AppendFromObjList(sb, GetList(obj, "impactedEntities"),  "displayName", "name", "entityName", "hostname", "serverName");
+            AppendFromObjList(sb, GetList(obj, "entityTags"),        "key", "value", "context", "stringRepresentation");
+            AppendFromObjList(sb, GetList(obj, "managementZones"),   "name", "id");
+
+            // listas de strings
+            AppendFromStrList(sb, GetStrList(obj, "clusterName"));
+            AppendFromStrList(sb, GetStrList(obj, "namespaceName"));
+
+            // contexto
+            Append(sb, GetProp(obj, "tenant"));
+            Append(sb, GetProp(obj, "environment"));
+            Append(sb, GetProp(obj, "displayId"));
+
+            return sb.ToString().Trim();
+        }
+
+        private static void Append(StringBuilder sb, string? s)
+        {
+            if (!string.IsNullOrWhiteSpace(s))
+            {
+                if (sb.Length > 0) sb.Append(' ');
+                sb.Append(s);
+            }
+        }
+
+        private static string? GetProp(object obj, params string[] names)
+        {
+            var t = obj.GetType();
+            foreach (var n in names)
+            {
+                var pi = t.GetProperty(n, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+                if (pi == null) continue;
+                var val = pi.GetValue(obj)?.ToString();
+                if (!string.IsNullOrWhiteSpace(val)) return val;
+            }
+            return null;
+        }
+
+        private static object? GetObj(object obj, string name)
+        {
+            var pi = obj.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+            return pi?.GetValue(obj);
+        }
+
+        private static IEnumerable<object> GetList(object obj, string name)
+        {
+            var pi = obj.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+            if (pi?.GetValue(obj) is System.Collections.IEnumerable e)
+            {
+                foreach (var it in e) if (it != null) yield return it;
+            }
+        }
+
+        private static IEnumerable<string> GetStrList(object obj, string name)
+        {
+            var pi = obj.GetType().GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
+            if (pi?.GetValue(obj) is IEnumerable<string> list) return list.Where(s => !string.IsNullOrWhiteSpace(s));
+            return Enumerable.Empty<string>();
+        }
+
+        private static void AppendFromObjList(StringBuilder sb, IEnumerable<object> items, params string[] candidateProps)
+        {
+            foreach (var it in items)
+            {
+                var v = GetProp(it, candidateProps);
+                Append(sb, v);
+            }
+        }
+
+        private static void AppendFromStrList(StringBuilder sb, IEnumerable<string> items)
+        {
+            var txt = string.Join(' ', items.Where(s => !string.IsNullOrWhiteSpace(s)));
+            Append(sb, txt);
+        }
+    }
 }
+
