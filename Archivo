@@ -6,18 +6,21 @@ import { useUser } from '../context/UserContext';
 import { calcularCriticidad, getSlaMinutes } from '../utils/slaUtils';
 import { normalizeJurisdiction } from '../utils/jurisdiction';
 
-export default function TCSProblems() {
-  const { problems, loading, error } = useOpenProblems(5000);
+export default function OtherProblems() {
   const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(5000);
 
-  // ✅ Solo TCS verdaderos
-  const tcsProblems = problems.filter(p => normalizeJurisdiction(p).isTcs === true);
+  // ✅ Otros = NO_TCS o sin clasificar
+  const otherProblems = problems.filter(p => {
+    const j = normalizeJurisdiction(p);
+    return j.isTcs === false || j.isTcs === null;
+  });
 
-  if (loading) return <h2>Cargando problemas TCS...</h2>;
+  if (loading) return <h2>Cargando problemas de terceros...</h2>;
   if (error) return <h2 style={{ color: 'red' }}>Error: {error}</h2>;
-  if (tcsProblems.length === 0) return <h2>No hay problemas TCS actualmente.</h2>;
+  if (otherProblems.length === 0) return <h2>No hay problemas de terceros actualmente.</h2>;
 
-  const sortedProblems = [...tcsProblems].sort((a, b) => {
+  const sortedProblems = [...otherProblems].sort((a, b) => {
     const startA = new Date(a.startTime);
     const startB = new Date(b.startTime);
     const criticidadA = calcularCriticidad(a.affectedCI || []);
@@ -31,7 +34,7 @@ export default function TCSProblems() {
 
   return (
     <div style={{ maxWidth: '900px', margin: '0 auto', padding: '1rem' }}>
-      <h1 style={{ textAlign: 'center' }}>Problemas TCS</h1>
+      <h1 style={{ textAlign: 'center' }}>Problemas Otros</h1>
       <UsernameInput />
       {sortedProblems.map(problem => (
         <ProblemCard key={problem.problemId} problem={problem} username={username} />
@@ -39,4 +42,3 @@ export default function TCSProblems() {
     </div>
   );
 }
-
