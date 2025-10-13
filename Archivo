@@ -1,8 +1,32 @@
-// src/utils/config.js
-const BASE = import.meta.env.VITE_API_URL || process.env.REACT_APP_API_URL;
+Archivo nuevo: src/utils/jurisdiction.js
 
-// Devuelve la base para Problems
-export function getApiBaseUrl() {
-  // https://... + /api/Problems
-  return `${BASE}/api/Problems`;
+Esto te garantiza que, sin importar si el backend manda { IsTcs }, { isTcs } o "TCS" / "NO_TCS", tú filtras SIEMPRE por un booleano fiable.
+
+// src/utils/jurisdiction.js
+export function normalizeJurisdiction(problem) {
+  // puede venir como "jurisdiction" o "Jurisdiction"
+  const raw = problem?.jurisdiction ?? problem?.Jurisdiction;
+
+  // Objeto DTO
+  if (raw && typeof raw === "object") {
+    const isTcs = raw.isTcs ?? raw.IsTcs ?? null;
+    const label = raw.label ?? raw.Label ?? (isTcs === null ? "UNCLASSIFIED" : isTcs ? "TCS" : "NO_TCS");
+    const score = raw.score ?? raw.Score ?? null;
+    return { isTcs: isTcs === true ? true : isTcs === false ? false : null, label: normalizeLabel(label), score };
+  }
+
+  // String ("TCS" / "NO_TCS" / "NO TCS")
+  if (typeof raw === "string") {
+    const label = normalizeLabel(raw);
+    return { isTcs: label === "TCS", label, score: null };
+  }
+
+  return { isTcs: null, label: "UNCLASSIFIED", score: null };
+}
+
+function normalizeLabel(s) {
+  const t = String(s).trim().toUpperCase().replace(/\s+/g, "_"); // "NO TCS" -> "NO_TCS"
+  if (t === "TCS") return "TCS";
+  if (t === "NO_TCS") return "NO_TCS";
+  return "UNCLASSIFIED";
 }
