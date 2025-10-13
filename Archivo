@@ -1,65 +1,117 @@
 // src/api/problems.js
-// Se conecta al backend REST API Dynatrace
+// Intenta leer la URL desde .env (VITE_API_URL) y, si no existe,
+// cae a public/config.json → API_BASE_URL (que ya incluye /api/Problems).
 
-const BASE = (import.meta.env && import.meta.env.VITE_API_URL)
-  ? String(import.meta.env.VITE_API_URL).replace(/\/$/, '')
-  : '';
+let BASE = '';            // p.ej. https://fpq6rkv3-44334.use.devtunnels.ms
+let PROBLEMS_BASE = '';   // p.ej. https://.../api/Problems
+let configLoaded = false;
 
-const PROBLEMS_BASE = BASE ? `${BASE}/api/Problems` : '';
-
-console.log('🔗 BASE from .env =', BASE);
-console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
-
-// Función genérica de fetch con manejo de errores
-async function getJson(url, errMsg) {
+function fromEnv() {
   try {
-    const r = await fetch(url);
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      throw new Error(`${errMsg} (HTTP ${r.status}) ${text}`);
-    }
-    return await r.json();
-  } catch (error) {
-    console.error(`❌ ${errMsg}:`, error);
-    throw error;
+    const v = import.meta?.env?.VITE_API_URL;
+    return (typeof v === 'string' && v.trim()) ? v.trim().replace(/\/$/, '') : '';
+  } catch {
+    return '';
   }
 }
 
-// ========================
-// FUNCIONES PRINCIPALES
-// ========================
+async function fromConfigJson() {
+  try {
+    const r = await fetch('/config.json', { cache: 'no-store' });
+    if (!r.ok) return '';
+    const cfg = await r.json();
+    const url = (cfg?.API_BASE_URL || '').trim();
+    if (!url) return '';
+    // Cuando viene de config.json ya trae /api/Problems completo:
+    return { base: url.replace(/\/api\/Problems\/?$/, ''), problemsBase: url.replace(/\/$/, '') };
+  } catch {
+    return '';
+  }
+}
 
-// 1️⃣ Obtener todos los problemas
+// Resolve BASE/PROBLEMS_BASE una sola vez y cachea
+async function ensureBaseUrls() {
+  if (configLoaded) return;
+  // 1) .env
+  const envBase = fromEnv();
+  if (envBase) {
+    BASE = envBase;
+    PROBLEMS_BASE = `${BASE}/api/Problems`;
+    configLoaded = true;
+    console.log('🔗 BASE from .env =', BASE);
+    console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
+    return;
+  }
+  // 2) /public/config.json
+  const cfg = await fromConfigJson();
+  if (cfg && cfg.base) {
+    BASE = cfg.base;
+    PROBLEMS_BASE = cfg.problemsBase;
+    configLoaded = true;
+    console.log('🔗 BASE from /config.json =', BASE);
+    console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
+    return;
+  }
+  // 3) Si nada funciona, deja vacío para que el UI muestre error claro
+  BASE = '';
+  PROBLEMS_BASE = '';
+  configLoaded = true;
+  console.error('❌ No se pudo resolver la URL del API (ni .env ni /config.json)');
+}
+
+async function getJson(url, errMsg) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`${errMsg} (HTTP ${r.status}) ${t}`);
+  }
+  return r.json();
+}
+
+// ================== API ==================
+
 export async function fetchAllOpenProblems() {
-  if (!PROBLEMS_BASE)
-    throw new Error('VITE_API_URL no está definida. Revisa tu archivo .env y reinicia npm run dev.');
+  await ensureBaseUrls();
+  if (!PROBLEMS_BASE) {
+    throw new Error('VITE_API_URL no está definida y /config.json no existe. Revisa .env o crea public/config.json.');
+  }
   return getJson(`${PROBLEMS_BASE}`, 'Error al obtener problemas');
 }
 
-// 2️⃣ Obtener problemas detallados (verifica si la respuesta es array)
 export async function fetchAllOpenProblemsDetailed() {
   const list = await fetchAllOpenProblems();
   return Array.isArray(list) ? list : [];
 }
 
-// 3️⃣ Filtrar solo los problemas TCS
 export async function fetchTcsProblems() {
   const all = await fetchAllOpenProblemsDetailed();
-  return all.filter((p) => {
+  const isTcs = (p) => {
     const j = p?.jurisdiction ?? p?.Jurisdiction;
-    if (typeof j === 'string') return j.trim().toUpperCase().includes('TCS');
-    if (j && typeof j === 'object') return j.isTcs === true || j.IsTcs === true;
+    if (typeof j === 'string') return j.trim().toUpperCase().replace(/\s+/g, '_') === 'TCS';
+    if (j && typeof j === 'object') return (j.isTcs ?? j.IsTcs) === true;
     return false;
-  });
+  };
+  return all.filter(isTcs);
 }
 
-// 4️⃣ Filtrar los NO TCS
 export async function fetchNoTcsProblems() {
   const all = await fetchAllOpenProblemsDetailed();
-  return all.filter((p) => {
+  const norm = (p) => {
     const j = p?.jurisdiction ?? p?.Jurisdiction;
-    if (typeof j === 'string') return !j.trim().toUpperCase().includes('TCS');
-    if (j && typeof j === 'object') return j.isTcs === false || j.IsTcs === false;
-    return true;
+    if (typeof j === 'string') {
+      const L = j.trim().toUpperCase().replace(/\s+/g, '_');
+      if (L === 'TCS') return { isTcs: true };
+      if (L === 'NO_TCS') return { isTcs: false };
+      return { isTcs: null };
+    }
+    if (j && typeof j === 'object') {
+      const v = j.isTcs ?? j.IsTcs;
+      return { isTcs: v === true ? true : v === false ? false : null };
+    }
+    return { isTcs: null };
+  };
+  return all.filter((p) => {
+    const j = norm(p);
+    return j.isTcs === false || j.isTcs === null;
   });
 }
