@@ -1,9 +1,5 @@
 
-using System.Text;
-using System.Reflection;
-using RestAPIDynatrace.Models;          // ProblemDynatraceResponse, JurisdictionDto
-using RestAPIDynatrace.ML.Clases;       // JurisdictionInput / JurisdictionPrediction
-using RestAPIDynatrace.ML.Functions;    // MLModelInitializer
+// using ... (deja los usings que ya tienes arriba)
 
 namespace RestAPIDynatrace.ML.Functions
 {
@@ -11,11 +7,11 @@ namespace RestAPIDynatrace.ML.Functions
     {
         private const string ModelVersion = "jurisdiction_model:1.0";
 
-        // ===== API nueva: recibe el problema y devuelve la jurisdicción
-        public static JurisdictionDto ClassifyProblem(ProblemDynatraceResponse p)
+        // ⬅️ Overload NUEVO para RestAPIDynatrace.Models.Problem
+        public static JurisdictionDto ClassifyProblem(Problem p)
         {
             var engine   = MLModelInitializer.GetEngine();
-            var fullText = BuildText(p);
+            var fullText = BuildTextFromObject(p);
 
             var pred  = engine.Predict(new JurisdictionInput { Text = fullText });
             var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
@@ -26,108 +22,128 @@ namespace RestAPIDynatrace.ML.Functions
 
             return new JurisdictionDto
             {
-                IsTcs       = isTcs,
-                Label       = isTcs ? "TCS" : "NO_TCS",
-                Score       = score,
-                Version     = ModelVersion,
-                ClassifiedAt= DateTimeOffset.UtcNow
+                IsTcs        = isTcs,
+                Label        = isTcs ? "TCS" : "NO_TCS",
+                Score        = score,
+                Version      = ModelVersion,
+                ClassifiedAt = DateTimeOffset.UtcNow
             };
         }
 
-        // ===== Helper: construye el mismo texto que leería un analista humano
-        private static string BuildText(ProblemDynatraceResponse p)
+        // ⬅️ Tu método que ya tenías (para ProblemDynatraceResponse):
+        public static JurisdictionDto ClassifyProblem(ProblemDynatraceResponse p)
         {
-            var sb = new StringBuilder();
+            var engine   = MLModelInitializer.GetEngine();
+            var fullText = BuildTextFromObject(p);
 
-            // Campos de cabecera
-            Append(sb, p.title);
-            Append(sb, p.shortDescription);
-            Append(sb, p.impactLevel);
-            Append(sb, p.severityLevel);
-            Append(sb, p.status);
+            var pred  = engine.Predict(new JurisdictionInput { Text = fullText });
+            var label = (pred.PredictedLabel ?? "").ToUpperInvariant();
+            var isTcs = label == "TCS";
 
-            // ServiceNow
-            if (p.incidentServiceNow != null)
+            float score = pred.Probability;
+            if ((pred.Score?.Length ?? 0) > 0) score = pred.Score.Max();
+
+            return new JurisdictionDto
             {
-                // intenta ShortDescription/Description/Resumen
-                Append(sb, TryGet(p.incidentServiceNow, "ShortDescription", "Description", "Resumen", "Detalle"));
-                // número de ticket
-                Append(sb, TryGet(p.incidentServiceNow, "Number"));
+                IsTcs        = isTcs,
+                Label        = isTcs ? "TCS" : "NO_TCS",
+                Score        = score,
+                Version      = ModelVersion,
+                ClassifiedAt = DateTimeOffset.UtcNow
+            };
+        }
+
+        // ======= Builder genérico que funciona para ambos modelos =======
+        private static string BuildTextFromObject(object obj)
+        {
+            var sb = new System.Text.StringBuilder();
+
+            // helpers locales
+            static void Append(System.Text.StringBuilder s, string? t)
+            { if (!string.IsNullOrWhiteSpace(t)) { if (s.Length > 0) s.Append(' '); s.Append(t); } }
+
+            static string? GetProp(object o, params string[] names)
+            {
+                var t = o.GetType();
+                foreach (var n in names)
+                {
+                    var pi = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
+                    if (pi == null) continue;
+                    var val = pi.GetValue(o)?.ToString();
+                    if (!string.IsNullOrWhiteSpace(val)) return val;
+                }
+                return null;
             }
 
-            // Evidencia / Comentarios / Análisis de impacto
-            if (p.evidenceDetails != null)
-                Append(sb, TryGet(p.evidenceDetails, "Details", "Description", "Text", "EvidenceText"));
+            static IEnumerable<object> GetList(object o, params string[] names)
+            {
+                var t = o.GetType();
+                foreach (var n in names)
+                {
+                    var pi = t.GetProperty(n, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
+                    if (pi == null) continue;
+                    if (pi.GetValue(o) is System.Collections.IEnumerable e)
+                        foreach (var it in e) if (it != null) yield return it;
+                }
+            }
 
-            if (p.recentComments != null)
-                Append(sb, TryGet(p.recentComments, "Comments", "Text", "LastComment"));
+            static void AppendFromList(System.Text.StringBuilder s, IEnumerable<string>? items)
+            { if (items == null) return; Append(s, string.Join(' ', items.Where(x => !string.IsNullOrWhiteSpace(x)))); }
 
-            if (p.impactAnalysis != null)
-                Append(sb, TryGet(p.impactAnalysis, "Summary", "Description", "Text"));
+            static void AppendFromObjList(System.Text.StringBuilder s, IEnumerable<object> items, params string[] candidateProps)
+            {
+                foreach (var it in items)
+                {
+                    var v = GetProp(it, candidateProps);
+                    if (!string.IsNullOrWhiteSpace(v)) Append(s, v);
+                }
+            }
 
-            // Entidades afectadas / impactadas (usa nombres comunes si existen)
-            AppendFromListObj(sb, p.affectedEntities,  "displayName", "name", "entityName", "hostname", "serverName");
-            AppendFromListObj(sb, p.impactedEntities,  "displayName", "name", "entityName", "hostname", "serverName");
+            // campos comunes en ambos modelos (según tus capturas)
+            Append(sb, GetProp(obj, "title"));
+            Append(sb, GetProp(obj, "shortDescription"));
+            Append(sb, GetProp(obj, "impactLevel"));
+            Append(sb, GetProp(obj, "severityLevel"));
+            Append(sb, GetProp(obj, "status"));
 
-            // Etiquetas y zonas
-            AppendFromListObj(sb, p.entityTags,        "key", "value", "context", "stringRepresentation");
-            AppendFromListObj(sb, p.managementZones,   "name", "id");
+            // incidentServiceNow
+            var isn = GetProp(obj, "incidentServiceNow");
+            var isnObj = (isn == null) ? null : obj.GetType().GetProperty("incidentServiceNow",
+                System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
+            if (isnObj != null)
+            {
+                Append(sb, GetProp(isnObj, "ShortDescription", "Description", "Resumen", "Detalle"));
+                Append(sb, GetProp(isnObj, "Number", "Ticket"));
+            }
 
-            // Clusters / Namespaces
-            AppendFromList(sb, p.clusterName);
-            AppendFromList(sb, p.namespaceName);
+            // evidenceDetails / recentComments / impactAnalysis
+            var evObj = obj.GetType().GetProperty("evidenceDetails", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
+            if (evObj != null) Append(sb, GetProp(evObj, "Details", "Description", "Text", "EvidenceText"));
 
-            // (Opcional) agrega tenant/environment/displayId si quieres dar más contexto
-            Append(sb, p.tenant);
-            Append(sb, p.environment);
-            Append(sb, p.displayId);
+            var rcObj = obj.GetType().GetProperty("recentComments", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
+            if (rcObj != null) Append(sb, GetProp(rcObj, "Comments", "Text", "LastComment"));
+
+            var iaObj = obj.GetType().GetProperty("impactAnalysis", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj);
+            if (iaObj != null) Append(sb, GetProp(iaObj, "Summary", "Description", "Text"));
+
+            // listas de objetos
+            AppendFromObjList(sb, GetList(obj, "affectedEntities"), "displayName", "name", "entityName", "hostname", "serverName");
+            AppendFromObjList(sb, GetList(obj, "impactedEntities"), "displayName", "name", "entityName", "hostname", "serverName");
+            AppendFromObjList(sb, GetList(obj, "entityTags"), "key", "value", "context", "stringRepresentation");
+            AppendFromObjList(sb, GetList(obj, "managementZones"), "name", "id");
+
+            // listas de strings
+            var clusters   = obj.GetType().GetProperty("clusterName", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj) as IEnumerable<string>;
+            var namespaces = obj.GetType().GetProperty("namespaceName", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase)?.GetValue(obj) as IEnumerable<string>;
+            AppendFromList(sb, clusters);
+            AppendFromList(sb, namespaces);
+
+            // contexto
+            Append(sb, GetProp(obj, "tenant"));
+            Append(sb, GetProp(obj, "environment"));
+            Append(sb, GetProp(obj, "displayId"));
 
             return sb.ToString().Trim();
         }
-
-        // ============ utilidades ============
-
-        private static void Append(StringBuilder sb, string? s)
-        {
-            if (!string.IsNullOrWhiteSpace(s))
-            {
-                if (sb.Length > 0) sb.Append(' ');
-                sb.Append(s);
-            }
-        }
-
-        private static void AppendFromList(StringBuilder sb, IEnumerable<string>? items)
-        {
-            if (items == null) return;
-            var txt = string.Join(' ', items.Where(x => !string.IsNullOrWhiteSpace(x)));
-            Append(sb, txt);
-        }
-
-        // Para listas de objetos: intenta tomar la 1a propiedad no vacía de la lista de nombres dada
-        private static void AppendFromListObj<T>(StringBuilder sb, IEnumerable<T>? items, params string[] propNames)
-        {
-            if (items == null) return;
-            foreach (var it in items)
-            {
-                var val = TryGet(it!, propNames);
-                Append(sb, val);
-            }
-        }
-
-        // Lectura robusta por reflexión, ignorando may/min
-        private static string? TryGet(object obj, params string[] propNames)
-        {
-            var t = obj.GetType();
-            foreach (var name in propNames)
-            {
-                var pi = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.IgnoreCase);
-                if (pi == null) continue;
-                var val = pi.GetValue(obj)?.ToString();
-                if (!string.IsNullOrWhiteSpace(val)) return val;
-            }
-            return null;
-        }
     }
 }
-
-           
