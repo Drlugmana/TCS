@@ -1,82 +1,42 @@
-import { getApiBaseUrl } from '../utils/config';
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+import { calcularCriticidad, getSlaMinutes } from '../utils/slaUtils';
 import { normalizeJurisdiction } from '../utils/jurisdiction';
 
-const ENVIRONMENTS = ['Productivo', 'NoProductivo'];
-const PAGE_SIZE = 50;
-const CONCURRENCY = 8;
+export default function TCSProblems() {
+  const { problems, loading, error } = useOpenProblems(5000);
+  const { username } = useUser();
 
-// ---------- helpers internos ----------
-async function fetchPage(environment, pageNumber) {
-  const baseUrl = getApiBaseUrl();
-  const url = `${baseUrl}/OpenProblemIds?environment=${encodeURIComponent(environment)}&pageNumber=${pageNumber}&pageSize=${PAGE_SIZE}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Error al obtener problemas de ${environment}, página ${pageNumber}`);
-  return await res.json(); // { totalPages, data }
-}
+  // ✅ Solo TCS verdaderos
+  const tcsProblems = problems.filter(p => normalizeJurisdiction(p).isTcs === true);
 
-async function getProblem(id) {
-  const baseUrl = getApiBaseUrl();
-  const res = await fetch(`${baseUrl}/${encodeURIComponent(id)}`);
-  if (!res.ok) throw new Error(`Error al obtener el problema ${id}`);
-  return await res.json();
-}
+  if (loading) return <h2>Cargando problemas TCS...</h2>;
+  if (error) return <h2 style={{ color: 'red' }}>Error: {error}</h2>;
+  if (tcsProblems.length === 0) return <h2>No hay problemas TCS actualmente.</h2>;
 
-async function mapWithConcurrency(items, mapper, limit = CONCURRENCY) {
-  const out = new Array(items.length);
-  let i = 0;
-  async function worker() {
-    while (i < items.length) {
-      const idx = i++;
-      out[idx] = await mapper(items[idx], idx);
-    }
-  }
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
-  return out;
-}
-
-// ---------- API pública ----------
-export async function fetchAllOpenProblemsDetailed() {
-  const allIds = [];
-
-  // 1) paginar IDs por ambiente
-  for (const env of ENVIRONMENTS) {
-    const first = await fetchPage(env, 1);
-    const totalPages = first.totalPages || 1;
-    allIds.push(...first.data.map(id => ({ id, environment: env })));
-
-    const rest = await Promise.all(
-      Array.from({ length: Math.max(totalPages - 1, 0) }, (_, k) => fetchPage(env, k + 2))
-    );
-    for (const page of rest) {
-      allIds.push(...page.data.map(id => ({ id, environment: env })));
-    }
-  }
-
-  // 2) resolver detalles en lotes
-  const detailed = await mapWithConcurrency(allIds, async ({ id, environment }) => {
-    const p = await getProblem(id);
-    const j = normalizeJurisdiction(p);
-    return { ...p, _environment: environment, _jurisdiction: j };
+  const sortedProblems = [...tcsProblems].sort((a, b) => {
+    const startA = new Date(a.startTime);
+    const startB = new Date(b.startTime);
+    const criticidadA = calcularCriticidad(a.affectedCI || []);
+    const criticidadB = calcularCriticidad(b.affectedCI || []);
+    const slaA = getSlaMinutes(criticidadA) * 60 * 1000;
+    const slaB = getSlaMinutes(criticidadB) * 60 * 1000;
+    const remainingA = slaA - (Date.now() - startA.getTime());
+    const remainingB = slaB - (Date.now() - startB.getTime());
+    return remainingA - remainingB;
   });
 
-  return detailed;
+  return (
+    <div style={{ maxWidth: '900px', margin: '0 auto', padding: '1rem' }}>
+      <h1 style={{ textAlign: 'center' }}>Problemas TCS</h1>
+      <UsernameInput />
+      {sortedProblems.map(problem => (
+        <ProblemCard key={problem.problemId} problem={problem} username={username} />
+      ))}
+    </div>
+  );
 }
 
-export async function fetchTcsProblems() {
-  const all = await fetchAllOpenProblemsDetailed();
-  return all.filter(p => p._jurisdiction.isTcs === true);
-}
-
-export async function fetchNoTcsProblems() {
-  const all = await fetchAllOpenProblemsDetailed();
-  return all.filter(p => p._jurisdiction.isTcs === false || p._jurisdiction.isTcs === null);
-}
-
-// (opcional) health del backend
-export async function fetchHealth() {
-  const baseProblems = getApiBaseUrl();
-  const base = baseProblems.replace(/\/api\/Problems$/, '');
-  const res = await fetch(`${base}/api/Problems/health`);
-  if (!res.ok) throw new Error('Health failed');
-  return res.json();
-}
