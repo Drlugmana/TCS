@@ -1,32 +1,115 @@
-import { useEffect, useRef, useState } from 'react';
-import { fetchAllOpenProblemsDetailed } from '../api/problems';
+// src/api/problems.js
+import { normalizeJurisdiction } from '../utils/jurisdiction';
 
-export default function useOpenProblems(pollMs = 5000) {
-  const [problems, setProblems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const timerRef = useRef(null);
+// ========= Config =========
+const BASE = import.meta.env.VITE_API_URL || process.env.REACT_APP_API_URL || '';
+if (!BASE) {
+  // No rompas la app si falta .env; puedes cambiar esto por un throw si prefieres.
+  console.warn('[problems.js] VITE_API_URL/REACT_APP_API_URL no definida. Usa .env.');
+}
+const PROBLEMS_BASE = `${BASE}/api/Problems`;
 
-  async function loadOnce() {
-    try {
-      setLoading(true);
-      setError('');
-      const all = await fetchAllOpenProblemsDetailed();
-      setProblems(all);
-    } catch (e) {
-      setError(e.message || String(e));
-    } finally {
-      setLoading(false);
+// ========= Helpers HTTP =========
+async function getJson(url, errMsg) {
+  const r = await fetch(url);
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`${errMsg} (HTTP ${r.status}) ${t}`);
+  }
+  return r.json();
+}
+
+// ========= Modo 1: lista completa =========
+export async function fetchAllOpenProblems() {
+  // Si tu backend devuelve TODO en GET /api/Problems, este es el camino feliz.
+  const data = await getJson(`${PROBLEMS_BASE}`, 'Error al obtener problemas');
+  // Normaliza jurisdicción por si la UI lo necesita ya listo
+  return Array.isArray(data) ? data.map(p => ({ ...p, _jurisdiction: normalizeJurisdiction(p) })) : [];
+}
+
+// ========= Modo 2: Fallback con paginación por ambientes =========
+const ENVIRONMENTS = ['Productivo', 'NoProductivo'];
+const PAGE_SIZE = 50;
+const CONCURRENCY = 8;
+
+async function fetchIdPage(environment, pageNumber) {
+  const url = `${PROBLEMS_BASE}/OpenProblemIds?environment=${encodeURIComponent(environment)}&pageNumber=${pageNumber}&pageSize=${PAGE_SIZE}`;
+  return getJson(url, `Error al obtener problemas de ${environment}, página ${pageNumber}`);
+}
+
+export async function fetchProblemById(id) {
+  return getJson(`${PROBLEMS_BASE}/${encodeURIComponent(id)}`, `Error al obtener el problema con id ${id}`);
+}
+
+// Límite simple de concurrencia para peticiones en lote
+async function mapWithConcurrency(items, mapper, limit = CONCURRENCY) {
+  const out = new Array(items.length);
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      out[idx] = await mapper(items[idx], idx);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
+
+async function fetchAllOpenProblemsFallback() {
+  const allIds = [];
+
+  // 1) recolecta IDs por ambiente/página
+  for (const env of ENVIRONMENTS) {
+    const first = await fetchIdPage(env, 1); // { totalPages, data: [...] }
+    const totalPages = first?.totalPages || 1;
+    allIds.push(...(first?.data || []).map(id => ({ id, environment: env })));
+
+    if (totalPages > 1) {
+      const rest = await Promise.all(
+        Array.from({ length: totalPages - 1 }, (_, k) => fetchIdPage(env, k + 2))
+      );
+      for (const page of rest) {
+        allIds.push(...(page?.data || []).map(id => ({ id, environment: env })));
+      }
     }
   }
 
-  useEffect(() => {
-    loadOnce();
-    if (pollMs > 0) {
-      timerRef.current = setInterval(loadOnce, pollMs);
-      return () => clearInterval(timerRef.current);
-    }
-  }, [pollMs]);
+  // 2) resuelve detalles en lotes
+  const detailed = await mapWithConcurrency(allIds, async ({ id, environment }) => {
+    const p = await fetchProblemById(id);
+    const j = normalizeJurisdiction(p);
+    return { ...p, _environment: environment, _jurisdiction: j };
+  });
 
-  return { problems, loading, error };
+  return detailed;
+}
+
+// ========= API “smart”: intenta modo 1 y si falla usa fallback =========
+export async function fetchAllOpenProblemsDetailed() {
+  try {
+    // Primero intenta el endpoint directo (más eficiente)
+    const list = await fetchAllOpenProblems(); // puede lanzar
+    // Si ya vienen completos, asegúrate de tener _jurisdiction
+    return list.map(p => ({ ...p, _jurisdiction: p._jurisdiction || normalizeJurisdiction(p) }));
+  } catch (e) {
+    console.warn('[problems.js] GET /api/Problems falló, uso fallback por páginas. Motivo:', e?.message);
+    return fetchAllOpenProblemsFallback();
+  }
+}
+
+// ========= Atajos para las pestañas =========
+export async function fetchTcsProblems() {
+  const all = await fetchAllOpenProblemsDetailed();
+  return all.filter(p => (p._jurisdiction ?? normalizeJurisdiction(p)).isTcs === true);
+}
+
+export async function fetchNoTcsProblems() {
+  const all = await fetchAllOpenProblemsDetailed();
+  const j = (p) => (p._jurisdiction ?? normalizeJurisdiction(p));
+  return all.filter(p => j(p).isTcs === false || j(p).isTcs === null);
+}
+
+// ========= Health opcional =========
+export async function fetchHealth() {
+  return getJson(`${PROBLEMS_BASE.replace(/\/api\/Problems$/, '')}/api/Problems/health`, 'Health check failed');
 }
