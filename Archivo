@@ -1,3 +1,42 @@
+export function getJurisdictionObject(p) {
+  // Detecta distintos formatos posibles del backend
+  const j =
+    p?.jurisdiction ??
+    p?.Jurisdiction ??
+    p?.jurisdictionDto ??
+    p?.JurisdictionDto ??
+    p?.jurisdictionModel ??
+    p?.Jurisdiccion ??
+    null;
 
+  // Si viene como texto
+  if (typeof j === "string") {
+    const label = j.trim().toUpperCase();
+    return { isTcs: label.includes("TCS"), label };
+  }
+
+  // Si viene como objeto con banderas o etiquetas
+  if (j && typeof j === "object") {
+    const label =
+      (j.label ?? j.Label ?? j.nombre ?? j.name ?? "").toString().toUpperCase();
+    const isTcs =
+      typeof j.isTcs === "boolean"
+        ? j.isTcs
+        : label.includes("TCS") && !label.includes("NO");
+    return { isTcs, label: label || (isTcs ? "TCS" : "NO_TCS") };
+  }
+
+  // Si la entidad tiene campos directos
+  if (typeof p?.isTcs === "boolean") {
+    return { isTcs: p.isTcs, label: p.isTcs ? "TCS" : "NO_TCS" };
+  }
+
+  // Caso por defecto
+  return { isTcs: undefined, label: "" };
+}
+
+// Filtros globales
+export const esTCS = (p) => getJurisdictionObject(p).isTcs === true;
+export const esNoTCS = (p) => getJurisdictionObject(p).isTcs === false;
 
 
