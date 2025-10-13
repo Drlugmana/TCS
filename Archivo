@@ -1,117 +1,66 @@
-// src/api/problems.js
-// Intenta leer la URL desde .env (VITE_API_URL) y, si no existe,
-// cae a public/config.json → API_BASE_URL (que ya incluye /api/Problems).
+ // src/utils/jurisdiction.js
+export function getJurisdictionObject(p) {
+  // intenta varias rutas posibles (casing y nombres distintos)
+  const j =
+    p?.jurisdiction ??
+    p?.Jurisdiction ??
+    p?.jurisdiccion ??
+    p?.jurisdiccionDto ??
+    p?.jurisdictionDto ??
+    null;
 
-let BASE = '';            // p.ej. https://fpq6rkv3-44334.use.devtunnels.ms
-let PROBLEMS_BASE = '';   // p.ej. https://.../api/Problems
-let configLoaded = false;
-
-function fromEnv() {
-  try {
-    const v = import.meta?.env?.VITE_API_URL;
-    return (typeof v === 'string' && v.trim()) ? v.trim().replace(/\/$/, '') : '';
-  } catch {
-    return '';
+  // Si es string, normaliza a objeto
+  if (typeof j === 'string') {
+    const label = j.trim().toUpperCase();
+    return {
+      isTcs: label === 'TCS',
+      label,
+      score: undefined,
+      version: undefined,
+      classifiedAt: undefined,
+    };
   }
-}
 
-async function fromConfigJson() {
-  try {
-    const r = await fetch('/config.json', { cache: 'no-store' });
-    if (!r.ok) return '';
-    const cfg = await r.json();
-    const url = (cfg?.API_BASE_URL || '').trim();
-    if (!url) return '';
-    // Cuando viene de config.json ya trae /api/Problems completo:
-    return { base: url.replace(/\/api\/Problems\/?$/, ''), problemsBase: url.replace(/\/$/, '') };
-  } catch {
-    return '';
+  // Si es boolean en el root (algunas APIs lo exponen plano)
+  if (typeof p?.isTcs === 'boolean') {
+    return {
+      isTcs: p.isTcs,
+      label: p.isTcs ? 'TCS' : 'NO_TCS',
+      score: p.score ?? undefined,
+      version: p.version ?? undefined,
+      classifiedAt: p.classifiedAt ?? undefined,
+    };
   }
-}
 
-// Resolve BASE/PROBLEMS_BASE una sola vez y cachea
-async function ensureBaseUrls() {
-  if (configLoaded) return;
-  // 1) .env
-  const envBase = fromEnv();
-  if (envBase) {
-    BASE = envBase;
-    PROBLEMS_BASE = `${BASE}/api/Problems`;
-    configLoaded = true;
-    console.log('🔗 BASE from .env =', BASE);
-    console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
-    return;
+  // Si es un objeto, intenta leer sus campos más comunes
+  if (j && typeof j === 'object') {
+    const label =
+      (j.label ?? j.Label ?? '').toString().trim().toUpperCase();
+    const isTcs =
+      typeof j.isTcs === 'boolean'
+        ? j.isTcs
+        : label
+          ? label === 'TCS'
+          : undefined;
+
+    return {
+      isTcs,
+      label: label || (isTcs === true ? 'TCS' : isTcs === false ? 'NO_TCS' : ''),
+      score: j.score ?? j.Score,
+      version: j.version ?? j.Version,
+      classifiedAt: j.classifiedAt ?? j.ClassifiedAt,
+    };
   }
-  // 2) /public/config.json
-  const cfg = await fromConfigJson();
-  if (cfg && cfg.base) {
-    BASE = cfg.base;
-    PROBLEMS_BASE = cfg.problemsBase;
-    configLoaded = true;
-    console.log('🔗 BASE from /config.json =', BASE);
-    console.log('🔗 PROBLEMS_BASE =', PROBLEMS_BASE);
-    return;
-  }
-  // 3) Si nada funciona, deja vacío para que el UI muestre error claro
-  BASE = '';
-  PROBLEMS_BASE = '';
-  configLoaded = true;
-  console.error('❌ No se pudo resolver la URL del API (ni .env ni /config.json)');
-}
 
-async function getJson(url, errMsg) {
-  const r = await fetch(url);
-  if (!r.ok) {
-    const t = await r.text().catch(() => '');
-    throw new Error(`${errMsg} (HTTP ${r.status}) ${t}`);
-  }
-  return r.json();
-}
-
-// ================== API ==================
-
-export async function fetchAllOpenProblems() {
-  await ensureBaseUrls();
-  if (!PROBLEMS_BASE) {
-    throw new Error('VITE_API_URL no está definida y /config.json no existe. Revisa .env o crea public/config.json.');
-  }
-  return getJson(`${PROBLEMS_BASE}`, 'Error al obtener problemas');
-}
-
-export async function fetchAllOpenProblemsDetailed() {
-  const list = await fetchAllOpenProblems();
-  return Array.isArray(list) ? list : [];
-}
-
-export async function fetchTcsProblems() {
-  const all = await fetchAllOpenProblemsDetailed();
-  const isTcs = (p) => {
-    const j = p?.jurisdiction ?? p?.Jurisdiction;
-    if (typeof j === 'string') return j.trim().toUpperCase().replace(/\s+/g, '_') === 'TCS';
-    if (j && typeof j === 'object') return (j.isTcs ?? j.IsTcs) === true;
-    return false;
+  // Si no hay nada reconocible
+  return {
+    isTcs: undefined,
+    label: '',
+    score: undefined,
+    version: undefined,
+    classifiedAt: undefined,
   };
-  return all.filter(isTcs);
 }
 
-export async function fetchNoTcsProblems() {
-  const all = await fetchAllOpenProblemsDetailed();
-  const norm = (p) => {
-    const j = p?.jurisdiction ?? p?.Jurisdiction;
-    if (typeof j === 'string') {
-      const L = j.trim().toUpperCase().replace(/\s+/g, '_');
-      if (L === 'TCS') return { isTcs: true };
-      if (L === 'NO_TCS') return { isTcs: false };
-      return { isTcs: null };
-    }
-    if (j && typeof j === 'object') {
-      const v = j.isTcs ?? j.IsTcs;
-      return { isTcs: v === true ? true : v === false ? false : null };
-    }
-    return { isTcs: null };
-  };
-  return all.filter((p) => {
-    const j = norm(p);
-    return j.isTcs === false || j.isTcs === null;
-  });
-}
+export const esTCS = (p) => getJurisdictionObject(p).isTcs === true;
+export const esNoTCS = (p) => getJurisdictionObject(p).isTcs === false;
