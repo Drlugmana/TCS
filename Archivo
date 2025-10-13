@@ -1,3 +1,103 @@
+// src/api/problems.js
+const BASE_URL = import.meta.env.VITE_API_URL;
+if (!BASE_URL) {
+  throw new Error(
+    "VITE_API_URL no está definida. Crea .env en la RAÍZ y reinicia `npm run dev`."
+  );
+}
 
+const JSON_HEADERS = { Accept: "application/json" };
+
+/**
+ * Normaliza 1 problema del backend a la forma que el UI espera.
+ * Acomoda diferencias de nombres y crea flags para TCS/NO TCS.
+ */
+function mapProblem(p) {
+  // Fechas posibles
+  const startTime =
+    p.startTime || p.startDate || p.start || p.inicio || null;
+
+  // Impacto / severidad posibles
+  const impact =
+    p.impactLevel || p.impact || p.Impact || p.impacto || "";
+
+  const severity =
+    p.severityLevel || p.severity || p.Severity || p.severidad || "";
+
+  // Clasificación del modelo (tu backend): "TCS" | "NO TCS" | null
+  const juris = (p.juris || p.jurisdiction || "").toString().toUpperCase();
+
+  return {
+    // ids
+    problemId: p.problemId || p.id || p.displayId || "",
+    displayId: p.displayId || p.problemId || "",
+
+    // textos
+    title: p.title || p.Titulo || p.shortDescription || p.ShortDescription || "",
+    shortDescription:
+      p.shortDescription || p.ShortDescription || p.description || "",
+
+    // metadatos pintados en la card
+    environment: p.environment || p.entorno || "",
+    impactLevel: impact,
+    severityLevel: severity,
+    status: (p.status || "").toUpperCase(),
+    startTime: startTime ? new Date(startTime).toISOString() : null,
+
+    // chips opcionales
+    affectedEntities: p.affectedEntities || p.affectedCI || [],
+    clusterName: p.clusterName || [],
+    clusterUid: p.clusterUid || [],
+    namespaceName: p.namespaceName || [],
+
+    // === CLAVE PARA TCS/NO TCS ===
+    juris,               // "TCS" | "NO TCS" | ""
+    isTcs: juris === "TCS",
+  };
+}
+
+/**
+ * Intenta con paginación y sin paginación.
+ * Devuelve { items, total }
+ */
+export async function fetchProblemsPage(pageNumber = 1, pageSize = 50) {
+  let url = `${BASE_URL}/api/Problems?pageNumber=${pageNumber}&pageSize=${pageSize}`;
+  let res = await fetch(url, { headers: JSON_HEADERS });
+
+  if (!res.ok && res.status === 404) {
+    // Backend sin paginación
+    url = `${BASE_URL}/api/Problems`;
+    res = await fetch(url, { headers: JSON_HEADERS });
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Error HTTP ${res.status} al obtener problemas. ${text}`);
+  }
+
+  const data = await res.json();
+
+  // Soporta:
+  // 1) { items: [...], total: N }
+  // 2) [ ... ]
+  const rawItems = Array.isArray(data)
+    ? data
+    : Array.isArray(data.items)
+    ? data.items
+    : [];
+
+  const items = rawItems.map(mapProblem);
+  const total = Array.isArray(data) ? items.length : data.total ?? items.length;
+
+  return { items, total };
+}
+
+/**
+ * Devuelve sólo abiertos (si tu backend marca status)
+ */
+export async function fetchAllOpenProblems(pageSize = 50) {
+  const { items } = await fetchProblemsPage(1, pageSize);
+  return items.filter((p) => p.status !== "CLOSED");
+}
 
 
