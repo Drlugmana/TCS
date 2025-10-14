@@ -1,3 +1,129 @@
 
+public static async Task MatchEntitiesInfo(List<Server> serverList)
+{
+    // 1) Traer entidades de Dynatrace
+    EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
+    var entitiesList = await entitiesDB.GetEntities();
 
+    // 2) Índice que acepta llaves FULL (FQDN) y NORMALIZADAS (sin dominio)
+    var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
+
+    // Helper para agregar una llave al índice (FULL + NORMALIZADA)
+    void AddKey(string? rawKey, List<EntitySchema> ents)
+    {
+        if (string.IsNullOrWhiteSpace(rawKey)) return;
+
+        // FULL (tal cual, mayúsculas)
+        var full = rawKey.Trim().ToUpperInvariant();
+        if (!string.IsNullOrEmpty(full))
+        {
+            normalizedEntities.AddOrUpdate(
+                full,
+                _ => new List<EntitySchema>(ents),
+                (_, existing) =>
+                {
+                    foreach (var e in ents) if (!existing.Contains(e)) existing.Add(e);
+                    return existing;
+                });
+        }
+
+        // NORMALIZADA (sin dominio / limpia con tu NormalizeHost)
+        var norm = NormalizeHost(rawKey);
+        if (!string.IsNullOrEmpty(norm))
+        {
+            normalizedEntities.AddOrUpdate(
+                norm,
+                _ => new List<EntitySchema>(ents),
+                (_, existing) =>
+                {
+                    foreach (var e in ents) if (!existing.Contains(e)) existing.Add(e);
+                    return existing;
+                });
+        }
+    }
+
+    // A) Key principal del diccionario (kvp.Key)
+    foreach (var kvp in entitiesList)
+    {
+        AddKey(kvp.Key, kvp.Value);
+    }
+
+    // B) Llaves alternas por entidad (DisplayName / OneAgentCustomHostName / DetectedName) — con fallback por reflexión
+    foreach (var kvp in entitiesList)
+    {
+        foreach (var ent in kvp.Value)
+        {
+            AddKey(ent.DisplayName, kvp.Value);
+
+            try
+            {
+                var oneAgentName = ent.GetType().GetProperty("OneAgentCustomHostName")?.GetValue(ent)?.ToString();
+                var detectedName = ent.GetType().GetProperty("DetectedName")?.GetValue(ent)?.ToString();
+
+                AddKey(oneAgentName, kvp.Value);
+                AddKey(detectedName, kvp.Value);
+            }
+            catch { /* ignora si esas propiedades no existen en tu modelo */ }
+        }
+    }
+
+    // 3) Hacer match CMDB -> Dynatrace probando FULL y NORMALIZADA (no se elimina la clave del índice)
+    var matchedKeys = new ConcurrentDictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+
+    Parallel.ForEach(serverList, server =>
+    {
+        if (!string.IsNullOrWhiteSpace(server?.Name))
+        {
+            // Llaves del lado CMDB
+            var fullKey = server.Name.Trim().ToUpperInvariant();
+            var normKey = NormalizeHost(server.Name);
+
+            bool matchFound = false;
+            if (!string.IsNullOrEmpty(fullKey) && normalizedEntities.TryGetValue(fullKey, out var entsFull))
+            {
+                _serversWithEntities.Add(new ServerWithEntities { Server = server, Entities = entsFull });
+                matchedKeys[fullKey] = true;
+                matchFound = true;
+            }
+            else if (!string.IsNullOrEmpty(normKey) && normalizedEntities.TryGetValue(normKey, out var entsNorm))
+            {
+                _serversWithEntities.Add(new ServerWithEntities { Server = server, Entities = entsNorm });
+                matchedKeys[normKey] = true;
+                matchFound = true;
+            }
+
+            if (!matchFound)
+            {
+                _serversNoMatch.Add(server);
+            }
+
+            Console.WriteLine($"Procesando servidores: {serverList.IndexOf(server) + 1}/{serverList.Count}");
+        }
+    });
+
+    // 4) Construir "No Monitoreados Dynatrace" sin depender de eliminar keys del índice
+    _serversNoMatchDyn.Clear();
+    var seenEntityIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    foreach (var kvp in normalizedEntities)
+    {
+        // si esta key fue usada para algún match, la saltamos
+        if (matchedKeys.ContainsKey(kvp.Key)) continue;
+
+        foreach (var entity in kvp.Value)
+        {
+            // deduplicar por EntityId si existe
+            var id = entity?.EntityId ?? "";
+            if (id.Length == 0 || seenEntityIds.Add(id))
+            {
+                _serversNoMatchDyn.Add(entity);
+            }
+        }
+    }
+
+    // 5) Métricas finales
+    Console.WriteLine($"✅ Entidades con match {_serversWithEntities.Count}");
+    Console.WriteLine($"⚠️ Entidades que no hicieron match en cmdb {_serversNoMatch.Count}");
+    Console.WriteLine($"❌ Entidades que no hicieron match en dynatrace {_serversNoMatchDyn.Count}");
+}
 
