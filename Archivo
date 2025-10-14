@@ -1,3 +1,160 @@
+0) .env (en la raíz del proyecto)
+
+Contenido exacto (sin comillas, sin espacios al final):
+
+VITE_API_URL=https://fpq6rkv3-44334.use.devtunnels.ms
+
+
+Después de guardarlo: Ctrl+C y vuelve a correr npm run dev.
+
+1) src/api/problems.js (REEMPLAZA COMPLETO)
+// src/api/problems.js
+const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+if (!BASE) {
+  throw new Error('VITE_API_URL no está definida en .env (ej: VITE_API_URL=https://fpq6rkv3-44334.use.devtunnels.ms)');
+}
+const API = `${BASE}/api/Problems`;
+
+// Normaliza para soportar array directo o {items|results|data|value}
+function normalize(listLike) {
+  let list = Array.isArray(listLike)
+    ? listLike
+    : (listLike?.items || listLike?.results || listLike?.data || listLike?.value || []);
+  if (!Array.isArray(list)) list = list ? [list] : [];
+
+  return list.map((p) => {
+    const isTcs =
+      p?.jurisdiction?.isTcs ??
+      (typeof p?.isTcs === 'boolean' ? p.isTcs : undefined) ??
+      (typeof p?.juris === 'string' ? p.juris.toUpperCase() === 'TCS' : undefined);
+
+    const label =
+      p?.jurisdiction?.label ??
+      p?.label ??
+      (typeof p?.juris === 'string' ? p.juris : (isTcs === true ? 'TCS' : 'NO TCS'));
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      // campos base con fallback para evitar crasheos en el render
+      title: p.title ?? p.shortDescription ?? '(sin título)',
+      severityLevel: p.severityLevel ?? p.severity ?? '',
+      impactLevel: p.impactLevel ?? p.impact ?? '',
+      startTime: p.startTime ?? p.start ?? p.startTimeUtc ?? null,
+      affectedCI: p.affectedEntities ?? p.affectedCI ?? [],
+      environment: p.environment ?? '',
+      problemId: p.problemId ?? p.displayId ?? p.id ?? '',
+      status: p.status ?? ''
+    };
+  });
+}
+
+export async function fetchProblems({ page = 1, size = 50 } = {}) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} al obtener problemas: ${txt.slice(0, 200)}`);
+  }
+  const json = await res.json();
+  return normalize(json);
+}
+
+2) src/hooks/useOpenProblems.js (REEMPLAZA COMPLETO)
+// src/hooks/useOpenProblems.js
+import { useEffect, useState } from 'react';
+import { fetchProblems } from '../api/problems';
+
+export default function useOpenProblems(pollMs = 0) {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  async function load() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchProblems({ page: 1, size: 50 });
+      console.debug('[useOpenProblems] recibidos:', data); // mira la consola del navegador
+      setProblems(data);
+    } catch (e) {
+      console.error('[useOpenProblems] error:', e);
+      setError(e?.message || String(e));
+      setProblems([]);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    load();
+  }, []);
+
+  useEffect(() => {
+    if (pollMs > 0) {
+      const id = setInterval(load, pollMs);
+      return () => clearInterval(id);
+    }
+  }, [pollMs]);
+
+  return { problems, loading, error, reload: load };
+}
+
+3) src/utils/jurisdiction.js (REEMPLAZA COMPLETO – SOLO CLASIFICACIÓN)
+// src/utils/jurisdiction.js
+
+export const esTCS = (p) =>
+  p?.isTcs === true ||
+  (p?.label || '').toUpperCase() === 'TCS' ||
+  (typeof p?.juris === 'string' && p.juris.toUpperCase() === 'TCS') ||
+  p?.jurisdiction?.isTcs === true ||
+  (p?.jurisdiction?.label || '').toUpperCase() === 'TCS';
+
+export const esNoTCS = (p) =>
+  p?.isTcs === false ||
+  (p?.label || '').toUpperCase() === 'NO TCS' ||
+  (typeof p?.juris === 'string' && p.juris.toUpperCase() === 'NO TCS') ||
+  p?.jurisdiction?.isTcs === false ||
+  (p?.jurisdiction?.label || '').toUpperCase() === 'NO TCS';
+
+4) src/utils/slaUtils.js (CREA ESTE ARCHIVO NUEVO)
+// src/utils/slaUtils.js
+
+export function getSlaMinutes(criticidad) {
+  const c = String(criticidad || '').toUpperCase();
+  if (c === 'S1') return 30;
+  if (c === 'S2') return 60;
+  if (c === 'S3') return 120;
+  return 240; // S4 u otra
+}
+
+export function getColorByPercent(percent) {
+  if (percent >= 75) return '#b9f6ca';   // verde claro
+  if (percent >= 50) return '#fff59d';   // amarillo
+  if (percent >= 25) return '#ffcc80';   // naranja
+  return '#ef9a9a';                      // rojo
+}
+
+export function getButtonColorByPercent(percent) {
+  if (percent >= 75) return '#2e7d32';   // verde oscuro
+  if (percent >= 50) return '#f9a825';   // amarillo oscuro
+  if (percent >= 25) return '#ef6c00';   // naranja oscuro
+  return '#c62828';                      // rojo oscuro
+}
+
+export function calcularCriticidad(affectedCI = []) {
+  if (!Array.isArray(affectedCI) || affectedCI.length === 0) return 'S4';
+  const list = affectedCI
+    .map(ci => (ci?.criticidad || ci?.criticality || '').toString().toUpperCase())
+    .filter(Boolean);
+  if (list.includes('S1')) return 'S1';
+  if (list.includes('S2')) return 'S2';
+  if (list.includes('S3')) return 'S3';
+  return 'S4';
+}
+
+5) src/components/ProblemCard.jsx (REEMPLAZA COMPLETO – MISMO DISEÑO, SOLO LÓGICA ROBUSTA)
 // src/components/ProblemCard.jsx
 import React, { useEffect, useState } from 'react';
 import {
@@ -25,7 +182,7 @@ export default function ProblemCard({ problem, username }) {
     juris
   } = problem;
 
-  // TCS / NO TCS robusto (sin depender del backend exacto)
+  // TCS / NO TCS robusto (no dependemos de un único campo)
   const isTcs =
     isTcsIn ??
     jurisdiction?.isTcs ??
@@ -35,16 +192,20 @@ export default function ProblemCard({ problem, username }) {
 
   const label = labelIn ?? jurisdiction?.label ?? (isTcs ? 'TCS' : 'NO TCS');
 
-  // Criticidad e íconos
+  // Criticidad e íconos (asegúrate de tener los SVG en /public)
   const criticidad = calcularCriticidad(affectedCI);
-  const criticidadIcon = `/severidad${String(criticidad).replace('S','')}.svg`; // asume public/severidad1.svg, etc.
+  // si tus archivos son severidadS1.svg...S4.svg, usa esto:
+  const criticidadIcon = `/severidad${String(criticidad).replace('S','')}.svg`;
   const environmentIcon = environment === 'Productivo' ? '/icon-productivo.svg' : '/icon-noproductivo.svg';
 
   // Timer SLA
   const slaMinutes = getSlaMinutes(criticidad);
   const start = startTime ? new Date(startTime) : new Date();
   const [now, setNow] = useState(new Date());
-  useEffect(() => { const id = setInterval(() => setNow(new Date()), 1000); return () => clearInterval(id); }, []);
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
   const elapsedMinutes = Math.max((now - start) / 60000, 0);
   const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
   const percentRemaining = Math.min((remainingMinutes / (slaMinutes || 1)) * 100, 100);
@@ -63,6 +224,7 @@ export default function ProblemCard({ problem, username }) {
   const dynatraceUrl = tenant ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}` : null;
   const disabled = !username || !dynatraceUrl;
 
+  // === DISEÑO SE MANTIENE ===
   return (
     <div
       style={{
@@ -78,8 +240,8 @@ export default function ProblemCard({ problem, username }) {
     >
       {/* Iconos */}
       <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '0.5rem' }}>
-        <img src={criticidadIcon} alt={`S${criticidad}`} width="40" height="40" title={`Criticidad ${criticidad}`} />
-        <img src={environmentIcon} alt={environment} width="36" height="36" title={environment} />
+        <img src={criticidadIcon} alt={`Criticidad ${criticidad}`} width="40" height="40" />
+        <img src={environmentIcon} alt={environment} width="36" height="36" />
       </div>
 
       {/* Info */}
@@ -126,6 +288,100 @@ export default function ProblemCard({ problem, username }) {
           Revisar problema
         </button>
       </div>
+    </div>
+  );
+}
+
+
+Recuerda: coloca tus SVG en /public (raíz):
+
+public/
+├── severidad1.svg
+├── severidad2.svg
+├── severidad3.svg
+├── severidad4.svg
+├── icon-productivo.svg
+└── icon-noproductivo.svg
+
+6) Páginas (cambios mínimos: importar helpers y filtrar)
+src/pages/TCSProblems.jsx (REEMPLAZA COMPLETO SOLO SI LO NECESITAS; DISEÑO IGUAL)
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+import { esTCS } from '../utils/jurisdiction';
+
+export default function TCSProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+  const list = problems.filter(esTCS);
+
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (list.length === 0) return <h2>No hay problemas TCS actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Problemas TCS</h2>
+      <UsernameInput />
+      {list.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+src/pages/OtherProblems.jsx
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+import { esNoTCS } from '../utils/jurisdiction';
+
+export default function OtherProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+  const list = problems.filter(esNoTCS);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (list.length === 0) return <h2>No hay problemas de terceros actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Problemas Otros</h2>
+      <UsernameInput />
+      {list.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+src/pages/AllProblems.jsx
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+
+export default function AllProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+
+  if (loading) return <h2>Cargando problemas…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (problems.length === 0) return <h2>No hay problemas actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Todos los Problemas</h2>
+      <UsernameInput />
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
     </div>
   );
 }
