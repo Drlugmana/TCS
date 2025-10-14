@@ -1,21 +1,16 @@
+// ↓↓↓ (dos líneas antes iguales)
+var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
+
 foreach (var kvp in entitiesList)
 {
-    // CON dominio (FQDN) tal cual
-    var fullKey = (kvp.Key ?? string.Empty).Trim().ToUpperInvariant();
-    if (!string.IsNullOrEmpty(fullKey))
-        normalizedEntities.TryAdd(fullKey, kvp.Value);
+    // Key completa tal cual llega de Dynatrace (FQDN si lo hay)
+    var fullKey = (kvp.Key ?? string.Empty).Trim();
+    if (!string.IsNullOrWhiteSpace(fullKey))
+        normalizedEntities.AddOrUpdate(fullKey, _ => kvp.Value, (_, existing) => existing);
 
-    // SIN dominio (primer label) para hacer match flexible
+    // Key corta (sin dominio) para match flexible
     var shortKey = fullKey.Split('.')[0];
-    if (!string.IsNullOrEmpty(shortKey))
-        normalizedEntities.TryAdd(shortKey, kvp.Value);
+    if (!string.IsNullOrWhiteSpace(shortKey))
+        normalizedEntities.AddOrUpdate(shortKey, _ => kvp.Value, (_, existing) => existing);
 }
-
-// Tomar el nombre tal cual Dynatrace (FQDN si existe)
-string dynNameFull =
-    latest?.Properties?.OneAgentCustomHostName ??
-    latest?.Properties?.DetectedName ??
-    latest?.DisplayName ??
-    server?.Name; // fallback por si acaso
-
-worksheet.Cells[row, 1].Value = dynNameFull;   // ahora sale igual que en Dynatrace
+// ↑↑↑ (dos líneas después iguales)
