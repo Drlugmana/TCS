@@ -1,52 +1,188 @@
-// ↓↓↓ (dos líneas antes iguales)
-var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
+using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Configuration;
+using Newtonsoft.Json;
+using ReporteCoberturaSLA.Models.EntityModels;
+using System.Collections.Concurrent;
 
-foreach (var kvp in entitiesList)
+namespace ReporteCoberturaSLA.DAL
 {
-    // Key completa tal cual llega de Dynatrace (FQDN si lo hay)
-    var fullKey = (kvp.Key ?? string.Empty).Trim();
-    if (!string.IsNullOrWhiteSpace(fullKey))
-        normalizedEntities.AddOrUpdate(fullKey, _ => kvp.Value, (_, existing) => existing);
 
-    // Key corta (sin dominio) para match flexible
-    var shortKey = fullKey.Split('.')[0];
-    if (!string.IsNullOrWhiteSpace(shortKey))
-        normalizedEntities.AddOrUpdate(shortKey, _ => kvp.Value, (_, existing) => existing);
-}
-// ↑↑↑ (dos líneas después iguales)
-
-
-
-if (!string.IsNullOrWhiteSpace(server.Name))
-{
-    var hostFull  = server.Name.Trim();         // tal cual viene de CMDB
-    var hostShort = hostFull.Split('.')[0];     // sin dominio
-    bool matchFound = false;
-
-    if (normalizedEntities.TryGetValue(hostFull, out var matchedEntities) ||
-        normalizedEntities.TryGetValue(hostShort, out matchedEntities))
+    public class EntitiesDB
     {
-        _serversWithEntities.Add(new ServerWithEntities
+        private string _connectionString;
+
+        public EntitiesDB(string connectionString)
         {
-            Server = server,
-            Entities = matchedEntities
-        });
-        matchFound = true;
+            _connectionString = connectionString;
+        }
+
+        public async Task<List<EntitySchema>> GetEntities2(string name)
+        {
+            var entities = new List<EntitySchema>();
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            const string query = @"SELECT EntityId, Environment, Tenant, DisplayName, FirstSeen, LastSeen, 
+                           Type, ManagementZones, Properties, Tags FROM DynatraceMonitoredEntities
+                           WHERE DisplayName LIKE @DisplayName";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@DisplayName", "%" + name + "%");
+
+            using var reader = await command.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                var entityDb = new EntityDb
+                {
+                    EntityId = reader.GetString(0),
+                    Environment = reader.GetString(1),
+                    Tenant = reader.GetString(2),
+                    DisplayName = reader.GetString(3),
+                    FirstSeen = reader.GetDateTime(4),
+                    LastSeen = reader.GetDateTime(5),
+                    Type = reader.GetString(6),
+                    ManagementZones = reader.GetString(7),
+                    Properties = reader.GetString(8),
+                    Tags = reader.GetString(9)
+                };
+
+                var entitySchema = new EntitySchema
+                {
+                    EntityId = entityDb.EntityId,
+                    Environment = entityDb.Environment,
+                    Tenant = entityDb.Tenant,
+                    DisplayName = entityDb.DisplayName,
+                    FirstSeen = entityDb.FirstSeen,
+                    LastSeen = entityDb.LastSeen,
+                    Type = entityDb.Type,
+                    ManagementZones = JsonConvert.DeserializeObject<List<ManagementZone>>(entityDb.ManagementZones),
+                    Properties = JsonConvert.DeserializeObject<EntityProperties>(entityDb.Properties),
+                    Tags = JsonConvert.DeserializeObject<List<Tag>>(entityDb.Tags)
+
+                };
+
+                entities.Add(entitySchema);
+            }
+
+            return entities;
+        }
+
+
+        public async Task<ConcurrentDictionary<string, List<EntitySchema>>> GetEntities()
+        {
+            Console.WriteLine($"GetEntitiesByEnvironment at {DateTime.Now.ToString()}");
+            var entities = new ConcurrentDictionary<string, List<EntitySchema>>();
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            const string query = @"SELECT EntityId, Environment, Tenant, DisplayName, FirstSeen, LastSeen, 
+                           Type, ManagementZones, Properties, Tags FROM DynatraceMonitoredEntities
+                            WHERE Type <> 'HYPERVISOR_DISK'";
+
+            using var command = new SqlCommand(query, connection);
+
+            using var reader = await command.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                var entityDb = new EntityDb
+                {
+                    EntityId = reader.GetString(0),
+                    Environment = reader.GetString(1),
+                    Tenant = reader.GetString(2),
+                    DisplayName = reader.GetString(3),
+                    FirstSeen = reader.GetDateTime(4),
+                    LastSeen = reader.GetDateTime(5),
+                    Type = reader.GetString(6),
+                    ManagementZones = reader.GetString(7),
+                    Properties = reader.GetString(8),
+                    Tags = reader.GetString(9)
+                };
+
+                var entitySchema = new EntitySchema
+                {
+                    EntityId = entityDb.EntityId,
+                    Environment = entityDb.Environment,
+                    Tenant = entityDb.Tenant,
+                    DisplayName = entityDb.DisplayName.ToUpper(),
+                    FirstSeen = entityDb.FirstSeen,
+                    LastSeen = entityDb.LastSeen,
+                    Type = entityDb.Type,
+                    ManagementZones = JsonConvert.DeserializeObject<List<ManagementZone>>(entityDb.ManagementZones),
+                    Properties = JsonConvert.DeserializeObject<EntityProperties>(entityDb.Properties),
+                    Tags = JsonConvert.DeserializeObject<List<Tag>>(entityDb.Tags)
+                };
+
+                entities.AddOrUpdate(entitySchema.DisplayName, new List<EntitySchema> { entitySchema }, (key, existingList) =>
+                {
+                    existingList.Add(entitySchema);
+                    return existingList;
+                });
+            }
+
+            Console.WriteLine($"Finish get entities at {DateTime.Now.ToString()}");
+            return entities;
+        }
+
+
+        public async Task<List<EntitySchema>> GetEntitiesExcludingIds(List<string> entityIds, string environment)
+        {
+            var entities = new List<EntitySchema>();
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            var parameters = string.Join(",", entityIds.Select((id, index) => $"@id{index}"));
+            var query = $"SELECT EntityId, Environment, Tenant, DisplayName, FirstSeen, LastSeen, Type, ManagementZones, " +
+                $"Properties, Tags FROM DynatraceMonitoredEntities WHERE EntityId NOT IN ({parameters}) AND Environment = @Environment";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@Environment", environment);
+
+            for (int i = 0; i < entityIds.Count; i++)
+            {
+                command.Parameters.AddWithValue($"@id{i}", entityIds[i]);
+            }
+
+            using var reader = await command.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                var entityDb = new EntityDb
+                {
+                    EntityId = reader.GetString(0),
+                    Environment = reader.GetString(1),
+                    Tenant = reader.GetString(2),
+                    DisplayName = reader.GetString(3),
+                    FirstSeen = reader.GetDateTime(4),
+                    LastSeen = reader.GetDateTime(5),
+                    Type = reader.GetString(6),
+                    ManagementZones = reader.GetString(7),
+                    Properties = reader.GetString(8),
+                    Tags = reader.GetString(9)
+                };
+
+                var entitySchema = new EntitySchema
+                {
+                    EntityId = entityDb.EntityId,
+                    Environment = entityDb.Environment,
+                    Tenant = entityDb.Tenant,
+                    DisplayName = entityDb.DisplayName,
+                    FirstSeen = entityDb.FirstSeen,
+                    LastSeen = entityDb.LastSeen,
+                    Type = entityDb.Type,
+                    ManagementZones = JsonConvert.DeserializeObject<List<ManagementZone>>(entityDb.ManagementZones),
+                    Properties = JsonConvert.DeserializeObject<EntityProperties>(entityDb.Properties),
+                    Tags = JsonConvert.DeserializeObject<List<Tag>>(entityDb.Tags)
+                };
+
+                entities.Add(entitySchema);
+            }
+
+            return entities;
+        }
+
     }
-
-    if (!matchFound)
-        _serversNoMatch.Add(server);
 }
-
-
-var server = serverWithEntities.Server;
-var latest = serverWithEntities.Entities.OrderByDescending(e => e.LastSeen).FirstOrDefault();
-
-// Nombre “tal cual Dynatrace”: OneAgent → Detected → Display
-string dynNameFull =
-    latest?.Properties?.OneAgentCustomHostName ??
-    latest?.Properties?.DetectedName ??
-    latest?.DisplayName ??
-    server?.Name; // fallback
-
-worksheet.Cells[row, 1].Value = dynNameFull;   // ← ahora sale exactamente como en Dynatrace
