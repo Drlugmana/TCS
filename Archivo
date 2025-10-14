@@ -1,1 +1,46 @@
 
+110             // índice que acepta tanto FQDN (con dominio) como sin dominio (normalizado)
+111             var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
+
+112             // helper para agregar una llave (FULL y NORMALIZADA)
+113             void AddKey(string? rawKey, List<EntitySchema> ents)
+114             {
+115                 if (string.IsNullOrWhiteSpace(rawKey)) return;
+
+116                 // 1) llave FULL (tal cual)
+117                 var full = rawKey.Trim().ToUpperInvariant();
+118                 if (!string.IsNullOrEmpty(full))
+119                     normalizedEntities.AddOrUpdate(full, _ => new List<EntitySchema>(ents), (_, existing) =>
+120                     {
+121                         foreach (var e in ents) if (!existing.Contains(e)) existing.Add(e);
+122                         return existing;
+123                     });
+
+124                 // 2) llave NORMALIZADA (sin dominio / limpia)
+125                 var norm = NormalizeHost(rawKey);
+126                 if (!string.IsNullOrEmpty(norm))
+127                     normalizedEntities.AddOrUpdate(norm, _ => new List<EntitySchema>(ents), (_, existing) =>
+128                     {
+129                         foreach (var e in ents) if (!existing.Contains(e)) existing.Add(e);
+130                         return existing;
+131                     });
+132             }
+
+133             // A) key principal del diccionario de Dynatrace
+134             foreach (var kvp in entitiesList)
+135             {
+136                 AddKey(kvp.Key, kvp.Value);
+137             }
+
+138             // B) llaves alternas por entidad
+139             foreach (var kvp in entitiesList)
+140             {
+141                 foreach (var ent in kvp.Value)
+142                 {
+143                     AddKey(ent.DisplayName,            kvp.Value);
+144                     AddKey(ent.OneAgentCustomHostName, kvp.Value);
+145                     AddKey(ent.DetectedName,           kvp.Value);
+146                 }
+147             }
+
+
