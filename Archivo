@@ -1,1 +1,3 @@
 
+private static List<Server> _cmdbRaw = new();
+private static List<EntitySchema> _dynatraceRaw = new();
