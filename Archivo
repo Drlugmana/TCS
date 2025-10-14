@@ -10,3 +10,12 @@ foreach (var kvp in entitiesList)
     if (!string.IsNullOrEmpty(shortKey))
         normalizedEntities.TryAdd(shortKey, kvp.Value);
 }
+
+// Tomar el nombre tal cual Dynatrace (FQDN si existe)
+string dynNameFull =
+    latest?.Properties?.OneAgentCustomHostName ??
+    latest?.Properties?.DetectedName ??
+    latest?.DisplayName ??
+    server?.Name; // fallback por si acaso
+
+worksheet.Cells[row, 1].Value = dynNameFull;   // ahora sale igual que en Dynatrace
