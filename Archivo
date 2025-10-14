@@ -1,66 +1,157 @@
+// src/api/problems.js
+// LEE LA URL desde .env -> VITE_API_URL=https://tu-backend:puerto
+const BASE = (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+if (!BASE) {
+  throw new Error('VITE_API_URL no está definida en .env (ej: VITE_API_URL=https://fpq6rkv3-44334.use.devtunnels.ms)');
+}
+
+// Endpoint de tu API
+const API = `${BASE}/api/Problems`;
+
+// Normaliza la lista que venga del backend, en cualquier forma
+function normalize(listLike) {
+  // puede venir como array directo o envuelto en {items|results|data|value}
+  let list = Array.isArray(listLike)
+    ? listLike
+    : (listLike?.items || listLike?.results || listLike?.data || listLike?.value || []);
+
+  if (!Array.isArray(list)) list = list ? [list] : [];
+
+  return list.map((p) => {
+    // isTcs puede venir de varias formas; lo calculamos una sola vez
+    const isTcs =
+      p?.jurisdiction?.isTcs ??
+      (typeof p?.isTcs === 'boolean' ? p.isTcs : undefined) ??
+      (typeof p?.juris === 'string' ? p.juris.toUpperCase() === 'TCS' : undefined);
+
+    const label =
+      p?.jurisdiction?.label ??
+      p?.label ??
+      (typeof p?.juris === 'string' ? p.juris : isTcs === true ? 'TCS' : 'NO TCS');
+
+    return { ...p, isTcs, label }; // añadimos campos normalizados
+  });
+}
+
+/**
+ * Obtiene problemas paginados desde el backend y los normaliza.
+ * @param {{page?: number, size?: number}} param0
+ * @returns {Promise<Array>}
+ */
+export async function fetchProblems({ page = 1, size = 50 } = {}) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+  const res = await fetch(url, { headers: { accept: 'application/json' } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} al obtener problemas: ${txt || 'sin detalle'}`);
+  }
+  const json = await res.json();
+  return normalize(json);
+}
+-----------------
 
 // src/utils/jurisdiction.js
+// Reglas de clasificación centralizadas (no tocan el diseño)
 
-/**
- * Devuelve el tiempo de SLA (en minutos) según la criticidad.
- * S1 = 30 min, S2 = 60 min, S3 = 120 min, S4 = 240 min
- */
-export function getSlaMinutes(criticidad) {
-  switch (criticidad) {
-    case 'S1':
-    case 1:
-      return 30;
-    case 'S2':
-    case 2:
-      return 60;
-    case 'S3':
-    case 3:
-      return 120;
-    case 'S4':
-    case 4:
-      return 240;
-    default:
-      return 60; // valor por defecto
-  }
+export const esTCS = (p) =>
+  p?.isTcs === true ||
+  (p?.label || '').toUpperCase() === 'TCS' ||
+  (typeof p?.juris === 'string' && p.juris.toUpperCase() === 'TCS') ||
+  p?.jurisdiction?.isTcs === true ||
+  (p?.jurisdiction?.label || '').toUpperCase() === 'TCS';
+
+export const esNoTCS = (p) =>
+  p?.isTcs === false ||
+  (p?.label || '').toUpperCase() === 'NO TCS' ||
+  (typeof p?.juris === 'string' && p.juris.toUpperCase() === 'NO TCS') ||
+  p?.jurisdiction?.isTcs === false ||
+  (p?.jurisdiction?.label || '').toUpperCase() === 'NO TCS';
+---------------------
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+import { esTCS } from '../utils/jurisdiction'; // 👈 cambio mínimo
+
+export default function TCSProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+
+  // 👇 cambio mínimo: usar helper de clasificación
+  const list = problems.filter(esTCS);
+
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (list.length === 0) return <h2>No hay problemas TCS actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Problemas TCS</h2>
+      <UsernameInput />
+      {list.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
 }
 
-/**
- * Devuelve color de fondo (tarjeta) según el porcentaje restante del SLA.
- * Verde → Amarillo → Rojo
- */
-export function getColorByPercent(percent) {
-  if (percent >= 75) return '#b9f6ca';   // verde claro
-  if (percent >= 50) return '#fff59d';   // amarillo
-  if (percent >= 25) return '#ffcc80';   // naranja
-  return '#ef9a9a';                      // rojo
+
+-----------------------
+
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
+import { esNoTCS } from '../utils/jurisdiction'; // 👈 cambio mínimo
+
+export default function OtherProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+
+  // 👇 cambio mínimo: usar helper de clasificación
+  const list = problems.filter(esNoTCS);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (list.length === 0) return <h2>No hay problemas de terceros actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Problemas Otros</h2>
+      <UsernameInput />
+      {list.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
 }
 
-/**
- * Devuelve color del botón según el porcentaje restante del SLA.
- */
-export function getButtonColorByPercent(percent) {
-  if (percent >= 75) return '#2e7d32';   // verde oscuro
-  if (percent >= 50) return '#f9a825';   // amarillo oscuro
-  if (percent >= 25) return '#ef6c00';   // naranja oscuro
-  return '#c62828';                      // rojo oscuro
-}
 
-/**
- * Calcula la criticidad (S1-S4) según los equipos afectados o severidad.
- * Si no hay datos, devuelve "S4" por defecto.
- */
-export function calcularCriticidad(affectedCI = []) {
-  if (!Array.isArray(affectedCI) || affectedCI.length === 0) {
-    return 'S4';
-  }
+--------------
 
-  // Busca la criticidad más alta entre los CIs
-  const criticidades = affectedCI
-    .map(ci => (ci.criticidad || ci.criticality || '').toString().toUpperCase())
-    .filter(c => ['S1', 'S2', 'S3', 'S4'].includes(c));
+import React from 'react';
+import useOpenProblems from '../hooks/useOpenProblems';
+import ProblemCard from '../components/ProblemCard';
+import UsernameInput from '../components/UsernameInput';
+import { useUser } from '../context/UserContext';
 
-  if (criticidades.includes('S1')) return 'S1';
-  if (criticidades.includes('S2')) return 'S2';
-  if (criticidades.includes('S3')) return 'S3';
-  return 'S4';
+export default function AllProblems() {
+  const { username } = useUser();
+  const { problems, loading, error } = useOpenProblems(30000);
+
+  if (loading) return <h2>Cargando problemas…</h2>;
+  if (error)   return <h2 style={{ color: 'crimson' }}>Error: {error}</h2>;
+  if (problems.length === 0) return <h2>No hay problemas actualmente.</h2>;
+
+  return (
+    <div style={{ maxWidth: 1000, margin: '0 auto', padding: '1rem' }}>
+      <h2 style={{ textAlign: 'center' }}>Todos los Problemas</h2>
+      <UsernameInput />
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
 }
