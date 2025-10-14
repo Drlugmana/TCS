@@ -1,1 +1,26 @@
 
+// Preferir el nombre “tal cual Dynatrace” (con dominio si lo hay)
+string dynNameFull = null;
+try
+{
+    // Usamos reflexión por si tu EntitySchema no define todas estas propiedades
+    var oneAgent = latest?.GetType().GetProperty("OneAgentCustomHostName")?.GetValue(latest)?.ToString();
+    var detected = latest?.GetType().GetProperty("DetectedName")?.GetValue(latest)?.ToString();
+
+    dynNameFull = !string.IsNullOrWhiteSpace(oneAgent) ? oneAgent
+               : !string.IsNullOrWhiteSpace(detected) ? detected
+               : latest?.DisplayName;
+}
+catch { /* ignorar si no existen las props */ }
+
+// Seguimos consultando estado con la clave “normalizada” (tabla de catálogos suele venir sin dominio)
+var keyForStatus = NormalizeHost(server?.Name ?? string.Empty);
+string estado;
+if (!opStatus.TryGetValue(keyForStatus, out estado))
+    estado = "SIN DATO";
+
+// 👉 Aquí escribimos el nombre en Excel: si Dynatrace trae FQDN lo usamos TAL CUAL
+var nameToWrite = !string.IsNullOrWhiteSpace(dynNameFull) ? dynNameFull : (server?.Name ?? string.Empty);
+worksheet.Cells[row, 1].Value = nameToWrite;
+
+worksheet.Cells[row, 2].Value = server.Class;
