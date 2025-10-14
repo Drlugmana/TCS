@@ -14,3 +14,26 @@ foreach (var kvp in entitiesList)
         normalizedEntities.AddOrUpdate(shortKey, _ => kvp.Value, (_, existing) => existing);
 }
 // ↑↑↑ (dos líneas después iguales)
+
+
+
+if (!string.IsNullOrWhiteSpace(server.Name))
+{
+    var hostFull  = server.Name.Trim();         // tal cual viene de CMDB
+    var hostShort = hostFull.Split('.')[0];     // sin dominio
+    bool matchFound = false;
+
+    if (normalizedEntities.TryGetValue(hostFull, out var matchedEntities) ||
+        normalizedEntities.TryGetValue(hostShort, out matchedEntities))
+    {
+        _serversWithEntities.Add(new ServerWithEntities
+        {
+            Server = server,
+            Entities = matchedEntities
+        });
+        matchFound = true;
+    }
+
+    if (!matchFound)
+        _serversNoMatch.Add(server);
+}
