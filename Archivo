@@ -37,3 +37,16 @@ if (!string.IsNullOrWhiteSpace(server.Name))
     if (!matchFound)
         _serversNoMatch.Add(server);
 }
+
+
+var server = serverWithEntities.Server;
+var latest = serverWithEntities.Entities.OrderByDescending(e => e.LastSeen).FirstOrDefault();
+
+// Nombre “tal cual Dynatrace”: OneAgent → Detected → Display
+string dynNameFull =
+    latest?.Properties?.OneAgentCustomHostName ??
+    latest?.Properties?.DetectedName ??
+    latest?.DisplayName ??
+    server?.Name; // fallback
+
+worksheet.Cells[row, 1].Value = dynNameFull;   // ← ahora sale exactamente como en Dynatrace
