@@ -1,1 +1,30 @@
+private static string NormalizeHost(string? name)
+{
+    if (string.IsNullOrWhiteSpace(name)) return string.Empty;
+    var s = name.Trim().ToUpperInvariant();
 
+    // si hay alias tipo xxx@HOST -> toma lo que viene DESPUÉS del '@'
+    int at = s.LastIndexOf('@');
+    if (at >= 0 && at < s.Length - 1) s = s[(at + 1)..];
+
+    // si hay espacios, toma el ÚLTIMO token (suele ser el host real)
+    if (s.Contains(' '))
+    {
+        var parts = s.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        s = parts[^1];
+    }
+
+    // corta dominio: HOST.DOMINIO -> HOST
+    int dot = s.IndexOf('.');
+    if (dot > 0) s = s[..dot];
+
+    // quita prefijos no alfanuméricos (+, _, etc.)
+    while (s.Length > 0 && !char.IsLetterOrDigit(s[0])) s = s[1..];
+
+    // deja solo letras/números/guiones
+    var sb = new StringBuilder(s.Length);
+    foreach (char c in s)
+        if (char.IsLetterOrDigit(c) || c == '-') sb.Append(c);
+
+    return sb.ToString();
+}
