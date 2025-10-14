@@ -1,4 +1,4 @@
-
+no
 110             // índice que acepta tanto FQDN (con dominio) como sin dominio (normalizado)
 111             var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
 
@@ -42,5 +42,19 @@
 145                     AddKey(ent.DetectedName,           kvp.Value);
 146                 }
 147             }
+
+AddKey(ent.DisplayName, kvp.Value);
+
+// Algunas versiones de EntitySchema no tienen estas propiedades
+// así que las ignoramos si no existen o son null
+try
+{
+    var oneAgentName = ent.GetType().GetProperty("OneAgentCustomHostName")?.GetValue(ent)?.ToString();
+    var detectedName = ent.GetType().GetProperty("DetectedName")?.GetValue(ent)?.ToString();
+
+    AddKey(oneAgentName, kvp.Value);
+    AddKey(detectedName, kvp.Value);
+}
+catch { /* ignorar si no existen las propiedades */ }
 
 
