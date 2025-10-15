@@ -1,19 +1,20 @@
-private static string NormalizeName(string name)
-{
-    return (StripDomain(name ?? string.Empty).Trim()).ToUpperInvariant();
-}
+// -------- DEDUP: Monitoreados (por nombre normalizado) --------
+int beforeMon = _serversWithEntities.Count;
 
-// Quitar de "No Monitoreados CMDB" los que ya están en "Monitoreados"
-var monitoredNames = new HashSet<string>(
-    _serversWithEntities
-        .Where(x => x?.Server?.Name != null)
-        .Select(x => NormalizeName(x.Server.Name)),
-    StringComparer.OrdinalIgnoreCase
-);
-
-// Filtra y de paso elimina duplicados por nombre normalizado
-_serversNoMatch = _serversNoMatch
-    .Where(s => s?.Name != null && !monitoredNames.Contains(NormalizeName(s.Name)))
-    .GroupBy(s => NormalizeName(s.Name))
-    .Select(g => g.First())
+_serversWithEntities = _serversWithEntities
+    .Where(sw => sw?.Server?.Name != null)
+    .GroupBy(sw => NormalizeName(sw.Server.Name))
+    .Select(g =>
+        // nos quedamos con el que tenga la entidad más reciente (LastSeen)
+        g.OrderByDescending(sw => (sw.Entities ?? new List<EntitySchema>())
+                                   .Where(e => e != null)
+                                   .Select(e => e.LastSeen)
+                                   .DefaultIfEmpty(DateTime.MinValue)
+                                   .Max())
+         .First()
+    )
     .ToList();
+
+int afterMon = _serversWithEntities.Count;
+Console.WriteLine($"[DEDUP] Monitoreados: {beforeMon} -> {afterMon} (eliminados {beforeMon - afterMon})");
+// --------------------------------------------------------------
