@@ -1,5 +1,7 @@
-=SI(Y(
-   BUSCARV(A2;Monitoreados!A:AR;42;FALSO)="Sí";
-   BUSCARV(A2;Monitoreados!A:AR;43;FALSO)="VERIFICAR";
-   BUSCARV(A2;Monitoreados!A:AR;44;FALSO)="Sí"
-);"OK";"VERIFICAR")
+=SI.ERROR(
+   SI( Y(
+       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$N:$N)="Sí";
+       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$O:$O)="VERIFICAR";
+       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$P:$P)="Sí"
+   ); "OK"; "VERIFICAR"),
+"No encontrado")
