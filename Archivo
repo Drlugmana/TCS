@@ -1,18 +1,1 @@
 
-int rowIndex = 2;
-
-// 🔽 Quitar duplicados (con o sin dominio, ignorando mayúsculas/minúsculas)
-_serversNoMatch = _serversNoMatch
-    .GroupBy(s =>
-    {
-        var name = s.Name?.Trim().ToUpper() ?? "";
-        var shortName = name.Split('.')[0];
-        return shortName;
-    })
-    .Select(g => g.First())
-    .ToList();
-
-foreach (var server in _serversNoMatch)
-{
-    worksheet.Cells[rowIndex, 1].Value = server.Name;
-    ...
