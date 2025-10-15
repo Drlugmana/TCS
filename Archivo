@@ -28,3 +28,20 @@
  );
  "No encontrado"
 )
+
+
+
+fff
+=SI.ERROR(
+ SI(
+   Y(
+     MAYUSC(SUSTITUIR(INDICE(Monitoreados!$AP:$AP;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="SI";
+     MAYUSC(INDICE(Monitoreados!$AQ:$AQ;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="VERIFICAR";
+     MAYUSC(SUSTITUIR(INDICE(Monitoreados!$AR:$AR;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="SI";
+     MAYUSC(INDICE(Monitoreados!$AS:$AS;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="OPERATIVO"
+   );
+   "OK";
+   "VERIFICAR"
+ );
+ "No encontrado"
+)
