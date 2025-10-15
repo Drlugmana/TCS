@@ -1,0 +1,19 @@
+// Helper: quita el dominio (host -> parte antes del primer '.')
+private static string StripDomain(string host)
+{
+    if (string.IsNullOrWhiteSpace(host)) return host;
+    host = host.Trim();
+    int idx = host.IndexOf('.');
+    return idx > 0 ? host.Substring(0, idx) : host;
+}
+
+
+
+// Nombre base (CustomHost -> Detected -> Display -> CMDB) y SIN dominio
+string dynNameFull =
+    latest?.Properties?.OneAgentCustomHostName ??
+    latest?.Properties?.DetectedName ??
+    latest?.DisplayName ??
+    server?.Name;
+
+worksheet.Cells[row, 1].Value = StripDomain(dynNameFull ?? string.Empty).ToUpperInvariant();
