@@ -1,44 +1,10 @@
 =SI.ERROR(
-   SI( Y(
-       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$N:$N)="Sí";
-       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$O:$O)="VERIFICAR";
-       BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$P:$P)="Sí"
-   ); "OK"; "VERIFICAR"),
-"No encontrado")
-
-=SI.ERROR(
-   SI( Y(
-       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$N:$N)="Sí";
-       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$O:$O)="VERIFICAR";
-       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$P:$P)="Sí"
-   ); "OK"; "VERIFICAR"),
-"No encontrado")
-
-
-=SI.ERROR(
  SI(
    Y(
-     MAYUSC(SUSTITUIR(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AP:$AP);"Í";"I"))="SI";
-     MAYUSC(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AQ:$AQ))="VERIFICAR";
-     MAYUSC(SUSTITUIR(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AR:$AR);"Í";"I"))="SI";
-     MAYUSC(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AS:$AS))="OPERATIVO"
-   );
-   "OK";
-   "VERIFICAR"
- );
- "No encontrado"
-)
-
-
-
-fff
-=SI.ERROR(
- SI(
-   Y(
-     MAYUSC(SUSTITUIR(INDICE(Monitoreados!$AP:$AP;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="SI";
-     MAYUSC(INDICE(Monitoreados!$AQ:$AQ;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="VERIFICAR";
-     MAYUSC(SUSTITUIR(INDICE(Monitoreados!$AR:$AR;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="SI";
-     MAYUSC(INDICE(Monitoreados!$AS:$AS;COINCIDIR(MINUSC(ESPACIOS($A2));MINUSC(ESPACIOS(Monitoreados!$A:$A));0)))="OPERATIVO"
+     MAYUSC(INDICE(Monitoreados!$AP:$AP;COINCIDIR(MINUSC(ESPACIOS($A2));Monitoreados!$AZ:$AZ;0)))="SI";
+     MAYUSC(INDICE(Monitoreados!$AQ:$AQ;COINCIDIR(MINUSC(ESPACIOS($A2));Monitoreados!$AZ:$AZ;0)))="VERIFICAR";
+     MAYUSC(INDICE(Monitoreados!$AR:$AR;COINCIDIR(MINUSC(ESPACIOS($A2));Monitoreados!$AZ:$AZ;0)))="SI";
+     MAYUSC(INDICE(Monitoreados!$AS:$AS;COINCIDIR(MINUSC(ESPACIOS($A2));Monitoreados!$AZ:$AZ;0)))="OPERATIVO"
    );
    "OK";
    "VERIFICAR"
