@@ -13,3 +13,18 @@
        BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$P:$P)="Sí"
    ); "OK"; "VERIFICAR"),
 "No encontrado")
+
+
+=SI.ERROR(
+ SI(
+   Y(
+     MAYUSC(SUSTITUIR(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AP:$AP);"Í";"I"))="SI";
+     MAYUSC(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AQ:$AQ))="VERIFICAR";
+     MAYUSC(SUSTITUIR(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AR:$AR);"Í";"I"))="SI";
+     MAYUSC(BUSCARX(ESPACIOS($A2);Monitoreados!$A:$A;Monitoreados!$AS:$AS))="OPERATIVO"
+   );
+   "OK";
+   "VERIFICAR"
+ );
+ "No encontrado"
+)
