@@ -5,3 +5,11 @@
        BUSCARX($A2;'No Monitoreados CMDB'!$A:$A;'No Monitoreados CMDB'!$P:$P)="Sí"
    ); "OK"; "VERIFICAR"),
 "No encontrado")
+
+=SI.ERROR(
+   SI( Y(
+       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$N:$N)="Sí";
+       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$O:$O)="VERIFICAR";
+       BUSCARX($A2;Monitoreados!$A:$A;Monitoreados!$P:$P)="Sí"
+   ); "OK"; "VERIFICAR"),
+"No encontrado")
