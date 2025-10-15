@@ -1,20 +1,21 @@
-// -------- DEDUP: Monitoreados (por nombre normalizado) --------
-int beforeMon = _serversWithEntities.Count;
+    var headers = new[]
+    {
+        "Server Name", "Server Class", "Server Group","Operational State",
+        "Environment", "Related Application", "Owned By", "Manufacturer" ,
+        "Sistema Operativo","Version Sistema Operativo","Gestionado Por","Es Virtual"
+    };
 
-_serversWithEntities = _serversWithEntities
-    .Where(sw => sw?.Server?.Name != null)
-    .GroupBy(sw => NormalizeName(sw.Server.Name))
-    .Select(g =>
-        // nos quedamos con el que tenga la entidad más reciente (LastSeen)
-        g.OrderByDescending(sw => (sw.Entities ?? new List<EntitySchema>())
-                                   .Where(e => e != null)
-                                   .Select(e => e.LastSeen)
-                                   .DefaultIfEmpty(DateTime.MinValue)
-                                   .Max())
-         .First()
-    )
-    .ToList();
+    // 🔽 Eliminar de la lista de No Monitoreados los que ya están en Monitoreados
+    var monitoredHostnames = new HashSet<string>(
+        _serversWithEntities.Select(s => s.Server.Name?.Trim().ToUpperInvariant() ?? "")
+    );
 
-int afterMon = _serversWithEntities.Count;
-Console.WriteLine($"[DEDUP] Monitoreados: {beforeMon} -> {afterMon} (eliminados {beforeMon - afterMon})");
-// --------------------------------------------------------------
+    _serversNoMatch = _serversNoMatch
+        .Where(s => !monitoredHostnames.Contains(s.Name?.Trim().ToUpperInvariant() ?? ""))
+        .ToList();
+
+    for (int i = 0; i < headers.Length; i++)
+    {
+        worksheet.Cells[1, i + 1].Value = headers[i];
+        worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+    }
