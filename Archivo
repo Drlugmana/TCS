@@ -1,1 +1,22 @@
 
+int rowIndex = 2;
+
+// 🔽 Quitar duplicados prefiriendo el nombre SIN dominio
+_serversNoMatch = _serversNoMatch
+    .GroupBy(s =>
+    {
+        var n = s.Name?.Trim() ?? "";
+        var shortName = n.Split('.')[0];
+        return shortName.ToUpperInvariant();
+    })
+    .Select(g => g
+        .OrderBy(x => (x.Name?.Contains('.') ?? false) ? 1 : 0)
+        .ThenBy(x => x.Name?.Length ?? int.MaxValue)
+        .First()
+    )
+    .ToList();
+
+foreach (var server in _serversNoMatch)
+{
+    worksheet.Cells[rowIndex, 1].Value = server.Name;
+    ...
