@@ -1,4 +1,1 @@
-=SI(CONTAR.SI(Monitoreados!A:A;A2)>0;"Monitoreados";
-SI(CONTAR.SI('No Monitoreados Cmdb'!A:A;A2)>0;"No Monitoreados CMDB";
-SI(CONTAR.SI('No Monitoreados Dynatrace'!A:A;A2)>0;"No Monitoreados Dynatrace";
-"No encontrado")))
+=SI(Y(AP2="Sí";AQ2="VERIFICAR";AR2="Sí");"OK";"VERIFICAR")
