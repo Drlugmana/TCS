@@ -1,19 +1,19 @@
-// Helper: quita el dominio (host -> parte antes del primer '.')
-private static string StripDomain(string host)
+private static string NormalizeName(string name)
 {
-    if (string.IsNullOrWhiteSpace(host)) return host;
-    host = host.Trim();
-    int idx = host.IndexOf('.');
-    return idx > 0 ? host.Substring(0, idx) : host;
+    return (StripDomain(name ?? string.Empty).Trim()).ToUpperInvariant();
 }
 
+// Quitar de "No Monitoreados CMDB" los que ya están en "Monitoreados"
+var monitoredNames = new HashSet<string>(
+    _serversWithEntities
+        .Where(x => x?.Server?.Name != null)
+        .Select(x => NormalizeName(x.Server.Name)),
+    StringComparer.OrdinalIgnoreCase
+);
 
-
-// Nombre base (CustomHost -> Detected -> Display -> CMDB) y SIN dominio
-string dynNameFull =
-    latest?.Properties?.OneAgentCustomHostName ??
-    latest?.Properties?.DetectedName ??
-    latest?.DisplayName ??
-    server?.Name;
-
-worksheet.Cells[row, 1].Value = StripDomain(dynNameFull ?? string.Empty).ToUpperInvariant();
+// Filtra y de paso elimina duplicados por nombre normalizado
+_serversNoMatch = _serversNoMatch
+    .Where(s => s?.Name != null && !monitoredNames.Contains(NormalizeName(s.Name)))
+    .GroupBy(s => NormalizeName(s.Name))
+    .Select(g => g.First())
+    .ToList();
