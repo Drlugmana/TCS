@@ -1,1 +1,5 @@
-=SI(Y(AP2="Sí";AQ2="VERIFICAR";AR2="Sí");"OK";"VERIFICAR")
+=SI(Y(
+   BUSCARV(A2;Monitoreados!A:AR;42;FALSO)="Sí";
+   BUSCARV(A2;Monitoreados!A:AR;43;FALSO)="VERIFICAR";
+   BUSCARV(A2;Monitoreados!A:AR;44;FALSO)="Sí"
+);"OK";"VERIFICAR")
