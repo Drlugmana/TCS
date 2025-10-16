@@ -1,51 +1,31 @@
 // ... arriba ...
-var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>();
+var server = serverWithEntities.Server;
+string originalName = server?.Name ?? "";
+bool serverHasDomain = originalName.Contains('.');
 
-foreach (var kvp in entitiesList)
+int Score(EntitySchema e)
 {
-    var full = (kvp.Key ?? "").Trim().ToUpper();        // FQDN tal cual
-    var shortName = full.Split('.')[0];                  // shortname
+    int s = 0;
 
-    normalizedEntities.AddOrUpdate(
-        full,
-        _ => new List<EntitySchema>(kvp.Value),
-        (_, existing) => { existing.AddRange(kvp.Value); return existing; });
+    // Coincidencia exacta con el nombre tal cual llega de CMDB/Dynatrace
+    if (!string.IsNullOrWhiteSpace(e.DisplayName) &&
+        string.Equals(e.DisplayName, originalName, StringComparison.OrdinalIgnoreCase)) s += 5000;
 
-    if (!string.IsNullOrWhiteSpace(shortName))
-    {
-        normalizedEntities.AddOrUpdate(
-            shortName,
-            _ => new List<EntitySchema>(kvp.Value),
-            (_, existing) => { existing.AddRange(kvp.Value); return existing; });
-    }
-}
-// ... abajo ...
+    // Si el server trae dominio, favorece entidades con FQDN
+    if (serverHasDomain && (e.DisplayName?.Contains('.') ?? false)) s += 500;
 
+    if (string.Equals(e.Type, "HOST", StringComparison.OrdinalIgnoreCase)) s += 1000;
+    if (!string.IsNullOrWhiteSpace(e.Properties?.MonitoringMode)) s += 200;
+    if (string.Equals(e.Properties?.MonitoringMode, "INFRASTRUCTURE", StringComparison.OrdinalIgnoreCase)) s += 100;
 
------
+    if (!string.IsNullOrWhiteSpace(e.Properties?.OneAgentCustomHostName)) s += 10;
+    if (!string.IsNullOrWhiteSpace(e.Properties?.DetectedName)) s += 10;
+    if (e.Properties?.LogicalCpuCores != null) s += 5;
+    if (e.Properties?.PhysicalMemory != null) s += 5;
+    if ((e.ManagementZones?.Count ?? 0) > 0) s += 3;
+    if ((e.Tags?.Count ?? 0) > 0) s += 3;
 
-// ... arriba ...
-var original = (server.Name ?? "").Trim();
-var fullKey  = original.ToUpperInvariant();
-var shortKey = fullKey.Split('.')[0];
-
-List<EntitySchema>? matchedEntities = null;
-
-if (normalizedEntities.TryGetValue(fullKey, out var listFull))
-    matchedEntities = listFull;
-else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
-    matchedEntities = listShort;
-
-if (matchedEntities != null)
-{
-    _serversWithEntities.Add(new ServerWithEntities
-    {
-        Server = server,
-        Entities = matchedEntities
-    });
-}
-else
-{
-    _serversNoMatch.Add(server);
+    s += (int)(e.LastSeen - DateTime.MinValue).TotalSeconds / 100000;
+    return s;
 }
 // ... abajo ...
