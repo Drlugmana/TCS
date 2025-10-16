@@ -1,3 +1,82 @@
+public static async Task MatchEntitiesInfo(List<Server> serverList)
+{
+    EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
+    var entitiesList = await entitiesDB.GetEntities();
+
+    var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>();
+
+    // === Construir índices por FQDN y por shortname ===
+    foreach (var kvp in entitiesList)
+    {
+        var full = (kvp.Key ?? "").Trim().ToUpper();   // FQDN tal cual
+        var shortName = full.Split('.')[0];            // shortname
+
+        // FQDN
+        normalizedEntities.AddOrUpdate(
+            full,
+            _ => new List<EntitySchema>(kvp.Value),
+            (_, existing) => { existing.AddRange(kvp.Value); return existing; });
+
+        // Solo si hay dominio, añadimos también shortname
+        if (full.Contains('.'))
+        {
+            normalizedEntities.AddOrUpdate(
+                shortName,
+                _ => new List<EntitySchema>(kvp.Value),
+                (_, existing) => { existing.AddRange(kvp.Value); return existing; });
+        }
+    }
+
+    // === Buscar primero por FQDN, luego por shortname ===
+    Parallel.ForEach(serverList, server =>
+    {
+        if (!string.IsNullOrEmpty(server.Name))
+        {
+            var original = (server.Name ?? "").Trim();
+            var fullKey  = original.ToUpperInvariant();
+            var shortKey = fullKey.Split('.')[0];
+
+            List<EntitySchema>? matchedEntities = null;
+
+            if (normalizedEntities.TryGetValue(fullKey, out var listFull))
+                matchedEntities = listFull;
+            else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+                matchedEntities = listShort;
+
+            if (matchedEntities != null)
+            {
+                _serversWithEntities.Add(new ServerWithEntities
+                {
+                    Server   = server,
+                    Entities = matchedEntities
+                });
+            }
+            else
+            {
+                _serversNoMatch.Add(server);
+            }
+
+            Console.Write("Procesando servidores: {0}/{1}",
+                          serverList.IndexOf(server) + 1, serverList.Count);
+        }
+    });
+
+    // (opcional) si quieres mantener las entidades que quedaron sin emparejar
+    _serversNoMatchDyn.Clear();
+    foreach (var list in normalizedEntities.Values)
+        foreach (var ent in list)
+            _serversNoMatchDyn.Add(ent);
+
+    Console.WriteLine();
+    Console.WriteLine($"Entidades match {_serversWithEntities.Count}");
+    Console.WriteLine($"Entidades que no hicieron match en cmdb {_serversNoMatch.Count}");
+    Console.WriteLine($"Entidades que no hicieron match en dynatrace {_serversNoMatchDyn.Count}");
+}
+
+
+
+
+
 // ... arriba ...
 var server = serverWithEntities.Server;
 string originalName = server?.Name ?? "";
