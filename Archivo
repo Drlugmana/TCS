@@ -1,169 +1,52 @@
-public static async Task MatchEntitiesInfo(List<Server> serverList)
-{
-    EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
-    var entitiesList = await entitiesDB.GetEntities();
-
-    var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>();
-
-    // === Construir índices por FQDN y por shortname ===
-    foreach (var kvp in entitiesList)
-    {
-        var full = (kvp.Key ?? "").Trim().ToUpper();   // FQDN tal cual
-        var shortName = full.Split('.')[0];            // shortname
-
-        // FQDN
-        normalizedEntities.AddOrUpdate(
-            full,
-            _ => new List<EntitySchema>(kvp.Value),
-            (_, existing) => { existing.AddRange(kvp.Value); return existing; });
-
-        // Solo si hay dominio, añadimos también shortname
-        if (full.Contains('.'))
-        {
-            normalizedEntities.AddOrUpdate(
-                shortName,
-                _ => new List<EntitySchema>(kvp.Value),
-                (_, existing) => { existing.AddRange(kvp.Value); return existing; });
-        }
-    }
-
-    // === Buscar primero por FQDN, luego por shortname ===
-    Parallel.ForEach(serverList, server =>
-    {
-        if (!string.IsNullOrEmpty(server.Name))
-        {
-            var original = (server.Name ?? "").Trim();
-            var fullKey  = original.ToUpperInvariant();
-            var shortKey = fullKey.Split('.')[0];
-
-            List<EntitySchema>? matchedEntities = null;
-
-            if (normalizedEntities.TryGetValue(fullKey, out var listFull))
-                matchedEntities = listFull;
-            else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
-                matchedEntities = listShort;
-
-            if (matchedEntities != null)
-            {
-                _serversWithEntities.Add(new ServerWithEntities
-                {
-                    Server   = server,
-                    Entities = matchedEntities
-                });
-            }
-            else
-            {
-                _serversNoMatch.Add(server);
-            }
-
-            Console.Write("Procesando servidores: {0}/{1}",
-                          serverList.IndexOf(server) + 1, serverList.Count);
-        }
-    });
-
-    // (opcional) si quieres mantener las entidades que quedaron sin emparejar
-    _serversNoMatchDyn.Clear();
-    foreach (var list in normalizedEntities.Values)
-        foreach (var ent in list)
-            _serversNoMatchDyn.Add(ent);
-
-    Console.WriteLine();
-    Console.WriteLine($"Entidades match {_serversWithEntities.Count}");
-    Console.WriteLine($"Entidades que no hicieron match en cmdb {_serversNoMatch.Count}");
-    Console.WriteLine($"Entidades que no hicieron match en dynatrace {_serversNoMatchDyn.Count}");
-}
-
-
-
-
-
-// ... arriba ...
-var server = serverWithEntities.Server;
-string originalName = server?.Name ?? "";
-bool serverHasDomain = originalName.Contains('.');
-
-int Score(EntitySchema e)
-{
-    int s = 0;
-
-    // Coincidencia exacta con el nombre tal cual llega de CMDB/Dynatrace
-    if (!string.IsNullOrWhiteSpace(e.DisplayName) &&
-        string.Equals(e.DisplayName, originalName, StringComparison.OrdinalIgnoreCase)) s += 5000;
-
-    // Si el server trae dominio, favorece entidades con FQDN
-    if (serverHasDomain && (e.DisplayName?.Contains('.') ?? false)) s += 500;
-
-    if (string.Equals(e.Type, "HOST", StringComparison.OrdinalIgnoreCase)) s += 1000;
-    if (!string.IsNullOrWhiteSpace(e.Properties?.MonitoringMode)) s += 200;
-    if (string.Equals(e.Properties?.MonitoringMode, "INFRASTRUCTURE", StringComparison.OrdinalIgnoreCase)) s += 100;
-
-    if (!string.IsNullOrWhiteSpace(e.Properties?.OneAgentCustomHostName)) s += 10;
-    if (!string.IsNullOrWhiteSpace(e.Properties?.DetectedName)) s += 10;
-    if (e.Properties?.LogicalCpuCores != null) s += 5;
-    if (e.Properties?.PhysicalMemory != null) s += 5;
-    if ((e.ManagementZones?.Count ?? 0) > 0) s += 3;
-    if ((e.Tags?.Count ?? 0) > 0) s += 3;
-
-    s += (int)(e.LastSeen - DateTime.MinValue).TotalSeconds / 100000;
-    return s;
-}
-// ... abajo ...
+// ... dos líneas antes (contexto)
+int row = 2;
 
 foreach (var serverWithEntities in _serversWithEntities)
 {
     var server = serverWithEntities.Server;
 
-    // ==== Elegir la mejor entidad para escribir ====
-    string originalName = server?.Name ?? "";
-    bool serverHasDomain = originalName.Contains('.');
-
-    int Score(EntitySchema e)
+    // ======= INICIO BLOQUE NUEVO: elegir entidad con MonitoringMode =======
+    // ranking de modos
+    int ModeRank(string? mm) => mm?.ToUpperInvariant() switch
     {
-        int s = 0;
+        "INFRASTRUCTURE" => 3,
+        "FULL_STACK"     => 2,
+        "DISCOVERY"      => 1,
+        _                => 0
+    };
 
-        // Coincidencia exacta con el nombre del server
-        if (!string.IsNullOrWhiteSpace(e.DisplayName) &&
-            string.Equals(e.DisplayName, originalName, StringComparison.OrdinalIgnoreCase)) s += 5000;
+    // candidatas que sí traen MonitoringMode
+    var withMode = serverWithEntities.Entities
+        .Where(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode))
+        .ToList();
 
-        // Si el server trae dominio, favorece entidades con FQDN
-        if (serverHasDomain && (e.DisplayName?.Contains('.') ?? false)) s += 500;
+    EntitySchema? chosen;
 
-        // Tipo y modo de monitoreo
-        if (string.Equals(e.Type, "HOST", StringComparison.OrdinalIgnoreCase)) s += 1000;
-        if (!string.IsNullOrWhiteSpace(e.Properties?.MonitoringMode)) s += 200;
-        if (string.Equals(e.Properties?.MonitoringMode, "INFRASTRUCTURE", StringComparison.OrdinalIgnoreCase)) s += 100;
-
-        // Más atributos = más puntos
-        if (!string.IsNullOrWhiteSpace(e.Properties?.OneAgentCustomHostName)) s += 10;
-        if (!string.IsNullOrWhiteSpace(e.Properties?.DetectedName)) s += 10;
-        if (e.Properties?.LogicalCpuCores != null) s += 5;
-        if (e.Properties?.PhysicalMemory  != null) s += 5;
-        if ((e.ManagementZones?.Count ?? 0) > 0) s += 3;
-        if ((e.Tags?.Count            ?? 0) > 0) s += 3;
-
-        // Último criterio: más reciente
-        s += (int)(e.LastSeen - DateTime.MinValue).TotalSeconds / 100000;
-
-        return s;
+    if (withMode.Count > 0)
+    {
+        // prioriza modo > recencia
+        chosen = withMode
+            .OrderByDescending(e => ModeRank(e.Properties!.MonitoringMode))
+            .ThenByDescending(e => e.LastSeen)
+            .FirstOrDefault();
+    }
+    else
+    {
+        // si ninguna trae MonitoringMode, usa la más reciente
+        chosen = serverWithEntities.Entities
+            .OrderByDescending(e => e.LastSeen)
+            .FirstOrDefault();
     }
 
-    // Evita duplicados por EntityId si tu lista trae repetidos bajo FQDN/shortname
-    var preferred = serverWithEntities.Entities
-        .GroupBy(e => e.EntityId)
-        .Select(g => g.First())
-        .OrderByDescending(Score)
-        .FirstOrDefault();
-
-    var latest = preferred;             // mantener el nombre 'latest' para el resto del código
-    var serverName = server?.Name ?? ""; // ESCRIBE tal cual (con dominio si viene con dominio)
-
-    // Protecciones de nulos (evita crashes y deja celdas vacías cuando falte algo)
-    var p  = latest?.Properties      ?? new EntityProperties();
+    var latest = chosen;                     // <-- mantenemos el nombre 'latest'
+    var p  = latest?.Properties ?? new EntityProperties();
     var mz = latest?.ManagementZones ?? new List<ManagementZone>();
-    var tg = latest?.Tags            ?? new List<Tag>();
+    var tg = latest?.Tags ?? new List<Tag>();
 
-    // ==== Escritura en el Excel (ejemplos con tus columnas) ====
-    worksheet.Cells[row,  1].Value = serverName;            // con dominio si lo trae
+    // ======= FIN BLOQUE NUEVO =======
+
+    // (escritura en Excel tal como ya tienes)
+    worksheet.Cells[row,  1].Value = server?.Name ?? "";
     worksheet.Cells[row,  2].Value = server.Class;
     worksheet.Cells[row,  3].Value = server.Group;
     worksheet.Cells[row,  4].Value = latest?.Tenant;
@@ -172,10 +55,9 @@ foreach (var serverWithEntities in _serversWithEntities)
     worksheet.Cells[row,  7].Value = latest?.Type;
     worksheet.Cells[row,  8].Value = latest?.DisplayName;
     worksheet.Cells[row,  9].Value = latest?.FirstSeen;
-    worksheet.Cells[row,  9].Style.Numberformat.Format  = "dd/mm/yyyy HH:mm:ss";
+    worksheet.Cells[row,  9].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
     worksheet.Cells[row, 10].Value = latest?.LastSeen;
     worksheet.Cells[row, 10].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
-
     worksheet.Cells[row, 11].Value = p.InstallerTrackedDownload == true ? "Verdadero" : "Falso";
     worksheet.Cells[row, 12].Value = p.PhysicalMemory?.ToString() ?? "";
     worksheet.Cells[row, 13].Value = p.Standalone == true ? "Verdadero" : "Falso";
@@ -185,14 +67,12 @@ foreach (var serverWithEntities in _serversWithEntities)
     worksheet.Cells[row, 17].Value = p.CpuCores?.ToString() ?? "";
     worksheet.Cells[row, 18].Value = p.MemoryTotal?.ToString() ?? "";
     worksheet.Cells[row, 19].Value = p.InstallerSupportAlert == true ? "Verdadero" : "Falso";
-
     worksheet.Cells[row, 20].Value = string.Join(",", p.IpAddress ?? new List<string>());
-    worksheet.Cells[row, 21].Value = string.Join(",", mz.Where(z => z?.Name != null).Select(z => z.Name));
-    worksheet.Cells[row, 22].Value = string.Join(",", tg.Where(t => t?.Key  != null).Select(t => t.Key));
+    worksheet.Cells[row, 21].Value = string.Join(",", mz.Where(z => z?.Name != null).Select(z => z!.Name));
+    worksheet.Cells[row, 22].Value = string.Join(",", tg.Where(t => t?.Key  != null).Select(t => t!.Key));
     worksheet.Cells[row, 23].Value = string.Join(",", tg.Where(t => t?.StringRepresentation != null)
-                                                        .Select(t => t.StringRepresentation));
-    worksheet.Cells[row, 24].Value = string.Join(",", tg.Where(t => t?.Value != null).Select(t => t.Value));
-
+                                                        .Select(t => t!.StringRepresentation));
+    worksheet.Cells[row, 24].Value = string.Join(",", tg.Where(t => t?.Value != null).Select(t => t!.Value));
     worksheet.Cells[row, 25].Value = p.OsType ?? "";
     worksheet.Cells[row, 26].Value = p.DetectedName ?? "";
     worksheet.Cells[row, 27].Value = p.State ?? "";
@@ -204,14 +84,14 @@ foreach (var serverWithEntities in _serversWithEntities)
     worksheet.Cells[row, 33].Value = p.InstallerVersion ?? "";
     worksheet.Cells[row, 34].Value = p.NetworkZone ?? "";
     worksheet.Cells[row, 35].Value = p.AutoInjection ?? "";
-    worksheet.Cells[row, 36].Value = p.MonitoringMode ?? "";   // << Aquí ya no te quedará vacío si existe
-    worksheet.Cells[row, 37].Value = p.HostGroupName ?? "";
 
+    // aquí verás DISCOVERY/FULL_STACK/INFRASTRUCTURE si el elegido lo trae
+    worksheet.Cells[row, 36].Value = p.MonitoringMode ?? "";
+
+    worksheet.Cells[row, 37].Value = p.HostGroupName ?? "";
     worksheet.Cells[row, 38].Value = server.Managed;
     worksheet.Cells[row, 39].Value = server.Virtual;
 
     row++;
 }
-
-
-
+// ... dos líneas después (contexto)
