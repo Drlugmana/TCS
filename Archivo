@@ -1,1 +1,64 @@
+// === Eliminar duplicados por Server Name (ignorando mayúsculas/minúsculas) ===
+_serversWithEntities = _serversWithEntities
+    .GroupBy(s => s.Server.Name?.Trim().ToUpperInvariant())
+    .Select(g =>
+    {
+        // Si hay varios duplicados, elige el que tenga MonitoringMode
+        var withMode = g.FirstOrDefault(x => 
+            x.Entities.Any(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode)));
 
+        // Si ninguno tiene MonitoringMode, deja el primero del grupo
+        return withMode ?? g.First();
+    })
+    .ToList();
+
+int row = 2;
+
+foreach (var serverWithEntities in _serversWithEntities)
+{
+    var server = serverWithEntities.Server;
+
+    // ===== INICIO BLOQUE NUEVO: elegir entidad con MonitoringMode =====
+    int ModeRank(string? mm) => mm?.ToUpperInvariant() switch
+    {
+        "INFRASTRUCTURE" => 3,
+        "FULL_STACK"     => 2,
+        "DISCOVERY"      => 1,
+        _                => 0
+    };
+
+    var withMode = serverWithEntities.Entities
+        .Where(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode))
+        .ToList();
+
+    EntitySchema? chosen;
+
+    if (withMode.Count > 0)
+    {
+        chosen = withMode
+            .OrderByDescending(e => ModeRank(e.Properties!.MonitoringMode))
+            .ThenByDescending(e => e.LastSeen)
+            .ThenByDescending(e =>
+                (e.Properties?.LogicalCpuCores != null ? 1 : 0) +
+                (e.Properties?.PhysicalMemory  != null ? 1 : 0) +
+                (e.Properties?.OsVersion       != null ? 1 : 0) +
+                (e.ManagementZones?.Count ?? 0) +
+                (e.Tags?.Count            ?? 0))
+            .FirstOrDefault();
+    }
+    else
+    {
+        chosen = serverWithEntities.Entities
+            .OrderByDescending(e => e.LastSeen)
+            .ThenByDescending(e =>
+                (e.Properties?.LogicalCpuCores != null ? 1 : 0) +
+                (e.Properties?.PhysicalMemory  != null ? 1 : 0) +
+                (e.Properties?.OsVersion       != null ? 1 : 0) +
+                (e.ManagementZones?.Count ?? 0) +
+                (e.Tags?.Count            ?? 0))
+            .FirstOrDefault();
+    }
+
+    var latest = chosen; // mantener el nombre 'latest' para tu escritura en Excel
+
+    // ===== FIN BLOQUE NUEVO =====
