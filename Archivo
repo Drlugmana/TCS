@@ -1,19 +1,22 @@
+    row++;
+}   // <--- ←← fin del foreach que llena "Monitoreados"
 
-// ...carga de opStatus y lo que ya tengas arriba
+// === DEDUPE EN HOJA "Monitoreados" POR SERVER NAME (columna 1) ===
+int lastRow = row - 1;
+var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-// === eliminar duplicados por Server.Name (case-insensitive) y fusionar entidades ===
-_serversWithEntities = _serversWithEntities
-    .GroupBy(sw => (sw.Server?.Name ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
-    .Select(g => new ServerWithEntities
+for (int r = 2; r <= lastRow; )
+{
+    var name = worksheet.Cells[r, 1].Value?.ToString() ?? string.Empty;
+    var key  = name.Trim(); // normaliza: quita espacios y compara sin mayúsculas/minúsculas
+
+    if (!seen.Add(key))
     {
-        Server   = g.First().Server, // conserva el primer Server del grupo
-        Entities = g.SelectMany(x => x.Entities ?? new List<EntitySchema>())
-                    .GroupBy(e => e.EntityId)                           // dedupe por EntityId
-                    .Select(gr => gr.OrderByDescending(e => e.LastSeen) // deja la más reciente
-                                     .First())
-                    .ToList()
-    })
-    .ToList();
+        worksheet.DeleteRow(r, 1, true); // borra la fila duplicada y desplaza hacia arriba
+        lastRow--;                       // ajusta el límite porque la hoja se encogió
+        continue;                        // NO incrementes r: ahora en r está la siguiente fila
+    }
 
-int row = 2;
-var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // <-- evita doble escritura
+    r++; // avanza solo cuando no hubo borrado
+}
+// === FIN DEDUPE ===
