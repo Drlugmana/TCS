@@ -1,64 +1,130 @@
-// === Eliminar duplicados por Server Name (ignorando mayúsculas/minúsculas) ===
-_serversWithEntities = _serversWithEntities
-    .GroupBy(s => s.Server.Name?.Trim().ToUpperInvariant())
-    .Select(g =>
-    {
-        // Si hay varios duplicados, elige el que tenga MonitoringMode
-        var withMode = g.FirstOrDefault(x => 
-            x.Entities.Any(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode)));
-
-        // Si ninguno tiene MonitoringMode, deja el primero del grupo
-        return withMode ?? g.First();
-    })
-    .ToList();
-
-int row = 2;
-
-foreach (var serverWithEntities in _serversWithEntities)
+public static void CreateMonitoredSheet(ExcelPackage package)
 {
-    var server = serverWithEntities.Server;
+    var worksheet = package.Workbook.Worksheets.Add("Monitoreados");
 
-    // ===== INICIO BLOQUE NUEVO: elegir entidad con MonitoringMode =====
-    int ModeRank(string? mm) => mm?.ToUpperInvariant() switch
+    var headers = new[]
     {
-        "INFRASTRUCTURE" => 3,
-        "FULL_STACK"     => 2,
-        "DISCOVERY"      => 1,
-        _                => 0
+        "Server Name", "Server Class", "Server Group",
+        "Tenant", "Environment", "Entity Id", "Type",
+        "Display Name", "First Seen", "Last Seen",
+        "Installer Tracked Download", "Physical Memory",
+        "Standalone", "Standalone Special AgentsOnly",
+        "Logical Cpu Cores", "Is Monitoring Candidate",
+        "Cpu Cores", "Memory Total", "Installer Support Alert",
+        "Ip Address", "Management Zones", "Tags Key", "Tags String Representation",
+        "Tags Value", "OS Type", "Detected Name", "State", "OneAgent Custom Host Name",
+        "HypervisorType", "Bitness", "OS Architecture", "OS Version", "Installer Version",
+        "Network Zone", "Auto Injection", "Monitoring Mode", "Host Group Name",
+        "Gestionado Por", "Es Virtual"
     };
 
-    var withMode = serverWithEntities.Entities
-        .Where(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode))
+    for (int i = 0; i < headers.Length; i++)
+    {
+        worksheet.Cells[1, i + 1].Value = headers[i];
+        worksheet.Cells[1, i + 1].Style.Font.Bold = true;
+    }
+
+    // === Deduplicar por Server.Name (ignora mayúsculas/minúsculas) ===
+    _serversWithEntities = _serversWithEntities
+        .GroupBy(sw => (sw.Server?.Name ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
+        .Select(g => g.First())
         .ToList();
 
-    EntitySchema? chosen;
+    int row = 2;
 
-    if (withMode.Count > 0)
+    foreach (var serverWithEntities in _serversWithEntities)
     {
-        chosen = withMode
-            .OrderByDescending(e => ModeRank(e.Properties!.MonitoringMode))
-            .ThenByDescending(e => e.LastSeen)
-            .ThenByDescending(e =>
-                (e.Properties?.LogicalCpuCores != null ? 1 : 0) +
-                (e.Properties?.PhysicalMemory  != null ? 1 : 0) +
-                (e.Properties?.OsVersion       != null ? 1 : 0) +
-                (e.ManagementZones?.Count ?? 0) +
-                (e.Tags?.Count            ?? 0))
-            .FirstOrDefault();
-    }
-    else
-    {
-        chosen = serverWithEntities.Entities
-            .OrderByDescending(e => e.LastSeen)
-            .ThenByDescending(e =>
-                (e.Properties?.LogicalCpuCores != null ? 1 : 0) +
-                (e.Properties?.PhysicalMemory  != null ? 1 : 0) +
-                (e.Properties?.OsVersion       != null ? 1 : 0) +
-                (e.ManagementZones?.Count ?? 0) +
-                (e.Tags?.Count            ?? 0))
-            .FirstOrDefault();
-    }
+        var server = serverWithEntities.Server;
+        if (server == null) continue;
 
-    var latest = chosen; // mantener el nombre 'latest' para tu escritura en Excel
+        // ===== Elegir la mejor entidad =====
+        int ModeRank(string? mm) => (mm ?? string.Empty).ToUpperInvariant() switch
+        {
+            "FULL_STACK"     => 3,
+            "INFRASTRUCTURE" => 2,
+            "DISCOVERY"      => 1,
+            _                => 0
+        };
 
-    // ===== FIN BLOQUE NUEVO =====
+        // Candidatas con MonitoringMode presente
+        var withMode = serverWithEntities.Entities
+            .Where(e => !string.IsNullOrWhiteSpace(e?.Properties?.MonitoringMode))
+            .ToList();
+
+        EntitySchema? latest;
+
+        if (withMode.Count > 0)
+        {
+            // Prioriza por modo y luego por recencia
+            latest = withMode
+                .OrderByDescending(e => ModeRank(e.Properties!.MonitoringMode))
+                .ThenByDescending(e => e.LastSeen)
+                .FirstOrDefault();
+        }
+        else
+        {
+            // Si ninguna trae MonitoringMode, usa la más reciente
+            latest = serverWithEntities.Entities
+                .OrderByDescending(e => e.LastSeen)
+                .FirstOrDefault();
+        }
+
+        if (latest is null) continue;
+
+        // Protecciones de nulos para no romper la escritura
+        var p  = latest.Properties      ?? new EntityProperties();
+        var mz = latest.ManagementZones ?? new List<ManagementZone>();
+        var tg = latest.Tags            ?? new List<Tag>();
+
+        // ==== Escritura en el Excel (mismo orden de columnas) ====
+        worksheet.Cells[row,  1].Value = server.Name;
+        worksheet.Cells[row,  2].Value = server.Class;
+        worksheet.Cells[row,  3].Value = server.Group;
+        worksheet.Cells[row,  4].Value = latest.Tenant;
+        worksheet.Cells[row,  5].Value = latest.Environment;
+        worksheet.Cells[row,  6].Value = latest.EntityId;
+        worksheet.Cells[row,  7].Value = latest.Type;
+        worksheet.Cells[row,  8].Value = latest.DisplayName;
+
+        worksheet.Cells[row,  9].Value = latest.FirstSeen;
+        worksheet.Cells[row,  9].Style.Numberformat.Format  = "dd/mm/yyyy HH:mm:ss";
+        worksheet.Cells[row, 10].Value = latest.LastSeen;
+        worksheet.Cells[row, 10].Style.Numberformat.Format = "dd/mm/yyyy HH:mm:ss";
+
+        worksheet.Cells[row, 11].Value = p.InstallerTrackedDownload == true ? "Verdadero" : "Falso";
+        worksheet.Cells[row, 12].Value = p.PhysicalMemory?.ToString() ?? "";
+        worksheet.Cells[row, 13].Value = p.Standalone == true ? "Verdadero" : "Falso";
+        worksheet.Cells[row, 14].Value = p.StandaloneSpecialAgentsOnly == true ? "Verdadero" : "Falso";
+        worksheet.Cells[row, 15].Value = p.LogicalCpuCores?.ToString() ?? "";
+        worksheet.Cells[row, 16].Value = p.IsMonitoringCandidate == true ? "Verdadero" : "Falso";
+        worksheet.Cells[row, 17].Value = p.CpuCores?.ToString() ?? "";
+        worksheet.Cells[row, 18].Value = p.MemoryTotal?.ToString() ?? "";
+        worksheet.Cells[row, 19].Value = p.InstallerSupportAlert == true ? "Verdadero" : "Falso";
+
+        worksheet.Cells[row, 20].Value = string.Join(",", p.IpAddress ?? new List<string>());
+        worksheet.Cells[row, 21].Value = string.Join(",", mz.Where(z => z?.Name != null).Select(z => z!.Name));
+        worksheet.Cells[row, 22].Value = string.Join(",", tg.Where(t => t?.Key  != null).Select(t => t!.Key!));
+        worksheet.Cells[row, 23].Value = string.Join(",", tg.Where(t => t?.StringRepresentation != null)
+                                                            .Select(t => t!.StringRepresentation!));
+        worksheet.Cells[row, 24].Value = string.Join(",", tg.Where(t => t?.Value != null).Select(t => t!.Value!));
+
+        worksheet.Cells[row, 25].Value = p.OsType ?? "";
+        worksheet.Cells[row, 26].Value = p.DetectedName ?? "";
+        worksheet.Cells[row, 27].Value = p.State ?? "";
+        worksheet.Cells[row, 28].Value = p.OneAgentCustomHostName ?? "";
+        worksheet.Cells[row, 29].Value = p.HypervisorType ?? "";
+        worksheet.Cells[row, 30].Value = p.Bitness ?? "";
+        worksheet.Cells[row, 31].Value = p.OsArchitecture ?? "";
+        worksheet.Cells[row, 32].Value = p.OsVersion ?? "";
+        worksheet.Cells[row, 33].Value = p.InstallerVersion ?? "";
+        worksheet.Cells[row, 34].Value = p.NetworkZone ?? "";
+        worksheet.Cells[row, 35].Value = p.AutoInjection ?? "";
+        worksheet.Cells[row, 36].Value = p.MonitoringMode ?? "";   // ahora priorizamos que venga lleno
+        worksheet.Cells[row, 37].Value = p.HostGroupName ?? "";
+
+        worksheet.Cells[row, 38].Value = server.Managed;
+        worksheet.Cells[row, 39].Value = server.Virtual;
+
+        row++;
+    }
+}
