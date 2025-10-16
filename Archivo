@@ -1,1 +1,19 @@
-EXEC sp_refreshview 'dbo.vw_DynatraceProblems';
+private async Task ProcessIncidentData(CancellationToken stoppingToken)
+{
+    List<Incident> incidents = await GetListIncidentsAsync(stoppingToken);
+
+    // 🔹 Cambia estas dos fechas según lo que necesites
+    DateTime fechaInicio = new DateTime(2025, 10, 1); // ejemplo: 1 de octubre 2025
+    DateTime fechaFin = new DateTime(2025, 10, 16);   // ejemplo: 16 de octubre 2025
+
+    // 🔹 Filtra los incidentes que estén dentro del rango de fechas
+    incidents = incidents
+        .Where(inc => DateTime.TryParse(inc.Fecha_de_Abierto, out DateTime fecha)
+                   && fecha >= fechaInicio && fecha <= fechaFin)
+        .ToList();
+
+    _logger.LogInformation($"Se han detectado {incidents.Count} incidentes entre {fechaInicio:yyyy-MM-dd} y {fechaFin:yyyy-MM-dd}");
+
+    await UpdateData(incidents);
+    _logger.LogInformation("✅ Se han actualizado los incidentes del rango indicado");
+}
