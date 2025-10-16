@@ -1,1 +1,19 @@
 
+// ...carga de opStatus y lo que ya tengas arriba
+
+// === eliminar duplicados por Server.Name (case-insensitive) y fusionar entidades ===
+_serversWithEntities = _serversWithEntities
+    .GroupBy(sw => (sw.Server?.Name ?? string.Empty).Trim(), StringComparer.OrdinalIgnoreCase)
+    .Select(g => new ServerWithEntities
+    {
+        Server   = g.First().Server, // conserva el primer Server del grupo
+        Entities = g.SelectMany(x => x.Entities ?? new List<EntitySchema>())
+                    .GroupBy(e => e.EntityId)                           // dedupe por EntityId
+                    .Select(gr => gr.OrderByDescending(e => e.LastSeen) // deja la más reciente
+                                     .First())
+                    .ToList()
+    })
+    .ToList();
+
+int row = 2;
+var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase); // <-- evita doble escritura
