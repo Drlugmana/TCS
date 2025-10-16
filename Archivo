@@ -1,1 +1,32 @@
-=SI.ERROR(SI(BUSCARV(A2;Monitoreados!A:A;1;FALSO)=A2;"Sí";"No");"No")
+foreach (var serverWithEntities in _serversWithEntities)
+{
+    var server = serverWithEntities.Server;
+
+    // 🔎 Elegir la mejor entidad: HOST > con MonitoringMode > MonitoringMode="INFRASTRUCTURE" > más atributos > más reciente
+    int Score(EntitySchema e)
+    {
+        int s = 0;
+        if (string.Equals(e.Type, "HOST", StringComparison.OrdinalIgnoreCase)) s += 1000;
+        if (!string.IsNullOrWhiteSpace(e.Properties?.MonitoringMode)) s += 200;
+        if (string.Equals(e.Properties?.MonitoringMode, "INFRASTRUCTURE", StringComparison.OrdinalIgnoreCase)) s += 100;
+
+        // Bonus por “completitud” de atributos
+        if (!string.IsNullOrWhiteSpace(e.Properties?.OneAgentCustomHostName)) s += 10;
+        if (!string.IsNullOrWhiteSpace(e.Properties?.DetectedName)) s += 10;
+        if (e.Properties?.LogicalCpuCores != null) s += 5;
+        if (e.Properties?.PhysicalMemory != null) s += 5;
+        if ((e.ManagementZones?.Count ?? 0) > 0) s += 3;
+        if ((e.Tags?.Count ?? 0) > 0) s += 3;
+
+        // Último criterio: más reciente
+        s += (int)(e.LastSeen - DateTime.MinValue).TotalSeconds / 100000; // suaviza diferencias de tiempo
+        return s;
+    }
+
+    var preferred = serverWithEntities.Entities
+        .OrderByDescending(Score)
+        .FirstOrDefault();
+
+    var latest = preferred; // mantener el nombre 'latest' si abajo lo usas así
+
+    // Nombre tal cual Dynatrace (con dominio si lo hay)
