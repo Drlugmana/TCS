@@ -1,52 +1,26 @@
-private static List<Tag> DeserializeTagsSafe(string raw)
+ManagementZones = DeserializeSafe(entityDb.ManagementZones, () => new List<ManagementZone>()),
+Properties      = DeserializeSafe(entityDb.Properties,      () => new EntityProperties()),
+Tags            = DeserializeTagsSafe(entityDb.Tags),
+
+
+private static T DeserializeSafe<T>(string raw, Func<T> @default)
 {
-    // Lista vacía si viene null/empty
     if (string.IsNullOrWhiteSpace(raw))
-        return new List<Tag>();
+        return @default();
 
     var s = raw.Trim();
 
-    // Si parece JSON (array u objeto), intentamos deserializar
-    if (s.StartsWith("[") || s.StartsWith("{"))
+    // Solo intentamos deserializar si parece JSON
+    if (!(s.StartsWith("{") || s.StartsWith("[")))
+        return @default();
+
+    try
     {
-        try
-        {
-            var parsed = JsonConvert.DeserializeObject<List<Tag>>(s);
-            return parsed ?? new List<Tag>();
-        }
-        catch
-        {
-            // Si falla, caemos al parseo flexible abajo
-        }
+        var parsed = JsonConvert.DeserializeObject<T>(s);
+        return parsed is null ? @default() : parsed;
     }
-
-    // --- Fallback: convierte formatos sueltos como "k:v,k2:v2" o texto plano ---
-    var list = new List<Tag>();
-    var parts = s.Split(new[] { ',', ';', '|', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-
-    foreach (var part in parts)
+    catch
     {
-        var token = part.Trim();
-        var kv = token.Split(new[] { ':' }, 2);
-
-        if (kv.Length == 2)
-        {
-            list.Add(new Tag
-            {
-                Key = kv[0].Trim(),
-                Value = kv[1].Trim()
-            });
-        }
-        else
-        {
-            // Si no hay ":", guardamos el texto como valor bruto
-            list.Add(new Tag
-            {
-                Key = "raw",
-                Value = token
-            });
-        }
+        return @default();
     }
-
-    return list;
 }
