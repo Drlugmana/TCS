@@ -1,26 +1,64 @@
-ManagementZones = DeserializeSafe(entityDb.ManagementZones, () => new List<ManagementZone>()),
-Properties      = DeserializeSafe(entityDb.Properties,      () => new EntityProperties()),
-Tags            = DeserializeTagsSafe(entityDb.Tags),
+EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
+var entitiesList = await entitiesDB.GetEntities();
 
+// Todas las entidades “planas” (para calcular No Monitoreados Dynatrace por EntityId)
+var allEntities = entitiesList.SelectMany(kvp => kvp.Value).ToList();
 
-private static T DeserializeSafe<T>(string raw, Func<T> @default)
+// Mapa por clave: FQDN y shortname apuntan al MISMO grupo de entidades
+var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>();
+
+foreach (var kvp in entitiesList)
 {
-    if (string.IsNullOrWhiteSpace(raw))
-        return @default();
+    var full = (kvp.Key ?? "").Trim().ToUpperInvariant();
+    var shortName = full.Split('.')[0];
 
-    var s = raw.Trim();
+    normalizedEntities.AddOrUpdate(
+        full,
+        _ => kvp.Value,
+        (_, existing) => { existing.AddRange(kvp.Value); return existing; });
 
-    // Solo intentamos deserializar si parece JSON
-    if (!(s.StartsWith("{") || s.StartsWith("[")))
-        return @default();
-
-    try
+    if (!string.IsNullOrWhiteSpace(shortName))
     {
-        var parsed = JsonConvert.DeserializeObject<T>(s);
-        return parsed is null ? @default() : parsed;
+        normalizedEntities.AddOrUpdate(
+            shortName,
+            _ => kvp.Value,
+            (_, existing) => { existing.AddRange(kvp.Value); return existing; });
     }
-    catch
+}
+
+// Lleva registro de los EntityId que sí hicieron match
+var matchedEntityIds = new ConcurrentBag<string>();
+
+-----
+
+var original = (server.Name ?? "").Trim();
+var fullKey  = original.ToUpperInvariant();
+var shortKey = fullKey.Split('.')[0];
+
+List<EntitySchema>? matchedEntities = null;
+
+if (normalizedEntities.TryGetValue(fullKey, out var listFull))
+    matchedEntities = listFull;
+else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+    matchedEntities = listShort;
+
+if (matchedEntities != null)
+{
+    _serversWithEntities.Add(new ServerWithEntities
     {
-        return @default();
-    }
+        Server   = server,
+        Entities = matchedEntities
+    });
+
+    // Marca todos los EntityId emparejados
+    foreach (var e in matchedEntities)
+        matchedEntityIds.Add(e.EntityId);
+
+    // Remueve ambas claves para que no queden “remanentes”
+    normalizedEntities.TryRemove(fullKey,  out _);
+    normalizedEntities.TryRemove(shortKey, out _);
+}
+else
+{
+    _serversNoMatch.Add(server);
 }
