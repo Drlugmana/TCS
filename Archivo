@@ -1,13 +1,1 @@
-    Console.Write("Procesando servidores: {0}/{1}", serverList.IndexOf(server) + 1, serverList.Count);
-});
 
-// Consolida los matches acumulados en paralelo
-_serversWithEntities = localMatches.ToList();
-
-// Toma entidades únicas por EntityId y quédate con las que NO fueron emparejadas
-var matchedSet = new HashSet<string>(matchedEntityIds);
-_serversNoMatchDyn = allEntities
-    .GroupBy(e => e.EntityId)
-    .Select(g => g.First())
-    .Where(e => !matchedSet.Contains(e.EntityId))
-    .ToList();
