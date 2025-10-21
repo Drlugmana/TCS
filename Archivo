@@ -1,1 +1,95 @@
 
+private static void CreateFilteredByRulesSheet(ExcelPackage package, string sourceSheetName, string targetSheetName)
+{
+    var src = package.Workbook.Worksheets[sourceSheetName];
+    if (src == null) { Console.WriteLine($"No se encontró la hoja '{sourceSheetName}'"); return; }
+
+    // Lee encabezados (fila 1)
+    int colCount = src.Dimension.End.Column;
+    int rowCount = src.Dimension.End.Row;
+
+    // Normalizador de textos
+    string Norm(string? s) => (s ?? "").Trim().ToUpperInvariant();
+
+    // Buscar índices de las columnas requeridas (1-based)
+    int FindCol(string expectedHeader)
+    {
+        for (int c = 1; c <= colCount; c++)
+        {
+            var header = Norm(src.Cells[1, c].Text);
+            if (header == Norm(expectedHeader)) return c;
+        }
+        return -1;
+    }
+
+    int colInventarioTorres   = FindCol("Inventario Torres");
+    int colAplicaPorSO        = FindCol("Aplica Monitoreo por SO");
+    int colAplicaPorNombre    = FindCol("Aplica por Nombre");
+    int colEstadoOperativoCat = FindCol("Estado Operativo (Catálogo)");
+
+    // Validación de columnas
+    if (colInventarioTorres < 0 || colAplicaPorSO < 0 || colAplicaPorNombre < 0 || colEstadoOperativoCat < 0)
+    {
+        Console.WriteLine("⚠️ No se encontraron todas las columnas requeridas en 'Monitoreados'. " +
+                          "Verifica los encabezados exactamente.");
+        return;
+    }
+
+    // Crea hoja destino
+    var dst = package.Workbook.Worksheets.Add(targetSheetName);
+
+    // Copiar encabezados completos
+    for (int c = 1; c <= colCount; c++)
+    {
+        dst.Cells[1, c].Value = src.Cells[1, c].Value;
+        dst.Cells[1, c].Style.Font.Bold = true;
+    }
+
+    int outRow = 2;
+
+    // Recorre filas y copia solo las que cumplen TODAS las reglas
+    for (int r = 2; r <= rowCount; r++)
+    {
+        string invTorres   = Norm(src.Cells[r, colInventarioTorres].Text);
+        string porSO       = Norm(src.Cells[r, colAplicaPorSO].Text);
+        string porNombre   = Norm(src.Cells[r, colAplicaPorNombre].Text);
+        string estadoCat   = Norm(src.Cells[r, colEstadoOperativoCat].Text);
+
+        bool cumple =
+            invTorres == "SI" &&
+            porSO     == "VERIFICAR" &&
+            porNombre == "SI" &&
+            estadoCat == "OPERATIVO";
+
+        if (cumple)
+        {
+            for (int c = 1; c <= colCount; c++)
+                dst.Cells[outRow, c].Value = src.Cells[r, c].Value;
+
+            outRow++;
+        }
+    }
+
+    Console.WriteLine($"🟢 Hoja '{targetSheetName}' creada con {outRow - 2} filas que cumplen las reglas.");
+}
+
+
+
+-------
+
+
+public static void GenerateReport()
+{
+    ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+    using var package = new ExcelPackage();
+
+    CreateMonitoredSheet(package);
+    CreateNoMatchCmdbServerSheet(package);
+
+    // 🔽🔽 AGREGA ESTA LÍNEA (usa tu nombre exacto de la hoja Monitoreados):
+    CreateFilteredByRulesSheet(package, "Monitoreados", "Reglas: SI");
+
+    // (tu código del sheet "Calculo SLA"...)
+    // ...
+    package.SaveAs(new FileInfo("servers_with_entities.xlsx"));
+}
