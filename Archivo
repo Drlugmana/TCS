@@ -1,1 +1,13 @@
 
+// Si no hubo coincidencia exacta, buscar coincidencias parciales (por nombre contenido)
+if (matchedEntities == null)
+{
+    matchedEntities = allEntities
+        .Where(e => 
+            e.DisplayName != null &&
+            e.DisplayName.ToUpperInvariant().Contains(original.ToUpperInvariant()))
+        .ToList();
+
+    if (matchedEntities.Count == 0)
+        matchedEntities = null;
+}
