@@ -1,13 +1,96 @@
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  P E G A R   D E S D E   A Q U Í  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-// Si no hubo coincidencia exacta, buscar coincidencias parciales (por nombre contenido)
-if (matchedEntities == null)
+// Lleva registro de los EntityId que sí hicieron match (para construir "No Monitoreados Dynatrace")
+var matchedEntityIds = new ConcurrentBag<string>();
+
+// === Buscar primero por FQDN / shortname; si no hay, intentar coincidencia "parcial" por DisplayName ===
+Parallel.ForEach(serverList, server =>
 {
-    matchedEntities = allEntities
-        .Where(e => 
-            e.DisplayName != null &&
-            e.DisplayName.ToUpperInvariant().Contains(original.ToUpperInvariant()))
-        .ToList();
+    if (string.IsNullOrWhiteSpace(server.Name))
+    {
+        _serversNoMatch.Add(server);
+        return;
+    }
 
-    if (matchedEntities.Count == 0)
-        matchedEntities = null;
-}
+    var original = (server.Name ?? "").Trim();
+    var fullKey  = original.ToUpperInvariant();          // FQDN tal cual si viene
+    var shortKey = fullKey.Split('.')[0];                // shortname
+
+    List<EntitySchema>? matchedEntities = null;
+
+    // 1) Búsqueda exacta por FQDN
+    if (normalizedEntities.TryGetValue(fullKey, out var listFull))
+        matchedEntities = listFull;
+
+    // 2) Si no hubo por FQDN, buscar exacta por shortname
+    else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+        matchedEntities = listShort;
+
+    // 3) Si no hubo exactas, intentar PARCIALES en allEntities (casos "ProbeEnabled_*", sufijos/prefijos, etc.)
+    if (matchedEntities == null)
+    {
+        var upOriginal = original.ToUpperInvariant();
+        matchedEntities = allEntities
+            .Where(e => !string.IsNullOrWhiteSpace(e.DisplayName)
+                        && e.DisplayName!.ToUpperInvariant().Contains(upOriginal))
+            .ToList();
+
+        if (matchedEntities.Count == 0)
+            matchedEntities = null;
+        else
+            Console.WriteLine($"[Partial Match] '{server.Name}' ↔ '{matchedEntities.First().DisplayName}'");
+    }
+
+    if (matchedEntities != null && matchedEntities.Count > 0)
+    {
+        // Elegir la mejor entidad: por modo > recencia
+        int ModeRank(string? mm) => (mm ?? "").ToUpperInvariant() switch
+        {
+            "FULL_STACK"      => 3,
+            "INFRASTRUCTURE"  => 2,
+            "DISCOVERY"       => 1,
+            _                 => 0
+        };
+
+        // Evita duplicados por EntityId dentro de este set y ordena por criterio
+        var chosen = matchedEntities
+            .GroupBy(e => e.EntityId)
+            .Select(g => g.First())
+            .OrderByDescending(e => ModeRank(e.Properties?.MonitoringMode))
+            .ThenByDescending(e => e.LastSeen)
+            .First();
+
+        // Guarda el match
+        _serversWithEntities.Add(new ServerWithEntities
+        {
+            Server   = server,
+            Entities = new List<EntitySchema> { chosen }   // dejamos solo la elegida para no repetir fila luego
+        });
+
+        // Marca todos los EntityId del grupo como emparejados (no solo el 'chosen', por si quieres contabilidad completa)
+        foreach (var e in matchedEntities)
+            matchedEntityIds.Add(e.EntityId);
+    }
+    else
+    {
+        // No se encontró nada en Dynatrace para este server
+        _serversNoMatch.Add(server);
+    }
+
+    Console.WriteLine("Procesando servidores: {0}/{1}", serverList.IndexOf(server) + 1, serverList.Count);
+});
+
+// Consolidar matches acumulados en paralelo (si usas estructura compartida, puede omitirse)
+_serversWithEntities = _serversWithEntities.ToList();
+
+// Construye "No Monitoreados Dynatrace":
+// - Toma una sola entidad por EntityId
+// - Quédate con las que NO están en matchedEntityIds
+var matchedSet = new HashSet<string>(matchedEntityIds);
+_serversNoMatchDyn = allEntities
+    .GroupBy(e => e.EntityId)
+    .Select(g => g.First())
+    .Where(e => !matchedSet.Contains(e.EntityId))
+    .ToList();
+
+// >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  P E G A R   H A S T A   A Q U Í  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
