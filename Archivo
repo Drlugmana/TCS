@@ -1,3 +1,7 @@
+
+=INDICE('No Monitoreados Cmdb'!L:L; COINCIDIR(A2; 'No Monitoreados Cmdb'!A:A; 0))
+
+
 // >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  P E G A R   D E S D E   A Q U Í  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
 // Lleva registro de los EntityId que sí hicieron match (para construir "No Monitoreados Dynatrace")
