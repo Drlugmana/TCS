@@ -1,2 +1,5 @@
 
+=SI(CONTAR.SI($A:$A;A2)>1;"Repetido";"Único")
+
+
 =SI(CONTAR.SI($C:$C;A2)>0;"Existe";"No existe")
