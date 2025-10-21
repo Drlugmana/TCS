@@ -1,1 +1,2 @@
 
+=SI(CONTAR.SI($C:$C;A2)>0;"Existe";"No existe")
