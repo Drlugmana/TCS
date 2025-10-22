@@ -1,1 +1,139 @@
 
+private static void CreateExcepcionadosSheet(ExcelPackage package, string sourceSheetName = "Monitoreados")
+{
+    var src = package.Workbook.Worksheets[sourceSheetName];
+    if (src == null || src.Dimension == null)
+    {
+        Console.WriteLine($"⚠️ No se encontró la hoja '{sourceSheetName}'.");
+        return;
+    }
+
+    int colCount = src.Dimension.End.Column;
+    int rowCount = src.Dimension.End.Row;
+
+    // ===== Normalizadores robustos =====
+    string RemoveDiacritics(string s)
+    {
+        var norm = s.Normalize(NormalizationForm.FormD);
+        var sb = new StringBuilder();
+        foreach (var ch in norm)
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch) != System.Globalization.UnicodeCategory.NonSpacingMark)
+                sb.Append(ch);
+        return sb.ToString().Normalize(NormalizationForm.FormC);
+    }
+    string NormHeader(string? s)
+    {
+        s = RemoveDiacritics((s ?? "").Replace("(", " ").Replace(")", " ").Replace("_", " "));
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+        return s.Trim().ToUpperInvariant();
+    }
+    string NormVal(string? s)
+    {
+        s = RemoveDiacritics(s ?? "");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+        return s.Trim().ToUpperInvariant();
+    }
+
+    // ===== Localiza columnas (búsqueda "difusa" por encabezado) =====
+    int FindColFuzzy(params string[] headerHints)
+    {
+        var targets = headerHints.Select(NormHeader).ToList();
+        for (int c = 1; c <= colCount; c++)
+        {
+            var h = NormHeader(src.Cells[1, c].Text);
+            if (targets.Any(t => h.Contains(t))) return c;
+        }
+        return -1;
+    }
+
+    int colInvTorres = FindColFuzzy("INVENTARIO TORRES", "INVENTARIO DE TORRES");
+    int colApSO      = FindColFuzzy("APLICA MONITOREO POR SO", "APLICA MONITOREO SO");
+    int colApNom     = FindColFuzzy("APLICA POR NOMBRE");
+    int colEstadoCat = FindColFuzzy("ESTADO OPERATIVO (CATALOGO)", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO");
+    int colEsVirtual = FindColFuzzy("ES VIRTUAL");
+
+    if (colInvTorres < 0 || colApSO < 0 || colApNom < 0 || colEstadoCat < 0 || colEsVirtual < 0)
+    {
+        Console.WriteLine("⚠️ No se encontraron todas las columnas requeridas para 'Excepcionados'.");
+        Console.WriteLine($"  Inventario Torres: col={colInvTorres}");
+        Console.WriteLine($"  Aplica Monitoreo por SO: col={colApSO}");
+        Console.WriteLine($"  Aplica por Nombre: col={colApNom}");
+        Console.WriteLine($"  Estado Operativo (Catálogo): col={colEstadoCat}");
+        Console.WriteLine($"  Es Virtual: col={colEsVirtual}");
+        return;
+    }
+
+    // ===== Crear/limpiar hoja destino =====
+    var targetName = "Excepcionados";
+    if (package.Workbook.Worksheets[targetName] != null)
+        package.Workbook.Worksheets.Delete(targetName);
+    var dst = package.Workbook.Worksheets.Add(targetName);
+
+    // Copiar encabezados
+    for (int c = 1; c <= colCount; c++)
+    {
+        dst.Cells[1, c].Value = src.Cells[1, c].Value;
+        dst.Cells[1, c].Style.Font.Bold = true;
+    }
+
+    // Conjuntos para interpretar "FALSO"
+    var falseSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "FALSO", "FALSE", "NO", "0" };
+
+    int outRow = 2;
+    int escritos = 0;
+
+    // Recorre filas y aplica la regla
+    for (int r = 2; r <= rowCount; r++)
+    {
+        var vInv  = NormVal(src.Cells[r, colInvTorres].Text);
+        var vSO   = NormVal(src.Cells[r, colApSO].Text);
+        var vNom  = NormVal(src.Cells[r, colApNom].Text);
+        var vEst  = NormVal(src.Cells[r, colEstadoCat].Text);
+        var vVirt = NormVal(src.Cells[r, colEsVirtual].Text);
+
+        bool c1 = vEst  == "OPERATIVO";
+        bool c2 = vNom  == "NO";
+        bool c3 = vSO   == "VERIFICAR";
+        bool c4 = vInv  == "SI";
+        bool c5 = falseSet.Contains(vVirt);   // Es Virtual = FALSO (acepta NO/FALSE/0)
+
+        if (c1 && c2 && c3 && c4 && c5)
+        {
+            for (int c = 1; c <= colCount; c++)
+                dst.Cells[outRow, c].Value = src.Cells[r, c].Value;
+            outRow++;
+            escritos++;
+        }
+    }
+
+    // Ajuste visual
+    if (dst.Dimension != null)
+        dst.Cells[dst.Dimension.Address].AutoFitColumns();
+
+    Console.WriteLine($"🟢 Hoja 'Excepcionados' creada con {escritos} filas.");
+}
+
+
+-----
+
+public static void GenerateReport()
+{
+    ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+    using var package = new ExcelPackage();
+
+    CreateMonitoredSheet(package);
+    CreateNoMatchCmdbServerSheet(package);
+
+    // ⬇️ NUEVA HOJA filtrando desde “Monitoreados”
+    CreateExcepcionadosSheet(package, "Monitoreados");
+
+    // (lo demás que ya tenías)
+    var slaSheet = package.Workbook.Worksheets.Add("Calculo SLA");
+    slaSheet.Cells["A1"].Value = "Métrica";
+    slaSheet.Cells["B1"].Value = "Valor";
+    slaSheet.Cells["A1:B1"].Style.Font.Bold = true;
+
+    var fileInfo = new FileInfo("servers_with_entities.xlsx");
+    package.SaveAs(fileInfo);
+    Console.WriteLine("Excel file 'servers_with_entities.xlsx' has been created successfully.");
+}
