@@ -1,1 +1,4 @@
-
+Total Servidores :=
+VAR Mon = DISTINCTCOUNT('Monitoreados'[Server Name])
+VAR NoMon = DISTINCTCOUNT('No Monitoreados Cmdb'[Server Name])
+RETURN Mon + NoMon
