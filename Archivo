@@ -109,3 +109,18 @@ CreateFilteredByRulesSheet(
     "Reglas CMDB: SI",
     (inv, so, nom, est) => inv=="SI" && so=="SI" && nom=="SI" && est=="OPERATIVO"
 );
+
+
+-----
+
+
+CreateMonitoredSheet(package);
+CreateNoMatchCmdbServerSheet(package);
+
+// Monitoreados → Reglas: SI
+CreateFilteredByRulesSheet(package, "Monitoreados", "Reglas: SI",
+    (inv, so, nom, est) => inv=="SI" && so=="VERIFICAR" && nom=="SI" && est=="OPERATIVO");
+
+// No Monitoreados Cmdb → Reglas CMDB: SI
+CreateFilteredByRulesSheet(package, "No Monitoreados Cmdb", "Reglas CMDB: SI",
+    (inv, so, nom, est) => inv=="SI" && so=="SI" && nom=="SI" && est=="OPERATIVO");
