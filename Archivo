@@ -1,1 +1,12 @@
+= switch(
+    [Type],
+    "HTTP_CHECK", "Monitoreo Sintético",
+    "PING", "Monitoreo de Disponibilidad", 
+    "CPU_CHECK", "Monitoreo de Rendimiento",
+    "DISK_CHECK", "Monitoreo de Almacenamiento",
+    "NETWORK_CHECK", "Monitoreo de Red",
+    [Monitoring Mode]  // Valor por defecto
+  )
+
+
 = if [Type] = "HTTP_CHECK" then "Monitoreo Sintético" else [Monitoring Mode]
