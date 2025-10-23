@@ -1,6 +1,1 @@
-Monitoring Mode = 
-IF(
-    'Tu_Tabla'[Type] = "HTTP_CHECK", 
-    "Monitoreo Sintético", 
-    'Tu_Tabla'[monitoring Mode]
-)
+= if [Type] = "HTTP_CHECK" then "Monitoreo Sintético" else [Monitoring Mode]
