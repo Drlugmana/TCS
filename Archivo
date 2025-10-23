@@ -1,7 +1,40 @@
-Total Servidores :=
-VAR Mon = DISTINCTCOUNT('Monitoreados'[Server Name])
-VAR NoMon = DISTINCTCOUNT('No Monitoreados Cmdb'[Server Name])
-RETURN Mon + NoMon
+private static Dictionary<string, string> LoadEsVirtualStatus(string path, string sheet = "Nojai")
+{
+    var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+    using var plug = new OfficeOpenXml.ExcelPackage(new FileInfo(path));
+    var ws = plug.Workbook.Worksheets[sheet];
+    if (ws == null) return map;
 
+    int r = 2;
+    while (true)
+    {
+        var hostName = ws.Cells[r, 1].Text;
+        if (string.IsNullOrWhiteSpace(hostName)) break;
 
-Total Servidores := [Servidores Monitoreados] + [Servidores No Monitoreados]
+        var cellValue = ws.Cells[r, 2].Value;
+        string status = ConvertCellValueToStatus(cellValue);
+
+        var key = NormalizeHost(hostName);
+        if (!map.ContainsKey(key))
+            map[key] = status;
+
+        r++;
+    }
+
+    return map;
+}
+
+private static string ConvertCellValueToStatus(object cellValue)
+{
+    return cellValue switch
+    {
+        bool b when b => "VERDADERO",     // true = VERDADERO
+        bool b when !b => "FALSO",        // false = FALSO
+        1 => "VERDADERO",                 // 1 = VERDADERO
+        0 => "FALSO",                     // 0 = FALSO
+        "1" => "VERDADERO",               // "1" = VERDADERO
+        "0" => "FALSO",                   // "0" = FALSO
+        string s when !string.IsNullOrWhiteSpace(s) => s.Trim(),
+        _ => "SIN DATO"
+    };
+}
