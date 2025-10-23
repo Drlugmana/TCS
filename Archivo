@@ -9,4 +9,11 @@
   )
 
 
+= if [Type] = "HTTP_CHECK" then "Monitoreo Sintético"
+  else if [Type] = "PING" then "Monitoreo de Disponibilidad"
+  else if [Type] = "CPU_CHECK" or [Type] = "MEMORY_CHECK" then "Monitoreo de Rendimiento"
+  else if [Type] = "DISK_CHECK" then "Monitoreo de Almacenamiento"
+  else if [Type] = "NETWORK_CHECK" then "Monitoreo de Red"
+  else "Otro Monitoreo"
+
 = if [Type] = "HTTP_CHECK" then "Monitoreo Sintético" else [Monitoring Mode]
