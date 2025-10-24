@@ -1,64 +1,209 @@
 
 
-// === Buscar coincidencia estricta por FQDN o shortname ===
-Parallel.ForEach(serverList, server =>
+public static async Task MatchEntitiesInfo(List<Server> serverList)
 {
-    if (string.IsNullOrWhiteSpace(server.Name)) return;
+    // 1. Traer entidades desde la BD (Dynatrace export)
+    EntitiesDB entitiesDB = new EntitiesDB(_connectionString);
+    var entitiesList = await entitiesDB.GetEntities(); // ConcurrentDictionary<string, List<EntitySchema>>
 
-    var original = server.Name.Trim().ToUpperInvariant();
-    var shortKey = original.Split('.')[0];
+    // 2. Aplanar todas las entidades en una sola lista
+    var allEntities = entitiesList
+        .SelectMany(kvp => kvp.Value)
+        .ToList();
 
-    // Buscar coincidencia exacta (sin fallback de Contains)
-    List<EntitySchema>? matchedEntities = null;
-
-    if (normalizedEntities.TryGetValue(original, out var listFull))
+    // 3. Función para normalizar hostnames tipo Dynatrace
+    string NormalizeHostLikeDynatrace(string raw)
     {
-        matchedEntities = listFull;
-    }
-    else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
-    {
-        matchedEntities = listShort;
-    }
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
 
-    // Solo se agrega si encontró entidad real
-    if (matchedEntities != null && matchedEntities.Count > 0)
-    {
-        localMatches.Add(new ServerWithEntities
+        var tmp = raw.Trim().ToUpperInvariant();
+
+        // Quitar dominio (todo lo que está después del primer ".")
+        var noDomain = tmp.Split('.')[0];
+
+        // Quitar sufijos de ambiente (_DESARROLLO, _PRODUCCION, _PRUEBAS, etc.)
+        string[] suffixes = {
+            "_DESARROLLO",
+            "_DESARROLLO1",
+            "_DESARROLLO2",
+            "_PRODUCCION",
+            "_PRODUCCION1",
+            "_PRODUCCION2",
+            "_PRUEBAS",
+            "_TEST",
+            "_QA",
+            "_DEV"
+        };
+
+        foreach (var suf in suffixes)
         {
-            Server = server,
-            Entities = matchedEntities
-        });
+            if (noDomain.EndsWith(suf))
+            {
+                noDomain = noDomain.Substring(0, noDomain.Length - suf.Length);
+                break; // con uno basta
+            }
+        }
+
+        return noDomain;
     }
-});
 
-------
+    // 4. Construimos un mapa de entidades normalizado
+    //    Clave => lista de EntitySchema que responden a ese nombre
+    var normalizedEntities = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
 
-matchedEntities = allEntities.Where(e => e.DisplayName.ToUpperInvariant().Contains(original)).ToList();
-
-
-----
-
-private static string NormalizeHostLikeDynatrace(string raw)
-{
-    if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
-
-    var tmp = raw.Trim().ToUpperInvariant();
-
-    // Quitar dominio (si existe)
-    var noDomain = tmp.Split('.')[0];
-
-    // Quitar sufijos de entorno (_DESARROLLO, _PRODUCCION, _PRUEBAS, etc.)
-    string[] suffixes = { "_DESARROLLO", "_PRODUCCION", "_PRUEBAS", "_DEV", "_QA", "_TEST" };
-    foreach (var s in suffixes)
+    foreach (var ent in allEntities)
     {
-        if (noDomain.EndsWith(s))
-            noDomain = noDomain.Substring(0, noDomain.Length - s.Length);
+        // Nombre tal cual viene de Dynatrace
+        var dispRaw = ent.DisplayName ?? "";
+        var dispUp = dispRaw.Trim().ToUpperInvariant();              // FQDN o lo que sea tal cual
+        var dispShort = dispUp.Split('.')[0];                        // shortname sin dominio
+        var dispNorm = NormalizeHostLikeDynatrace(dispRaw);          // versión limpiada (_DESARROLLO, etc.)
+
+        void AddKey(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key)) return;
+            normalizedEntities.AddOrUpdate(
+                key,
+                _ => new List<EntitySchema> { ent },
+                (_, list) => { list.Add(ent); return list; }
+            );
+        }
+
+        AddKey(dispUp);
+        AddKey(dispShort);
+        AddKey(dispNorm);
     }
 
-    return noDomain;
+    // 5. Estas listas son las salidas globales que ya usas en el reporte
+    _serversWithEntities = new List<ServerWithEntities>();
+    _serversNoMatch = new List<Server>();
+    _serversNoMatchDyn = new List<EntitySchema>();
+
+    // Para saber qué EntityId ya están asociados a algún server
+    var matchedEntityIds = new ConcurrentBag<string>();
+
+    // Matches temporales en paralelo
+    var localMatches = new ConcurrentBag<ServerWithEntities>();
+
+    // 6. Para cada servidor de CMDB tratamos de encontrar entidades reales
+    Parallel.ForEach(serverList, server =>
+    {
+        if (string.IsNullOrWhiteSpace(server.Name))
+        {
+            // si el server ni nombre tiene, claramente no puede matchear
+            _serversNoMatch.Add(server);
+            return;
+        }
+
+        var original = server.Name.Trim().ToUpperInvariant();   // FQDN en mayúsculas
+        var shortKey = original.Split('.')[0];                  // hostname sin dominio
+        var normKey = NormalizeHostLikeDynatrace(server.Name);  // hostname limpiado
+
+        List<EntitySchema>? matchedEntities = null;
+
+        // Intento 1: match exacto por FQDN / nombre completo
+        if (normalizedEntities.TryGetValue(original, out var listFull))
+        {
+            matchedEntities = listFull;
+        }
+        // Intento 2: match exacto por shortname sin dominio
+        else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+        {
+            matchedEntities = listShort;
+        }
+        // Intento 3: match por nombre normalizado (quitando _DESARROLLO etc.)
+        else if (normalizedEntities.TryGetValue(normKey, out var listNorm))
+        {
+            matchedEntities = listNorm;
+        }
+
+        // NOTA IMPORTANTE:
+        // Ya NO hacemos fallback tipo "Contains".
+        // Si no hay match exacto en ninguna clave -> es NoMonitoreado CMDB.
+
+        if (matchedEntities != null && matchedEntities.Count > 0)
+        {
+            // Guardar relación server <-> sus entidades encontradas
+            localMatches.Add(new ServerWithEntities
+            {
+                Server = server,
+                Entities = matchedEntities
+            });
+
+            // marcar cada EntityId como ya emparejado
+            foreach (var e in matchedEntities)
+            {
+                if (!string.IsNullOrWhiteSpace(e.EntityId))
+                    matchedEntityIds.Add(e.EntityId);
+            }
+        }
+        else
+        {
+            // No se encontró ninguna entidad asociada a este server
+            _serversNoMatch.Add(server);
+        }
+
+        Console.WriteLine("Procesando servidores: {0}/{1}",
+            serverList.IndexOf(server) + 1,
+            serverList.Count);
+    });
+
+    // 7. Consolidar matches (puede haber duplicados si el mismo server name salió más de una vez)
+    //    Agrupamos por nombre de server (case-insensitive)
+    _serversWithEntities = localMatches
+        .GroupBy(sw => (sw.Server?.Name ?? "").Trim().ToUpperInvariant())
+        .Select(g =>
+        {
+            // nos quedamos con el primer Server del grupo
+            var firstServer = g.First().Server;
+
+            // combinamos TODAS las entidades de ese server...
+            var allEnts = g.SelectMany(x => x.Entities ?? new List<EntitySchema>())
+                           // ...pero quitamos duplicados por EntityId
+                           .GroupBy(e => e.EntityId)
+                           .Select(grp =>
+                               // si hay varias versiones de la misma entidad, escogemos la más reciente
+                               grp.OrderByDescending(e => e.LastSeen)
+                                  .First()
+                           )
+                           .ToList();
+
+            return new ServerWithEntities
+            {
+                Server = firstServer,
+                Entities = allEnts
+            };
+        })
+        .ToList();
+
+    // 8. Construimos la lista de entidades que NO hicieron match con ningún server (Dynatrace sin CMDB)
+    var matchedSet = new HashSet<string>(matchedEntityIds, StringComparer.OrdinalIgnoreCase);
+
+    _serversNoMatchDyn = allEntities
+        .GroupBy(e => e.EntityId)          // agrupar por EntityId
+        .Select(g => g.First())            // quedarnos con una sola
+        .Where(e => !matchedSet.Contains(e.EntityId)) // solo las que NADIE usó
+        .ToList();
+
+    // 8.1. Opcional: filtrar _serversNoMatchDyn para reportar solo cosas "válidas" (ej. OnPremise)
+    _serversNoMatchDyn = _serversNoMatchDyn
+        .Where(entity =>
+            entity.ManagementZones != null &&
+            entity.ManagementZones.Any(zone =>
+                zone != null &&
+                zone.Name != null &&
+                zone.Name.IndexOf("Premise", StringComparison.OrdinalIgnoreCase) >= 0
+            )
+        )
+        .ToList();
+
+    // 9. Logs finales en consola
+    Console.WriteLine();
+    Console.WriteLine($"Entidades match {_serversWithEntities.Count}");
+    Console.WriteLine($"Servidores sin match en CMDB {_serversNoMatch.Count}");
+    Console.WriteLine($"Entidades sin match en Dynatrace {_serversNoMatchDyn.Count}");
 }
 
-    Console.WriteLine($"Procesando servidores: {serverList.IndexOf(server) + 1}/{serverList.Count}");
-});
+
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
