@@ -1,5 +1,63 @@
 
 
+// === Buscar coincidencia estricta por FQDN o shortname ===
+Parallel.ForEach(serverList, server =>
+{
+    if (string.IsNullOrWhiteSpace(server.Name)) return;
+
+    var original = server.Name.Trim().ToUpperInvariant();
+    var shortKey = original.Split('.')[0];
+
+    // Buscar coincidencia exacta (sin fallback de Contains)
+    List<EntitySchema>? matchedEntities = null;
+
+    if (normalizedEntities.TryGetValue(original, out var listFull))
+    {
+        matchedEntities = listFull;
+    }
+    else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+    {
+        matchedEntities = listShort;
+    }
+
+    // Solo se agrega si encontró entidad real
+    if (matchedEntities != null && matchedEntities.Count > 0)
+    {
+        localMatches.Add(new ServerWithEntities
+        {
+            Server = server,
+            Entities = matchedEntities
+        });
+    }
+});
+
+------
+
+matchedEntities = allEntities.Where(e => e.DisplayName.ToUpperInvariant().Contains(original)).ToList();
+
+
+----
+
+private static string NormalizeHostLikeDynatrace(string raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+
+    var tmp = raw.Trim().ToUpperInvariant();
+
+    // Quitar dominio (si existe)
+    var noDomain = tmp.Split('.')[0];
+
+    // Quitar sufijos de entorno (_DESARROLLO, _PRODUCCION, _PRUEBAS, etc.)
+    string[] suffixes = { "_DESARROLLO", "_PRODUCCION", "_PRUEBAS", "_DEV", "_QA", "_TEST" };
+    foreach (var s in suffixes)
+    {
+        if (noDomain.EndsWith(s))
+            noDomain = noDomain.Substring(0, noDomain.Length - s.Length);
+    }
+
+    return noDomain;
+}
+
     Console.WriteLine($"Procesando servidores: {serverList.IndexOf(server) + 1}/{serverList.Count}");
 });
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
