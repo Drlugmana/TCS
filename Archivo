@@ -1,5 +1,162 @@
 
 Primero que me ayudas a validar la pestaña de Monitoreados que si de verdad hacen match con entidades se quedue en la pestaña de monitoreados porque veo 6 servidores que comprobe manualmente, no tienes monitoreo y deberia quedarse en NO Monitoreados Cmdb.
 
+// ===== índice de entidades por nombre =====
+// allEntities: todas las entidades en Dynatrace (ya lo tienes arriba)
+var allEntities = entitiesList
+    .SelectMany(kvp => kvp.Value)
+    .ToList();
+
+// Diccionario auxiliar para búsqueda rápida por nombre normalizado
+// clave: nombre normalizado (sin dominio, sin sufijo tipo _DESARROLLO, mayúsculas)
+// valor: lista de EntitySchema posibles
+var normalizedMap = new ConcurrentDictionary<string, List<EntitySchema>>(StringComparer.OrdinalIgnoreCase);
+
+string NormalizeHostLikeDynatrace(string raw)
+{
+    if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+
+    var tmp = raw.Trim().ToUpperInvariant();
+
+    // corta dominio si existe
+    var noDomain = tmp.Split('.')[0];
+
+    // corta sufijos tipo _DESARROLLO, _PRODUCCION, etc (lo que está después de "_")
+    // Nota: sólo quitamos el último "_ALGO" si parece ser "palabra ambiente"
+    // Si quieres ser más agresivo y siempre cortar desde el primer "_", usa:
+    // noDomain = noDomain.Split('_')[0];
+    var parts = noDomain.Split('_');
+    if (parts.Length > 1)
+    {
+        // primera parte antes de "_"
+        noDomain = parts[0];
+    }
+
+    return noDomain;
+}
+
+// Llenar normalizedMap con TODAS las entidades una vez
+foreach (var ent in allEntities)
+{
+    // nombre que viene de Dynatrace
+    var disp = ent.DisplayName ?? "";
+    var key1 = disp.Trim().ToUpperInvariant();             // tal cual
+    var key2 = NormalizeHostLikeDynatrace(disp);            // normalizado
+
+    if (!string.IsNullOrWhiteSpace(key1))
+    {
+        normalizedMap.AddOrUpdate(
+            key1,
+            _ => new List<EntitySchema> { ent },
+            (_, list) => { list.Add(ent); return list; }
+        );
+    }
+
+    if (!string.IsNullOrWhiteSpace(key2))
+    {
+        normalizedMap.AddOrUpdate(
+            key2,
+            _ => new List<EntitySchema> { ent },
+            (_, list) => { list.Add(ent); return list; }
+        );
+    }
+}
+
+// para recolectar resultados
+var matchedEntityIds = new ConcurrentBag<string>();
+var localMatches     = new ConcurrentBag<ServerWithEntities>();
+var noMatchLocal     = new ConcurrentBag<Server>();
+
+Parallel.ForEach(serverList, server =>
+{
+    if (string.IsNullOrWhiteSpace(server.Name))
+    {
+        noMatchLocal.Add(server);
+        return;
+    }
+
+    // nombre del server de CMDB
+    var originalName = server.Name.Trim();
+    var keyFull      = originalName.ToUpperInvariant();           // tal cual
+    var keyNorm      = NormalizeHostLikeDynatrace(originalName);  // limpio
+
+    List<EntitySchema> found = new List<EntitySchema>();
+
+    // 1) intenta match exacto
+    if (normalizedMap.TryGetValue(keyFull, out var listFull))
+        found.AddRange(listFull);
+
+    // 2) intenta match normalizado
+    if (normalizedMap.TryGetValue(keyNorm, out var listNorm))
+        found.AddRange(listNorm);
+
+    // 3) si sigue vacío, fallback contains (por ejemplo que Dynatrace tenga alias tipo ProbeEnabled_SERVIDOR)
+    if (found.Count == 0)
+    {
+        var upperOri = originalName.ToUpperInvariant();
+        var byContains = allEntities
+            .Where(e =>
+                !string.IsNullOrWhiteSpace(e.DisplayName) &&
+                e.DisplayName.ToUpperInvariant().Contains(upperOri))
+            .ToList();
+
+        if (byContains.Count > 0)
+            found.AddRange(byContains);
+    }
+
+    // de-dup por EntityId
+    var distinctFound = found
+        .GroupBy(e => e.EntityId)
+        .Select(g => g
+            .OrderByDescending(x => x.LastSeen) // si hay varias con mismo EntityId, deja la más reciente
+            .First())
+        .ToList();
+
+    if (distinctFound.Count > 0)
+    {
+        // este server SÍ tiene entidades monitoreadas -> va a Monitoreados
+        localMatches.Add(new ServerWithEntities
+        {
+            Server   = server,
+            Entities = distinctFound
+        });
+
+        // registra todos los entityId usados
+        foreach (var e in distinctFound)
+            matchedEntityIds.Add(e.EntityId);
+    }
+    else
+    {
+        // este server NO tiene ninguna entidad en Dynatrace -> va a No Monitoreados CMDB
+        noMatchLocal.Add(server);
+    }
+
+    Console.WriteLine($"Procesando servidores: {serverList.IndexOf(server) + 1}/{serverList.Count}");
+});
+
+// Consolidar resultados paralelos en las listas globales
+_serversWithEntities = localMatches.ToList();
+_serversNoMatch      = noMatchLocal.ToList();
+
+// Crear set rápido para saber qué entityIds ya fueron emparejados
+var matchedSet = new HashSet<string>(matchedEntityIds);
+
+// Llenar _serversNoMatchDyn con entidades Dynatrace que sobran (o sea, no se usaron en ningún server)
+_serversNoMatchDyn = allEntities
+    .GroupBy(e => e.EntityId)
+    .Select(g => g.First())
+    .Where(e => !matchedSet.Contains(e.EntityId))
+    .ToList();
+
+// (Opcional) si quieres seguir filtrando _serversNoMatchDyn por ManagementZones “OnPremise”, etc.
+// deja este bloque debajo, igual que ya lo tenías:
+_serversNoMatchDyn = _serversNoMatchDyn
+    .Where(entity =>
+        entity.ManagementZones != null &&
+        entity.ManagementZones.Any(zone =>
+            zone.Name != null &&
+            zone.Name.IndexOf("Premise", StringComparison.OrdinalIgnoreCase) >= 0))
+    .ToList();
+
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
