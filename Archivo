@@ -1,4 +1,126 @@
 
+// cuánto tiempo consideramos "aún monitoreado"
+var now = DateTime.UtcNow;
+var maxAgeDays = 30; // <-- cámbialo si quieres 7, 14, etc.
+var freshnessLimit = now.AddDays(-maxAgeDays);
+
+----
+
+Parallel.ForEach(serverList, server =>
+{
+    if (string.IsNullOrWhiteSpace(server.Name))
+        return;
+
+    // nombres candidatos del CMDB
+    var originalRaw = server.Name.Trim();
+    var originalUp  = originalRaw.ToUpperInvariant();
+    var shortKey    = originalUp.Split('.')[0];
+    var normKey     = NormalizeHostLikeDynatrace(originalRaw); // tu helper que limpia dominio, sufijos, etc.
+
+    // 1. recolectar posibles entidades por esas llaves
+    var candidateList = new List<EntitySchema>();
+
+    if (normalizedEntities.TryGetValue(originalUp, out var listFull) && listFull != null)
+        candidateList.AddRange(listFull);
+
+    if (normalizedEntities.TryGetValue(shortKey, out var listShort) && listShort != null)
+        candidateList.AddRange(listShort);
+
+    if (normalizedEntities.TryGetValue(normKey, out var listNorm) && listNorm != null)
+        candidateList.AddRange(listNorm);
+
+    // si no hay ni una coincidencia ni siquiera por nombre -> NO monitoreado
+    if (candidateList.Count == 0)
+    {
+        lock (_serversNoMatch)
+            _serversNoMatch.Add(server);
+        return;
+    }
+
+    // 2. filtrar por DisplayName que coincida EXACTO con el server
+    var validByName = candidateList
+        .Where(e =>
+        {
+            var disp = (e.DisplayName ?? "").Trim().ToUpperInvariant();
+            return
+                disp == originalUp ||
+                disp == shortKey   ||
+                disp == normKey;
+        })
+        .ToList();
+
+    if (validByName.Count == 0)
+    {
+        // ningúna entidad tiene DisplayName igual a este server
+        lock (_serversNoMatch)
+            _serversNoMatch.Add(server);
+        return;
+    }
+
+    // 3. descartar cosas que no son hosts reales (opcional pero recomendado)
+    //    aquí forzamos que el tipo contenga "HOST"
+    validByName = validByName
+        .Where(e =>
+            !string.IsNullOrWhiteSpace(e.Type) &&
+            e.Type.ToUpperInvariant().Contains("HOST"))
+        .ToList();
+
+    if (validByName.Count == 0)
+    {
+        // solo había cosas tipo storage / synthetic / custom_device
+        lock (_serversNoMatch)
+            _serversNoMatch.Add(server);
+        return;
+    }
+
+    // 4. filtrar por vigencia (LastSeen reciente)
+    var validFresh = validByName
+        .Where(e =>
+            e.LastSeen >= freshnessLimit // fue visto en los últimos X días
+        )
+        .ToList();
+
+    if (validFresh.Count == 0)
+    {
+        // había match histórico pero nadie ha sido visto "recientemente"
+        // => ya no está monitoreado HOY
+        lock (_serversNoMatch)
+            _serversNoMatch.Add(server);
+        return;
+    }
+
+    // 5. (opcional pero sano) exigir que tenga zonas/tag para asegurarnos que era un host configurado, no basura parcial
+    var finalValid = validFresh
+        .Where(e =>
+            !string.IsNullOrWhiteSpace(e.EntityId) &&
+            e.ManagementZones != null &&
+            e.ManagementZones.Any(z => !string.IsNullOrWhiteSpace(z.Name)))
+        .ToList();
+
+    if (finalValid.Count == 0)
+    {
+        lock (_serversNoMatch)
+            _serversNoMatch.Add(server);
+        return;
+    }
+
+    // 6. si llegamos aquí → este server SÍ está monitoreado actualmente
+    lock (_serversWithEntities)
+    {
+        _serversWithEntities.Add(new ServerWithEntities
+        {
+            Server = server,
+            Entities = finalValid
+        });
+
+        // márcalos para excluirlos de "No Monitoreados Dynatrace"
+        foreach (var e in finalValid)
+        {
+            if (!string.IsNullOrWhiteSpace(e.EntityId))
+                matchedEntityIds.Add(e.EntityId);
+        }
+    }
+});
 
 
    
