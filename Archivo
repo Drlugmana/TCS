@@ -1,4 +1,55 @@
 
+// === Buscar primero por FQDN y luego por shortname (match exacto SOLAMENTE) ===
+Parallel.ForEach(serverList, server =>
+{
+    if (!string.IsNullOrEmpty(server.Name))
+    {
+        var original = (server.Name ?? "").Trim();            // tal cual en CMDB
+        var fullKey  = original.ToUpperInvariant();           // FQDN en MAYÚS
+        var shortKey = fullKey.Split('.')[0];                 // hostname corto MAYÚS
 
+        List<EntitySchema>? matchedEntities = null;
+
+        // 1. ¿hay coincidencia exacta por FQDN?
+        if (normalizedMap.TryGetValue(fullKey, out var listFull))
+        {
+            matchedEntities = listFull;
+        }
+
+        // 2. Si no hubo FQDN exacto, ¿hay coincidencia exacta por shortname?
+        else if (normalizedMap.TryGetValue(shortKey, out var listShort))
+        {
+            matchedEntities = listShort;
+        }
+
+        // **IMPORTANTE**
+        // YA NO hacemos fallback por "Contains".
+        // Si no hubo match exacto, lo consideramos NO monitoreado.
+
+        if (matchedEntities != null && matchedEntities.Count > 0)
+        {
+            localMatches.Add(new ServerWithEntities
+            {
+                Server = server,
+                Entities = matchedEntities
+            });
+
+            // Marca todos los EntityId emparejados
+            foreach (var e in matchedEntities)
+                matchedEntityIds.Add(e.EntityId);
+
+            // Remueve ambas claves del diccionario
+            normalizedMap.TryRemove(fullKey, out _);
+            normalizedMap.TryRemove(shortKey, out _);
+        }
+        else
+        {
+            // Este servidor NO tuvo match válido → va a No Monitoreados CMDB
+            _serversNoMatch.Add(server);
+        }
+    }
+
+    Console.WriteLine($"Procesando servidores: {serverList.IndexOf(server) + 1}/{serverList.Count}");
+});
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
