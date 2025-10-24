@@ -1,4 +1,93 @@
+// Lleva registro de los EntityId que sí hicieron match
+var matchedEntityIds = new ConcurrentBag<string>();
+var localMatches = new ConcurrentBag<ServerWithEntities>();
 
+// === Buscar primero por FQDN y luego por shortname (match exacto SOLAMENTE) ===
+Parallel.ForEach(serverList, server =>
+{
+    if (!string.IsNullOrEmpty(server.Name))
+    {
+        var original = (server.Name ?? "").Trim();          // tal cual en CMDB
+        var fullKey  = original.ToUpperInvariant();         // FQDN MAYÚS
+        var shortKey = fullKey.Split('.')[0];               // hostname corto MAYÚS
+
+        List<EntitySchema>? matchedEntities = null;
+
+        // 1. ¿hay coincidencia exacta por FQDN?
+        if (normalizedEntities.TryGetValue(fullKey, out var listFull))
+        {
+            matchedEntities = listFull;
+        }
+
+        // 2. si no hubo FQDN exacto, ¿hay coincidencia exacta por shortname?
+        else if (normalizedEntities.TryGetValue(shortKey, out var listShort))
+        {
+            matchedEntities = listShort;
+        }
+
+        // **IMPORTANTE**
+        // YA NO hacemos fallback por "Contains".
+        // Si no hubo match exacto, lo consideramos NO monitoreado.
+
+        if (matchedEntities != null && matchedEntities.Count > 0)
+        {
+            localMatches.Add(new ServerWithEntities
+            {
+                Server = server,
+                Entities = matchedEntities
+            });
+
+            // Marca todos los EntityId emparejados
+            foreach (var e in matchedEntities)
+            {
+                matchedEntityIds.Add(e.EntityId);
+            }
+
+            // Remueve ambas claves de normalizedEntities
+            normalizedEntities.TryRemove(fullKey, out _);
+            normalizedEntities.TryRemove(shortKey, out _);
+        }
+        else
+        {
+            // Este servidor NO tuvo match válido → va a No Monitoreados CMDB
+            _serversNoMatch.Add(server);
+        }
+    }
+
+    Console.WriteLine(
+        "Procesando servidores: {0}/{1}",
+        serverList.IndexOf(server) + 1,
+        serverList.Count
+    );
+});
+
+// Consolidar matches encontrados en paralelo
+_serversWithEntities = localMatches.ToList();
+
+// Entidades que NO hicieron match con nadie (Dynatrace sin CMDB)
+var matchedSet = new HashSet<string>(matchedEntityIds);
+_serversNoMatchDyn = allEntities
+    .GroupBy(e => e.EntityId)
+    .Select(g => g.First())
+    .Where(e => !matchedSet.Contains(e.EntityId))
+    .ToList();
+
+// (si todavía filtras solo "OnPremise", deja esto tal cual,
+// pero esto es opcional según lo que ya tenías)
+_serversNoMatchDyn = _serversNoMatchDyn
+    .Where(entity =>
+        entity.ManagementZones != null &&
+        entity.ManagementZones.Any(zone =>
+            zone.Name != null &&
+            zone.Name.IndexOf("Premise", StringComparison.OrdinalIgnoreCase) >= 0
+        )
+    )
+    .ToList();
+
+Console.WriteLine();
+Console.WriteLine($"Entidades match   {_serversWithEntities.Count}");
+Console.WriteLine($"Sin match en CMDB {_serversNoMatch.Count}");
+Console.WriteLine($"Sin match en Dynatrace {_serversNoMatchDyn.Count}");
 
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
