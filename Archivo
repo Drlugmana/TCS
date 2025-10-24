@@ -1,31 +1,4 @@
 
-// Llenar normalizedMap con TODAS las entidades una vez
-foreach (var ent in allEntities)
-{
-    // nombre como viene de Dynatrace
-    var disp = ent.DisplayName ?? "";
-    var k1   = disp.Trim().ToUpperInvariant();     // tal cual pero en mayúsculas
-    var k2   = NormalizeHostLikeDynatrace(disp);   // normalizado (sin dominio, sin sufijo)
 
-    // guarda bajo k1
-    if (!string.IsNullOrWhiteSpace(k1))
-    {
-        normalizedMap.AddOrUpdate(
-            k1,
-            _ => new List<EntitySchema> { ent },
-            (_, list) => { list.Add(ent); return list; }
-        );
-    }
-
-    // guarda bajo k2 (si es distinto)
-    if (!string.IsNullOrWhiteSpace(k2))
-    {
-        normalizedMap.AddOrUpdate(
-            k2,
-            _ => new List<EntitySchema> { ent },
-            (_, list) => { list.Add(ent); return list; }
-        );
-    }
-}
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
