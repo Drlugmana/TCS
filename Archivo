@@ -1,19 +1,5 @@
-= switch(
-    [Type],
-    "HTTP_CHECK", "Monitoreo Sintético",
-    "PING", "Monitoreo de Disponibilidad", 
-    "CPU_CHECK", "Monitoreo de Rendimiento",
-    "DISK_CHECK", "Monitoreo de Almacenamiento",
-    "NETWORK_CHECK", "Monitoreo de Red",
-    [Monitoring Mode]  // Valor por defecto
-  )
 
+Primero que me ayudas a validar la pestaña de Monitoreados que si de verdad hacen match con entidades se quedue en la pestaña de monitoreados porque veo 6 servidores que comprobe manualmente, no tienes monitoreo y deberia quedarse en NO Monitoreados Cmdb.
 
-= if [Type] = "HTTP_CHECK" then "Monitoreo Sintético"
-  else if [Type] = "PING" then "Monitoreo de Disponibilidad"
-  else if [Type] = "CPU_CHECK" or [Type] = "MEMORY_CHECK" then "Monitoreo de Rendimiento"
-  else if [Type] = "DISK_CHECK" then "Monitoreo de Almacenamiento"
-  else if [Type] = "NETWORK_CHECK" then "Monitoreo de Red"
-  else "Otro Monitoreo"
-
-= if [Type] = "HTTP_CHECK" then "Monitoreo Sintético" else [Monitoring Mode]
+De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
+quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
