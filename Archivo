@@ -1,4 +1,1 @@
 
-  
-De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
-quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
