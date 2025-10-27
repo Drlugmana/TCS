@@ -1,5 +1,223 @@
 
+private static void CreateExcepcionadosSheet(ExcelPackage package)
+{
+    // === Utilidades internas ===
+    string RemoveDiacritics(string s)
+    {
+        var norm = s.Normalize(System.Text.NormalizationForm.FormD);
+        var sb = new System.Text.StringBuilder();
+        foreach (var ch in norm)
+        {
+            if (System.Globalization.CharUnicodeInfo.GetUnicodeCategory(ch)
+                != System.Globalization.UnicodeCategory.NonSpacingMark)
+            {
+                sb.Append(ch);
+            }
+        }
+        return sb.ToString().Normalize(System.Text.NormalizationForm.FormC);
+    }
 
+    string NormHeader(string? s)
+    {
+        s = RemoveDiacritics((s ?? "")
+            .Replace("(", " ")
+            .Replace(")", " ")
+            .Replace("_", " "));
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+        return s.Trim().ToUpperInvariant();
+    }
+
+    string NormVal(string? s)
+    {
+        s = RemoveDiacritics(s ?? "");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+        return s.Trim().ToUpperInvariant();
+    }
+
+    int FindColFuzzy(ExcelWorksheet ws, params string[] headerHints)
+    {
+        var targets = headerHints.Select(NormHeader).ToList();
+        if (ws.Dimension == null) return -1;
+
+        int colCount = ws.Dimension.End.Column;
+        for (int c = 1; c <= colCount; c++)
+        {
+            var h = NormHeader(ws.Cells[1, c].Text ?? "");
+            if (targets.Any(t => h.Contains(t)))
+                return c;
+        }
+        return -1;
+    }
+
+    // === 1) Asegurarnos que exista/leer hoja Monitoreados ===
+    var monitSheet = package.Workbook.Worksheets["Monitoreados"];
+    if (monitSheet == null || monitSheet.Dimension == null)
+    {
+        Console.WriteLine("⚠ No se encontró la hoja 'Monitoreados' o está vacía. No se puede construir 'Excepcionados'.");
+        return;
+    }
+
+    int monRowCount = monitSheet.Dimension.End.Row;
+    int monColCount = monitSheet.Dimension.End.Column;
+
+    // columnas que vamos a usar de Monitoreados
+    int monColServerName   = FindColFuzzy(monitSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME"); // depende cómo llamas la primera col
+    int monColInvTorres    = FindColFuzzy(monitSheet, "INVENTARIO TORRES", "INVENTARIO DE TORRES", "INVENTARIO TORRE");
+
+    // Además, para la regla vieja de Excepcionados necesitamos:
+    int colApSO        = FindColFuzzy(monitSheet, "APLICA MONITOREO POR SO", "APLICA MONITOREO SO");
+    int colApNom       = FindColFuzzy(monitSheet, "APLICA POR NOMBRE", "APLICA X NOMBRE", "APLICA POR NOMBRE?");
+    int colEstadoCat   = FindColFuzzy(monitSheet, "ESTADO OPERATIVO (CATALOGO)", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO");
+    int colEsVirtual   = FindColFuzzy(monitSheet, "ES VIRTUAL", "VIRTUAL", "ES_VIRTUAL");
+
+    if (monColServerName < 0 || monColInvTorres < 0 ||
+        colApSO        < 0 || colApNom     < 0 ||
+        colEstadoCat   < 0 || colEsVirtual < 0)
+    {
+        Console.WriteLine("⚠ No se encontraron todas las columnas necesarias en 'Monitoreados' para construir 'Excepcionados'.");
+        return;
+    }
+
+    // === 2) Construir sets de exclusión:
+    // Servidores que ya están en 'Reglas: SI' y 'Reglas CMDB: SI'
+    var yaReglas = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    var reglasSiSheet = package.Workbook.Worksheets["Reglas: SI"];
+    if (reglasSiSheet != null && reglasSiSheet.Dimension != null)
+    {
+        int rsRowCount = reglasSiSheet.Dimension.End.Row;
+        int rsColSrv   = FindColFuzzy(reglasSiSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME");
+        if (rsColSrv > 0)
+        {
+            for (int r = 2; r <= rsRowCount; r++)
+            {
+                var name = reglasSiSheet.Cells[r, rsColSrv].Text?.Trim();
+                if (!string.IsNullOrWhiteSpace(name))
+                    yaReglas.Add(name.ToUpperInvariant());
+            }
+        }
+    }
+
+    var reglasCmdbSiSheet = package.Workbook.Worksheets["Reglas CMDB: SI"];
+    if (reglasCmdbSiSheet != null && reglasCmdbSiSheet.Dimension != null)
+    {
+        int rcRowCount = reglasCmdbSiSheet.Dimension.End.Row;
+        int rcColSrv   = FindColFuzzy(reglasCmdbSiSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME");
+        if (rcColSrv > 0)
+        {
+            for (int r = 2; r <= rcRowCount; r++)
+            {
+                var name = reglasCmdbSiSheet.Cells[r, rcColSrv].Text?.Trim();
+                if (!string.IsNullOrWhiteSpace(name))
+                    yaReglas.Add(name.ToUpperInvariant());
+            }
+        }
+    }
+
+    // === 3) Crear / limpiar hoja destino 'Excepcionados' ===
+    var dstName = "Excepcionados";
+    if (package.Workbook.Worksheets[dstName] != null)
+        package.Workbook.Worksheets.Delete(dstName);
+
+    var dst = package.Workbook.Worksheets.Add(dstName);
+
+    // copiamos encabezados tal cual de Monitoreados
+    for (int c = 1; c <= monColCount; c++)
+    {
+        dst.Cells[1, c].Value = monitSheet.Cells[1, c].Value;
+        dst.Cells[1, c].Style.Font.Bold = true;
+    }
+
+    // definimos qué valores cuentan como FALSO en "Es Virtual"
+    var falseSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "FALSO", "FALSE", "NO", "0"
+    };
+
+    int outRow = 2;
+
+    // === 4) FASE A: regla "vieja" de Excepcionados (la dura)
+    //   - Estado Operativo = "OPERATIVO"
+    //   - Aplica por Nombre = "NO"
+    //   - Aplica Monitoreo por SO = "VERIFICAR"
+    //   - Inventario Torres = "SI"
+    //   - Es Virtual = FALSO
+    for (int r = 2; r <= monRowCount; r++)
+    {
+        var vSrv   = monitSheet.Cells[r, monColServerName].Text;
+        var vInv   = NormVal(monitSheet.Cells[r, monColInvTorres].Text);
+        var vSO    = NormVal(monitSheet.Cells[r, colApSO].Text);
+        var vNom   = NormVal(monitSheet.Cells[r, colApNom].Text);
+        var vEst   = NormVal(monitSheet.Cells[r, colEstadoCat].Text);
+        var vVirt  = NormVal(monitSheet.Cells[r, colEsVirtual].Text);
+
+        bool cEst   = vEst == "OPERATIVO";
+        bool cNom   = vNom == "NO";
+        bool cSO    = vSO == "VERIFICAR";
+        bool cInv   = vInv == "SI";
+        bool cVirt  = falseSet.Contains(vVirt); // "FALSO", "NO", etc.
+
+        if (cEst && cNom && cSO && cInv && cVirt)
+        {
+            // Copiar fila completa
+            for (int c = 1; c <= monColCount; c++)
+                dst.Cells[outRow, c].Value = monitSheet.Cells[r, c].Value;
+
+            outRow++;
+        }
+    }
+
+    // === 5) FASE B (lo nuevo que estás pidiendo):
+    // "resto de Monitoreados que NO están en Reglas: SI / Reglas CMDB: SI
+    //  y que tengan Inventario Torres = 'SI'"
+    //
+    // Evitamos duplicar filas que ya copiamos en fase A usando un HashSet por ServerName.
+    var yaIncluidos = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+    // llena yaIncluidos con lo que pusimos en Fase A
+    for (int r2 = 2; r2 < outRow; r2++)
+    {
+        var srvExistente = dst.Cells[r2, monColServerName].Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(srvExistente))
+            yaIncluidos.Add(srvExistente.ToUpperInvariant());
+    }
+
+    for (int r = 2; r <= monRowCount; r++)
+    {
+        var rawSrv = monitSheet.Cells[r, monColServerName].Text?.Trim();
+        if (string.IsNullOrWhiteSpace(rawSrv)) continue;
+
+        var srvUpper = rawSrv.ToUpperInvariant();
+
+        // Si ya lo copiamos en Fase A, saltar.
+        if (yaIncluidos.Contains(srvUpper))
+            continue;
+
+        // Si está en "Reglas: SI" o "Reglas CMDB: SI", tampoco lo copiamos.
+        if (yaReglas.Contains(srvUpper))
+            continue;
+
+        // Leer Inventario Torres
+        var vInv = NormVal(monitSheet.Cells[r, monColInvTorres].Text);
+
+        // NUEVA condición: Inventario Torres == "SI"
+        if (vInv == "SI")
+        {
+            // copiar toda la fila
+            for (int c = 1; c <= monColCount; c++)
+                dst.Cells[outRow, c].Value = monitSheet.Cells[r, c].Value;
+
+            yaIncluidos.Add(srvUpper);
+            outRow++;
+        }
+    }
+
+    // Ajuste visual
+    if (dst.Dimension != null)
+        dst.Cells[dst.Dimension.Address].AutoFitColumns();
+
+    Console.WriteLine($"✔ Hoja 'Excepcionados' creada/actualizada con {outRow - 2} filas.");
+}
    
 De la pestaña Monitoreados quiero que me saques los que estan Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si", pero la condicon es que no me traigas los que me das en la pestaña de "Reglas  SI"
 quiero que me traigas primero los Reglas si de la pestaña Momonitoreados que son 1833 y luego otra crea otra pestaña con los que sobran y no esten en la pestaña Reglas  SI con estas condiciones Estado Operativo (Catálogo) = "Operativos" y Inventario Torres = "Si"
