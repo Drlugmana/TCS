@@ -1,1 +1,214 @@
 
+// Lee la lista base "Servidores Totales.xlsx"
+private static List<string> LoadServidoresTotales(string path, string sheet = "Hoja1")
+{
+    var result = new List<string>();
+    using var pkg = new OfficeOpenXml.ExcelPackage(new FileInfo(path));
+    var ws = pkg.Workbook.Worksheets[sheet];
+    if (ws == null || ws.Dimension == null) return result;
+
+    // asumimos encabezado en fila 1, nombres en columna A
+    int lastRow = ws.Dimension.End.Row;
+    for (int r = 2; r <= lastRow; r++)
+    {
+        var raw = ws.Cells[r, 1].Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(raw))
+            result.Add(raw);
+    }
+    return result;
+}
+
+
+-----
+
+private static void CreateResumenUbicacionSheet(
+    ExcelPackage package,
+    List<string> servidoresTotales)
+{
+    // 1. Obtén las hojas donde vamos a buscar
+    var wsMon = package.Workbook.Worksheets["Monitoreados"];
+    var wsNoMon = package.Workbook.Worksheets["No Monitoreados CMDB"];
+
+    if (wsMon == null && wsNoMon == null)
+    {
+        Console.WriteLine("⚠ No existen las hojas Monitoreados / No Monitoreados CMDB. No se puede generar Resumen Ubicacion.");
+        return;
+    }
+
+    // 2. Función local para normalizar nombre de servidor igual que usas en matching
+    string Normalize(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return string.Empty;
+        // igual que haces en otras partes: trim, mayúsculas
+        return s.Trim().ToUpperInvariant();
+    }
+
+    // 3. Construimos índices rápidos:
+    //    Para cada hoja armamos diccionario { nombreNormalizado => (estadoOperativo, ubicacionHoja) }
+
+    var index = new Dictionary<string, (string estado, string ubicacion)>(StringComparer.OrdinalIgnoreCase);
+
+    // --- Index de Monitoreados ---
+    if (wsMon != null && wsMon.Dimension != null)
+    {
+        int lastRowMon = wsMon.Dimension.End.Row;
+        // necesitamos las columnas:
+        // Server Name  -> búscala
+        // Estado Operativo (Catálogo) -> búscala
+        // Vamos a localizar columnas por nombre difuso como ya hicimos antes
+
+        int colCountMon = wsMon.Dimension.End.Column;
+
+        // normalizador de encabezados (copiado de tu lógica anterior)
+        string CleanHeader(string s)
+        {
+            s = (s ?? "").Trim().ToUpperInvariant();
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+            s = s.Replace("_", " ");
+            return s;
+        }
+
+        int FindCol(ExcelWorksheet sh, params string[] hints)
+        {
+            var targets = hints
+                .Select(h => CleanHeader(h))
+                .ToList();
+
+            for (int c = 1; c <= sh.Dimension.End.Column; c++)
+            {
+                var hText = CleanHeader(sh.Cells[1, c].Text);
+                if (targets.Any(t => hText.Contains(t)))
+                    return c;
+            }
+            return -1;
+        }
+
+        int colSrvMon = FindCol(wsMon, "SERVER NAME", "SERVIDOR", "HOSTNAME");
+        int colEstadoMon = FindCol(wsMon, "ESTADO OPERATIVO (CATALOGO)", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO");
+
+        for (int r = 2; r <= lastRowMon; r++)
+        {
+            var srv = colSrvMon > 0 ? wsMon.Cells[r, colSrvMon].Text?.Trim() : "";
+            if (string.IsNullOrWhiteSpace(srv)) continue;
+
+            var estado = colEstadoMon > 0 ? wsMon.Cells[r, colEstadoMon].Text?.Trim() : "";
+
+            var key = Normalize(srv);
+
+            // si ya existe en index NO lo piso, Monitoreados tiene prioridad
+            if (!index.ContainsKey(key))
+                index[key] = (estado, "Monitoreados");
+        }
+    }
+
+    // --- Index de No Monitoreados CMDB ---
+    if (wsNoMon != null && wsNoMon.Dimension != null)
+    {
+        int lastRowNo = wsNoMon.Dimension.End.Row;
+
+        string CleanHeader2(string s)
+        {
+            s = (s ?? "").Trim().ToUpperInvariant();
+            s = System.Text.RegularExpressions.Regex.Replace(s, @"\s+", " ");
+            s = s.Replace("_", " ");
+            return s;
+        }
+
+        int FindCol2(ExcelWorksheet sh, params string[] hints)
+        {
+            var targets = hints
+                .Select(h => CleanHeader2(h))
+                .ToList();
+
+            for (int c = 1; c <= sh.Dimension.End.Column; c++)
+            {
+                var hText = CleanHeader2(sh.Cells[1, c].Text);
+                if (targets.Any(t => hText.Contains(t)))
+                    return c;
+            }
+            return -1;
+        }
+
+        int colSrvNo = FindCol2(wsNoMon, "SERVER NAME", "SERVIDOR", "HOSTNAME");
+        int colEstadoNo = FindCol2(wsNoMon, "ESTADO OPERATIVO (CATALOGO)", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO");
+
+        for (int r = 2; r <= lastRowNo; r++)
+        {
+            var srv = colSrvNo > 0 ? wsNoMon.Cells[r, colSrvNo].Text?.Trim() : "";
+            if (string.IsNullOrWhiteSpace(srv)) continue;
+
+            var estado = colEstadoNo > 0 ? wsNoMon.Cells[r, colEstadoNo].Text?.Trim() : "";
+
+            var key = Normalize(srv);
+
+            // solo agregar si NO estaba ya en monitoreados
+            if (!index.ContainsKey(key))
+                index[key] = (estado, "No Monitoreados CMDB");
+        }
+    }
+
+    // 4. Crear / limpiar hoja destino "Resumen Ubicacion"
+    const string sheetName = "Resumen Ubicacion";
+    if (package.Workbook.Worksheets[sheetName] != null)
+        package.Workbook.Worksheets.Delete(sheetName);
+
+    var dst = package.Workbook.Worksheets.Add(sheetName);
+
+    // encabezados
+    dst.Cells[1, 1].Value = "Server Name";
+    dst.Cells[1, 2].Value = "Ubicacion";
+    dst.Cells[1, 3].Value = "Estado Operativo (Catálogo)";
+    dst.Cells[1, 1, 1, 3].Style.Font.Bold = true;
+
+    // 5. Volcar la lista de "Servidores Totales"
+    int outRow = 2;
+    foreach (var rawSrv in servidoresTotales)
+    {
+        var key = Normalize(rawSrv);
+
+        if (index.TryGetValue(key, out var info))
+        {
+            dst.Cells[outRow, 1].Value = rawSrv;
+            dst.Cells[outRow, 2].Value = info.ubicacion;
+            dst.Cells[outRow, 3].Value = info.estado;
+        }
+        else
+        {
+            dst.Cells[outRow, 1].Value = rawSrv;
+            dst.Cells[outRow, 2].Value = "NO ENCONTRADO";
+            dst.Cells[outRow, 3].Value = "";
+        }
+
+        outRow++;
+    }
+
+    // autowidth
+    if (dst.Dimension != null)
+        dst.Cells[dst.Dimension.Address].AutoFitColumns();
+
+    Console.WriteLine($"Hoja '{sheetName}' creada con {servidoresTotales.Count} filas.");
+}
+
+----
+
+public static void GenerateReport()
+{
+    ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+    using var package = new ExcelPackage();
+
+    // ya tienes estas llamadas:
+    CreateMonitoredSheet(package);
+    CreateNoMatchCmdbServerSheet(package);
+    // etc...
+
+    // === NUEVO: cargar Servidores Totales ===
+    string rutaServidoresTotales = Path.Combine(AppContext.BaseDirectory, "Servidores Totales.xlsx");
+    var listaServidores = LoadServidoresTotales(rutaServidoresTotales, "Hoja1");
+
+    // === NUEVO: crear Resumen Ubicacion ===
+    CreateResumenUbicacionSheet(package, listaServidores);
+
+    // finalmente guardas el Excel en disco (asumo que ya lo haces)
+    string outputPath = Path.Combine(AppContext.BaseDirectory, "Reporte_Final.xlsx");
+    package.SaveAs(new FileInfo(outputPath));
+}
