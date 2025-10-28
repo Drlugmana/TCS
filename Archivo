@@ -1,1 +1,231 @@
 
+private static void CreateResumenUbicacionSheet(
+    ExcelPackage package,
+    List<string> servidoresTotales,
+    string hojaMonitoreados          = "Monitoreados",
+    string hojaNoMonCmdb             = "No Monitoreados CMDB",
+    string hojaExcepcionados         = "Excepcionados",
+    string outSheetName              = "Resumen Ubicacion")
+{
+    // Helpers
+    string Clean(string? s)
+    {
+        return string.IsNullOrWhiteSpace(s)
+            ? ""
+            : s.Trim().ToUpperInvariant();
+    }
+
+    string NormHeader(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        s = s.ToUpperInvariant();
+        s = s.Replace("(", " ")
+             .Replace(")", " ")
+             .Replace("_", " ")
+             .Replace(":", " ")
+             .Replace("-", " ");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\\s+", " ").Trim();
+        return s;
+    }
+
+    int FindColByHeaderLike(ExcelWorksheet ws, params string[] candidates)
+    {
+        if (ws?.Dimension == null) return -1;
+        int lastCol = ws.Dimension.End.Column;
+        var wanted  = candidates.Select(NormHeader).ToList();
+
+        for (int c = 1; c <= lastCol; c++)
+        {
+            var h = NormHeader(ws.Cells[1, c].Text);
+            if (wanted.Any(w => h.Contains(w)))
+                return c;
+        }
+        return -1;
+    }
+
+    // 1. Traemos las hojas existentes del paquete
+    var monitSheet         = package.Workbook.Worksheets[hojaMonitoreados];
+    var noMonSheet         = package.Workbook.Worksheets[hojaNoMonCmdb];
+    var excepcionadosSheet = package.Workbook.Worksheets[hojaExcepcionados];
+
+    // Ubicamos columnas clave en cada una:
+    // server name y estado operativo catálogo
+    int monitColSrv   = -1, monitColEstado   = -1;
+    int noMonColSrv   = -1, noMonColEstado   = -1;
+    int excColSrv     = -1, excColEstado     = -1;
+
+    if (monitSheet != null && monitSheet.Dimension != null)
+    {
+        monitColSrv    = FindColByHeaderLike(monitSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME");
+        monitColEstado = FindColByHeaderLike(monitSheet, "ESTADO OPERATIVO", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO (CATALOGO)");
+    }
+
+    if (noMonSheet != null && noMonSheet.Dimension != null)
+    {
+        noMonColSrv    = FindColByHeaderLike(noMonSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME");
+        noMonColEstado = FindColByHeaderLike(noMonSheet, "ESTADO OPERATIVO", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO (CATALOGO)");
+    }
+
+    if (excepcionadosSheet != null && excepcionadosSheet.Dimension != null)
+    {
+        excColSrv      = FindColByHeaderLike(excepcionadosSheet, "SERVER NAME", "HOSTNAME", "DISPLAY NAME");
+        excColEstado   = FindColByHeaderLike(excepcionadosSheet, "ESTADO OPERATIVO", "ESTADO OPERATIVO CATALOGO", "ESTADO OPERATIVO (CATALOGO)");
+    }
+
+    // 2. Build un diccionario nombre → (ubicación, estado)
+    // prioridad:
+    //   Excepcionados > Monitoreados > No Monitoreados CMDB
+    var mapUbicacion = new Dictionary<string,(string Ubic,string Estado)>(StringComparer.OrdinalIgnoreCase);
+
+    // Excepcionados primero
+    if (excepcionadosSheet != null && excepcionadosSheet.Dimension != null && excColSrv > 0)
+    {
+        int lastRow = excepcionadosSheet.Dimension.End.Row;
+        for (int r = 2; r <= lastRow; r++)
+        {
+            var rawSrv = excepcionadosSheet.Cells[r, excColSrv].Text?.Trim();
+            if (string.IsNullOrWhiteSpace(rawSrv)) continue;
+            var key = Clean(rawSrv);
+
+            var estado = excColEstado > 0
+                ? excepcionadosSheet.Cells[r, excColEstado].Text?.Trim() ?? ""
+                : "";
+
+            if (!mapUbicacion.ContainsKey(key))
+                mapUbicacion[key] = ("EXCEPCIONADOS", estado);
+        }
+    }
+
+    // Monitoreados después
+    if (monitSheet != null && monitSheet.Dimension != null && monitColSrv > 0)
+    {
+        int lastRow = monitSheet.Dimension.End.Row;
+        for (int r = 2; r <= lastRow; r++)
+        {
+            var rawSrv = monitSheet.Cells[r, monitColSrv].Text?.Trim();
+            if (string.IsNullOrWhiteSpace(rawSrv)) continue;
+            var key = Clean(rawSrv);
+
+            if (mapUbicacion.ContainsKey(key)) continue; // ya estaba como EXCEPCIONADOS
+
+            var estado = monitColEstado > 0
+                ? monitSheet.Cells[r, monitColEstado].Text?.Trim() ?? ""
+                : "";
+
+            mapUbicacion[key] = ("MONITOREADOS", estado);
+        }
+    }
+
+    // No Monitoreados CMDB al final
+    if (noMonSheet != null && noMonSheet.Dimension != null && noMonColSrv > 0)
+    {
+        int lastRow = noMonSheet.Dimension.End.Row;
+        for (int r = 2; r <= lastRow; r++)
+        {
+            var rawSrv = noMonSheet.Cells[r, noMonColSrv].Text?.Trim();
+            if (string.IsNullOrWhiteSpace(rawSrv)) continue;
+            var key = Clean(rawSrv);
+
+            if (mapUbicacion.ContainsKey(key)) continue; // ya estaba clasificado
+
+            var estado = noMonColEstado > 0
+                ? noMonSheet.Cells[r, noMonColEstado].Text?.Trim() ?? ""
+                : "";
+
+            mapUbicacion[key] = ("NO MONITOREADOS CMDB", estado);
+        }
+    }
+
+    // 3. Crear / limpiar hoja destino "Resumen Ubicacion"
+    if (package.Workbook.Worksheets[outSheetName] != null)
+        package.Workbook.Worksheets.Delete(outSheetName);
+
+    var outWs = package.Workbook.Worksheets.Add(outSheetName);
+
+    outWs.Cells[1,1].Value = "Server Name";
+    outWs.Cells[1,2].Value = "Ubicacion";
+    outWs.Cells[1,3].Value = "Estado Operativo (Catálogo)";
+    outWs.Cells[1,1,1,3].Style.Font.Bold = true;
+
+    // 4. Rellenar usando servidoresTotales
+    int outRow = 2;
+    foreach (var rawName in servidoresTotales)
+    {
+        var key = Clean(rawName);
+
+        string ubic, estado;
+        if (mapUbicacion.TryGetValue(key, out var data))
+        {
+            ubic   = data.Ubic;
+            estado = data.Estado;
+        }
+        else
+        {
+            ubic   = "NO ENCONTRADO";
+            estado = "";
+        }
+
+        outWs.Cells[outRow,1].Value = rawName;
+        outWs.Cells[outRow,2].Value = ubic;
+        outWs.Cells[outRow,3].Value = estado;
+
+        outRow++;
+    }
+
+    if (outWs.Dimension != null)
+        outWs.Cells[outWs.Dimension.Address].AutoFitColumns();
+
+    Console.WriteLine($"✅ Hoja '{outSheetName}' creada con {outRow-2} filas usando 'Servidores Totales'.");
+}
+
+
+
+----
+
+public static void GenerateReport()
+{
+    ExcelPackage.LicenseContext = LicenseContext.NonCommercial;
+    using var package = new ExcelPackage();
+
+    // 1. Generamos todas las hojas normales que tú ya tienes:
+    CreateMonitoredSheet(package);
+    CreateNoMatchCmdbServerSheet(package);
+    CreateFilteredByRulesSheet(package, "Monitoreados", "Reglas: SI",
+        (inv, so, nom, est) =>
+            (inv == "SI" && so == "VERIFICAR" && nom == "SI" && est == "OPERATIVO") ||
+            (inv == "SI" && so == "SI"         && nom == "SI" && est == "OPERATIVO")
+    );
+
+    CreateFilteredByRulesSheet(package, "No Monitoreados CMDB", "Reglas CMDB: SI",
+        (inv, so, nom, est) =>
+            (inv == "SI" && so == "SI" && nom == "SI" && est == "OPERATIVO")
+    );
+
+    CreateExcepcionadosSheet(package);
+
+    // 2. Cargamos la lista del archivo externo "Servidores Totales.xlsx"
+    string rutaServidoresTotales = Path.Combine(AppContext.BaseDirectory, "Servidores Totales.xlsx");
+    var listaServidores = LoadServidoresTotales(rutaServidoresTotales, "Hoja1"); // cambia "Hoja1" si tu hoja se llama distinto
+
+    // 3. Creamos la hoja 'Resumen Ubicacion' dentro del MISMO package
+    CreateResumenUbicacionSheet(
+        package,
+        listaServidores,
+        hojaMonitoreados: "Monitoreados",
+        hojaNoMonCmdb: "No Monitoreados CMDB", // ajusta al nombre real de tu pestaña
+        hojaExcepcionados: "Excepcionados",
+        outSheetName: "Resumen Ubicacion"
+    );
+
+    // 4. Calculo SLA (tu hoja existente)
+    var slaSheet = package.Workbook.Worksheets.Add("Calculo SLA");
+    slaSheet.Cells["A1"].Value = "Métrica";
+    slaSheet.Cells["B1"].Value = "Valor";
+    slaSheet.Cells["A1:B1"].Style.Font.Bold = true;
+
+    // 5. Guardar reporte final
+    var fileInfo = new FileInfo("servers_with_entities.xlsx");
+    package.SaveAs(fileInfo);
+
+    Console.WriteLine("📦 Reporte final generado con Resumen Ubicacion ✅");
+}
