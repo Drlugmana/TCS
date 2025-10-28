@@ -1,1 +1,58 @@
 
+// Lee el Excel "Servidores Totales.xlsx" y devuelve lista de hostnames
+private static List<string> LoadServidoresTotales(string path, string sheet = "Hoja1")
+{
+    var result = new List<string>();
+
+    using var pkg = new OfficeOpenXml.ExcelPackage(new FileInfo(path));
+    var ws = pkg.Workbook.Worksheets[sheet];
+    if (ws == null || ws.Dimension == null)
+    {
+        Console.WriteLine($"⚠ No se encontró la hoja '{sheet}' en {path} o está vacía.");
+        return result;
+    }
+
+    // helper para normalizar encabezados
+    string NormHeader(string? s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return "";
+        s = s.ToUpperInvariant();
+        s = s.Replace("(", " ")
+             .Replace(")", " ")
+             .Replace("_", " ")
+             .Replace(":", " ")
+             .Replace("-", " ");
+        s = System.Text.RegularExpressions.Regex.Replace(s, @"\\s+", " ").Trim();
+        return s;
+    }
+
+    int colServer = -1;
+    int lastCol = ws.Dimension.End.Column;
+
+    // detecta columna "Server Name"
+    for (int c = 1; c <= lastCol; c++)
+    {
+        var h = NormHeader(ws.Cells[1, c].Text);
+        if (h.Contains("SERVER NAME") || h.Contains("HOSTNAME") || h.Contains("DISPLAY NAME"))
+        {
+            colServer = c;
+            break;
+        }
+    }
+
+    if (colServer < 0)
+    {
+        Console.WriteLine("⚠ No encontré columna Server Name en 'Servidores Totales'.");
+        return result;
+    }
+
+    int lastRow = ws.Dimension.End.Row;
+    for (int r = 2; r <= lastRow; r++)
+    {
+        var raw = ws.Cells[r, colServer].Text?.Trim();
+        if (!string.IsNullOrWhiteSpace(raw))
+            result.Add(raw);
+    }
+
+    return result;
+}
