@@ -1,1 +1,16 @@
 
+Med_Aux_CPU_USED =
+VAR maxdate =
+    MAX ( CP_Clustes_de_VMware[IndiceMes] )
+VAR usado =
+    CALCULATE (
+        SUM ( CP_Clustes_de_VMware[Aux_CPU_Total_USED] ),
+        CP_Clustes_de_VMware[IndiceMes] = maxdate
+    )
+VAR total =
+    CALCULATE (
+        SUM ( CP_Clustes_de_VMware[Aux_CPU_Total] ),
+        CP_Clustes_de_VMware[IndiceMes] = maxdate
+    )
+RETURN
+    DIVIDE ( usado, total )
