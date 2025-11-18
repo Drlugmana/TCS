@@ -14,3 +14,31 @@ VAR maxvalor =
 VAR ratio = DIVIDE ( valor, maxvalor )
 RETURN
     MIN ( ratio, 1 )
+
+
+--------
+
+Med_Aux_CPU_USED =
+VAR maxdate =
+    MAX ( CP_Clusteres_de_VMware[IndiceMes] )
+VAR valor =
+    CALCULATE (
+        AVERAGE ( CP_Clusteres_de_VMware[Aux_CPU_Total_USED] ),
+        CP_Clusteres_de_VMware[IndiceMes] = maxdate
+    )
+VAR maxvalor =
+    CALCULATE (
+        AVERAGE ( CP_Clusteres_de_VMware[Aux_CPU_Total] ),
+        CP_Clusteres_de_VMware[IndiceMes] = maxdate
+    )
+RETURN
+    DIVIDE ( valor, maxvalor )
+
+-----
+Med_Aux_CPU_USED_Real =
+-- tu fórmula original
+DIVIDE ( valor, maxvalor )
+-----
+Med_Aux_CPU_USED_Gauge =
+VAR ratio = [Med_Aux_CPU_USED_Real]
+RETURN MIN ( ratio, 1 )
