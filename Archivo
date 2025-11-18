@@ -1,33 +1,16 @@
-
-Med_Aux_CPU_USED =
-VAR maxdate =
-    MAX ( CP_Clustes_de_VMware[IndiceMes] )
-VAR usado =
-    CALCULATE (
-        SUM ( CP_Clustes_de_VMware[Aux_CPU_Total_USED] ),
-        CP_Clustes_de_VMware[IndiceMes] = maxdate
-    )
-VAR total =
-    CALCULATE (
-        SUM ( CP_Clustes_de_VMware[Aux_CPU_Total] ),
-        CP_Clustes_de_VMware[IndiceMes] = maxdate
-    )
-RETURN
-    DIVIDE ( usado, total )
-
-
 Med_Aux_CPU_USED =
 VAR maxdate =
     MAX ( CP_Clusteres_de_VMware[IndiceMes] )
-VAR Used =
+VAR valor =
     CALCULATE (
         SUM ( CP_Clusteres_de_VMware[Aux_CPU_Total_USED] ),
         CP_Clusteres_de_VMware[IndiceMes] = maxdate
     )
-VAR Capacity =
+VAR maxvalor =
     CALCULATE (
         SUM ( CP_Clusteres_de_VMware[Aux_CPU_Total] ),
         CP_Clusteres_de_VMware[IndiceMes] = maxdate
     )
+VAR ratio = DIVIDE ( valor, maxvalor )
 RETURN
-    DIVIDE ( Used, Capacity )
+    MIN ( ratio, 1 )
