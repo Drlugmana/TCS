@@ -1,97 +1,101 @@
 // src/api/problems.js
 
-// ------------------------------
-// 1) Leer la URL base desde config.json (solo una vez)
-// ------------------------------
-let BASE_URL = null;
+//-----------------------------------------------------------
+// 1) LEER LA URL BASE DEL BACKEND DESDE EL ARCHIVO .env
+//-----------------------------------------------------------
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
 
-async function getBaseUrl() {
-  if (BASE_URL) return BASE_URL;
-
-  const res = await fetch('/config.json');
-  if (!res.ok) {
-    throw new Error(`No se pudo leer /config.json (status ${res.status})`);
-  }
-
-  const config = await res.json();
-  const raw = config.API_BASE_URL || '';
-  BASE_URL = raw.replace(/\/+$/, ''); // quita / al final
-
-  if (!BASE_URL) {
-    throw new Error('API_BASE_URL en config.json está vacío');
-  }
-
-  return BASE_URL;
+if (!BASE) {
+  throw new Error(
+    "❌ ERROR: Falta definir VITE_API_URL en .env (ejemplo: VITE_API_URL=https://tu-backend)"
+  );
 }
 
-// ------------------------------
-// 2) Normalizar alertas del backend
-// ------------------------------
-function normalize(listLike) {
-  // Soporta {results:[]}, {data:[]}, {value:[]} o [] directo
-  let list = [];
-  if (Array.isArray(listLike)) {
-    list = listLike;
-  } else if (Array.isArray(listLike?.results)) {
-    list = listLike.results;
-  } else if (Array.isArray(listLike?.data)) {
-    list = listLike.data;
-  } else if (Array.isArray(listLike?.value)) {
-    list = listLike.value;
-  }
+const API = `${BASE}/api/Problems`;
+
+
+//-----------------------------------------------------------
+// 2) NORMALIZAR ALERTAS DEL BACKEND
+//-----------------------------------------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
 
   return list.map((p) => {
-    // detectar si es TCS o NO TCS
-    const isTcs =
-      typeof p.isTcs === 'boolean'
-        ? p.isTcs
-        : typeof p.juris === 'string'
-          ? p.juris.toUpperCase() === 'TCS'
-          : typeof p.jurisdiction === 'string'
-            ? p.jurisdiction.toUpperCase() === 'TCS'
-            : false;
+    const isTcsFromObject = p?.jurisdiction?.isTcs;
+    const isTcsFromString =
+      typeof p?.juris === "string"
+        ? p.juris.toUpperCase() === "TCS"
+        : undefined;
 
+    const isTcs = isTcsFromObject ?? isTcsFromString ?? false;
     const label =
-      typeof p.juris === 'string'
-        ? p.juris
-        : isTcs
-          ? 'TCS'
-          : 'NO TCS';
+      p?.jurisdiction?.label ??
+      p?.label ??
+      (isTcs ? "TCS" : "NO TCS");
 
     return {
       ...p,
       isTcs,
       label,
-
-      // Campos con fallback para no romper tarjetas
-      title: p.title ?? p.shortDescription ?? '(sin título)',
-      severityLevel: p.severityLevel ?? p.severity ?? '',
-      impactLevel: p.impactLevel ?? p.impact ?? '',
-      startTime: p.startTime ?? p.startTimeUTC ?? null,
-      affectedCI: p.affectedEntities ?? p.affectedCI ?? [],
-      environment: p.environment ?? p.env ?? '',
-      problemId: p.problemId ?? p.displayId ?? p.id ?? '',
-      status: p.status ?? p.state ?? '',
+      title: p.title || p.shortDescription || "(sin título)",
+      severityLevel: p.severityLevel || p.severity || "",
+      impactLevel: p.impactLevel || p.impact || "",
+      startTime: p.startTime || p.startTimeUtc || null,
+      affectedCI: p.affectedEntities || p.affectedCI || [],
+      environment: p.environment || p.environmentName || "",
+      problemId: p.problemId || p.displayId || p.id || "",
+      status: p.status || p.state || "",
     };
   });
 }
 
-// ------------------------------
-// 3) Llamar al backend
-// ------------------------------
-export async function fetchProblems({ page = 1, size = 50 } = {}) {
-  const base = await getBaseUrl();
-  const url = `${base}/Problems?pageNumber=${page}&pageSize=${size}`;
+
+//-----------------------------------------------------------
+// 3) OBTENER UNA ÚNICA PÁGINA DEL BACKEND
+//-----------------------------------------------------------
+async function fetchPage(page, size = 50) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
 
   const res = await fetch(url, {
-    headers: { accept: 'application/json' },
+    headers: { accept: "application/json" },
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`HTTP ${res.status} al obtener problemas: ${text.slice(0, 200)}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(
+      `❌ HTTP ${res.status} al obtener problemas:\n${txt}`
+    );
   }
 
   const json = await res.json();
-  return normalize(json);
+
+  // Puede venir como array directo o dentro de {results|items|data|value}
+  return Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+}
+
+
+//-----------------------------------------------------------
+// 4) 🔥 TRAER HISTÓRICO CON PÁGINAS LIMITADAS
+//-----------------------------------------------------------
+export async function fetchAllProblems(size = 50, maxPages = 10) {
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, size);
+
+    // Si no hay nada, terminamos
+    if (!batch || batch.length === 0) break;
+
+    all = [...all, ...batch];
+
+    // Si la página vino "incompleta", asumimos que es la última
+    if (batch.length < size) break;
+
+    page++;
+  }
+
+  return normalize(all);
 }
