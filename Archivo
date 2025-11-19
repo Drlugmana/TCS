@@ -1,2 +1,97 @@
-const config = await fetch('/config.json').then(r => r.json());
-const BASE = config.API_BASE_URL.replace(/\/+$/, '');
+// src/api/problems.js
+
+// ------------------------------
+// 1) Leer la URL base desde config.json (solo una vez)
+// ------------------------------
+let BASE_URL = null;
+
+async function getBaseUrl() {
+  if (BASE_URL) return BASE_URL;
+
+  const res = await fetch('/config.json');
+  if (!res.ok) {
+    throw new Error(`No se pudo leer /config.json (status ${res.status})`);
+  }
+
+  const config = await res.json();
+  const raw = config.API_BASE_URL || '';
+  BASE_URL = raw.replace(/\/+$/, ''); // quita / al final
+
+  if (!BASE_URL) {
+    throw new Error('API_BASE_URL en config.json está vacío');
+  }
+
+  return BASE_URL;
+}
+
+// ------------------------------
+// 2) Normalizar alertas del backend
+// ------------------------------
+function normalize(listLike) {
+  // Soporta {results:[]}, {data:[]}, {value:[]} o [] directo
+  let list = [];
+  if (Array.isArray(listLike)) {
+    list = listLike;
+  } else if (Array.isArray(listLike?.results)) {
+    list = listLike.results;
+  } else if (Array.isArray(listLike?.data)) {
+    list = listLike.data;
+  } else if (Array.isArray(listLike?.value)) {
+    list = listLike.value;
+  }
+
+  return list.map((p) => {
+    // detectar si es TCS o NO TCS
+    const isTcs =
+      typeof p.isTcs === 'boolean'
+        ? p.isTcs
+        : typeof p.juris === 'string'
+          ? p.juris.toUpperCase() === 'TCS'
+          : typeof p.jurisdiction === 'string'
+            ? p.jurisdiction.toUpperCase() === 'TCS'
+            : false;
+
+    const label =
+      typeof p.juris === 'string'
+        ? p.juris
+        : isTcs
+          ? 'TCS'
+          : 'NO TCS';
+
+    return {
+      ...p,
+      isTcs,
+      label,
+
+      // Campos con fallback para no romper tarjetas
+      title: p.title ?? p.shortDescription ?? '(sin título)',
+      severityLevel: p.severityLevel ?? p.severity ?? '',
+      impactLevel: p.impactLevel ?? p.impact ?? '',
+      startTime: p.startTime ?? p.startTimeUTC ?? null,
+      affectedCI: p.affectedEntities ?? p.affectedCI ?? [],
+      environment: p.environment ?? p.env ?? '',
+      problemId: p.problemId ?? p.displayId ?? p.id ?? '',
+      status: p.status ?? p.state ?? '',
+    };
+  });
+}
+
+// ------------------------------
+// 3) Llamar al backend
+// ------------------------------
+export async function fetchProblems({ page = 1, size = 50 } = {}) {
+  const base = await getBaseUrl();
+  const url = `${base}/Problems?pageNumber=${page}&pageSize=${size}`;
+
+  const res = await fetch(url, {
+    headers: { accept: 'application/json' },
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => '');
+    throw new Error(`HTTP ${res.status} al obtener problemas: ${text.slice(0, 200)}`);
+  }
+
+  const json = await res.json();
+  return normalize(json);
+}
