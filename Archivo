@@ -1,0 +1,3 @@
+= Table.TransformColumns(Source, {
+    {"CPU_Used_Porcentaje", each if Value.Is(_, type number) then Number.Round(_, 6) else null, type number}
+})
