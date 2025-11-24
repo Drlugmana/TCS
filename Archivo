@@ -21,16 +21,14 @@
         {"Aux_Disk_Provisiones_VAL",
             each
                 let
-                    vText = Text.From(_),
-                    // por si viene con punto decimal, lo paso a coma para poder convertir
-                    vTextComa = Text.Replace(vText, ".", ","),
-                    n = if Value.Is(_, type number)
-                        then _
-                        else try Number.FromText(vTextComa, "es-EC") otherwise null
+                    t = Text.From(_),
+                    // intenta parsear tal cual (soporta 1.86E+01)
+                    n = try Number.FromText(t, "en-US") 
+                        otherwise try Number.FromText(t, "es-EC") 
+                        otherwise null
                 in
-                    if n = null
-                    then vText       // deja tal cual si no es número
-                    else Number.ToText(n, "N2", "es-EC"),   // TEXTO con 2 decimales y coma
-            type text}
+                    if n=null then null else Number.Round(n, 2),
+            type number}
     }
 )
+
