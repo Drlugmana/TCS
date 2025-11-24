@@ -1,0 +1,148 @@
+using System;
+using System.IO;
+using System.Linq;
+using System.Collections.Generic;
+using Microsoft.ML;
+using Microsoft.ML.Data;
+using ClosedXML.Excel;
+using ExcelDataReader;
+using DynatraceJurisdictionModelTraining.Models;
+
+namespace DynatraceJurisdictionModelTraining
+{
+    class Program
+    {
+        // ====== VARIABLES DE CONFIGURACIÓN ======
+        private static readonly string _dataPath =
+            Path.Combine(AppContext.BaseDirectory, "Data", "Catalog_Eventos_Nov2025.xlsx");
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "ML", "jurisdiction_model_robusto.zip");
+        private static readonly string _logFilePath =
+            Path.Combine(AppContext.BaseDirectory, "PredictionLogs.txt");
+        private static readonly string _excelFilePath =
+            Path.Combine(AppContext.BaseDirectory, "Predictions_Robusto.xlsx");
+
+        private static MLContext _mlContext;
+        private static PredictionEngine<IncidentData, IncidentPrediction> _predEngine;
+        private static ITransformer _trainedModel;
+
+        static async Task Main(string[] args)
+        {
+            Console.WriteLine("=== INICIO DEL ENTRENAMIENTO DE MODELO TCS ===");
+
+            // ====== VALIDACIÓN DE ARCHIVO ======
+            if (!File.Exists(_dataPath))
+            {
+                Console.WriteLine($"❌ No se encontró el archivo de datos en: {_dataPath}");
+                Console.WriteLine("Archivos disponibles en carpeta Data:");
+                var dataFolder = Path.Combine(AppContext.BaseDirectory, "Data");
+                foreach (var f in Directory.GetFiles(dataFolder))
+                    Console.WriteLine($" - {Path.GetFileName(f)}");
+                return;
+            }
+            Console.WriteLine($"✅ Archivo de datos encontrado: {_dataPath}");
+
+            // ====== ENTRENAMIENTO ======
+            _mlContext = new MLContext(seed: 2);
+            var splitDataView = LoadData();
+            var trainingDataView = splitDataView.TrainSet;
+            var testDataView = splitDataView.TestSet;
+
+            var pipeline = ProcessData();
+            _trainedModel = BuildAndTrainModel(trainingDataView, pipeline);
+            Evaluate(testDataView);
+
+            // ====== PRUEBA CON EJEMPLOS ======
+            TestPredictions();
+
+            Console.WriteLine("=== FIN DEL ENTRENAMIENTO ===");
+        }
+
+        // ====== CARGA DE DATOS DESDE EXCEL ======
+        private static TrainTestData LoadData()
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+
+            using var stream = File.Open(_dataPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            var config = new ExcelDataSetConfiguration
+            {
+                ConfigureDataTable = _ => new ExcelDataTableConfiguration
+                {
+                    UseHeaderRow = true
+                }
+            };
+
+            using var reader = ExcelReaderFactory.CreateReader(stream);
+            var result = reader.AsDataSet(config);
+            var dataTable = result.Tables[0];
+
+            var incidents = dataTable.AsEnumerable().Select(row => new IncidentData
+            {
+                ShortDescription = row["ShortDescription"].ToString(),
+                ImpactLevel = row["ImpactLevel"].ToString(),
+                SeverityLevel = row["SeverityLevel"].ToString(),
+                AffectedCI_Names = row["AffectedCI_Names"].ToString(),
+                AffectedCI_Server_Classes = row["AffectedCI_Server_Classes"].ToString(),
+                AffectedCI_Groups = row["AffectedCI_Groups"].ToString(),
+                ManagementZones = row["ManagementZones"].ToString(),
+                ProblemFilters = row["ProblemFilters"].ToString(),
+                RootCauseEntity = row["RootCauseEntity"].ToString(),
+                EntityTags = row["EntityTags"].ToString(),
+                UnderMaintenance = Convert.ToBoolean(row["UnderMaintenance"].ToString()),
+                EsTCS = Convert.ToBoolean(row["EsTCS"].ToString())
+            }).ToList();
+
+            return _mlContext.Data.TrainTestSplit(_mlContext.Data.LoadFromEnumerable(incidents), testFraction: 0.2);
+        }
+
+        // ====== PIPELINE DE PROCESAMIENTO ======
+        public static IEstimator<ITransformer> ProcessData()
+        {
+            var pipeline = _mlContext.Transforms.Text.FeaturizeText("ShortDescriptionFeaturized", nameof(IncidentData.ShortDescription))
+                .Append(_mlContext.Transforms.Text.FeaturizeText("ImpactLevelFeaturized", nameof(IncidentData.ImpactLevel)))
+                .Append(_mlContext.Transforms.Text.FeaturizeText("SeverityLevelFeaturized", nameof(IncidentData.SeverityLevel)))
+                .Append(_mlContext.Transforms.Concatenate("Features",
+                    "ShortDescriptionFeaturized", "ImpactLevelFeaturized", "SeverityLevelFeaturized"))
+                .Append(_mlContext.BinaryClassification.Trainers.SdcaLogisticRegression(labelColumnName: nameof(IncidentData.EsTCS), featureColumnName: "Features"));
+
+            return pipeline;
+        }
+
+        // ====== ENTRENAMIENTO ======
+        public static ITransformer BuildAndTrainModel(IDataView trainingDataView, IEstimator<ITransformer> pipeline)
+        {
+            Console.WriteLine("⏳ Entrenando modelo...");
+            var trainedModel = pipeline.Fit(trainingDataView);
+            Console.WriteLine("✅ Entrenamiento completado.");
+            return trainedModel;
+        }
+
+        // ====== EVALUACIÓN ======
+        public static void Evaluate(IDataView testDataView)
+        {
+            Console.WriteLine("🔎 Evaluando modelo...");
+            var predictions = _trainedModel.Transform(testDataView);
+            var metrics = _mlContext.BinaryClassification.Evaluate(predictions, labelColumnName: nameof(IncidentData.EsTCS));
+
+            Console.WriteLine($"   - Accuracy: {metrics.Accuracy:P2}");
+            Console.WriteLine($"   - AUC: {metrics.AreaUnderRocCurve:P2}");
+            Console.WriteLine($"   - F1 Score: {metrics.F1Score:P2}");
+        }
+
+        // ====== PRUEBA DE PREDICCIONES ======
+        public static void TestPredictions()
+        {
+            _predEngine = _mlContext.Model.CreatePredictionEngine<IncidentData, IncidentPrediction>(_trainedModel);
+
+            var sample = new IncidentData
+            {
+                ShortDescription = "CPU usage high in server PROD",
+                ImpactLevel = "INFRASTRUCTURE",
+                SeverityLevel = "ERROR"
+            };
+
+            var prediction = _predEngine.Predict(sample);
+            Console.WriteLine($"🧠 Predicción: {(prediction.PredictedEsTCS ? "ES TCS" : "NO ES TCS")} (Prob: {prediction.Probability:P2})");
+        }
+    }
+}
