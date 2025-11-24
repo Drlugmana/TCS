@@ -1,3 +1,13 @@
-= Table.TransformColumns(Source, {
-    {"CPU_Used_Porcentaje", each if Value.Is(_, type number) then Number.Round(_, 6) else null, type number}
-})
+= Table.TransformColumns(
+    Source,
+    {
+        {"CPU_Used_Porcentaje",
+            each
+                let
+                    txt = Text.Replace(Text.From(_), ".", ","),
+                    val = try Number.FromText(txt, "es-EC") otherwise null
+                in
+                    if val = null then null else Number.Round(val, 2),
+            type number}
+    }
+)
