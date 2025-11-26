@@ -1,0 +1,232 @@
+// Program.cs
+// Entrena un modelo binario (TCS / NO TCS) leyendo un Excel con columnas:
+//  - Problem Title  (texto)
+//  - ALCANCE        ("SI TCS" / "NO TCS")
+
+using System;
+using System.Data;
+using System.Globalization;
+using System.IO;
+using System.Linq;
+using ExcelDataReader;
+using Microsoft.ML;
+using Microsoft.ML.Data;
+
+namespace DynatraceJurisdictionModelTraining
+{
+    public class Program
+    {
+        // === RUTAS Y PARÁMETROS ===
+        // Ajusta estas rutas según tu solución:
+        private static readonly string DataDir   = Path.Combine(AppContext.BaseDirectory, "Data");
+        private static readonly string ExcelPath = Path.Combine(DataDir, "Catalog_Eventos_Nov2025.xlsx"); // <-- tu archivo
+        private static readonly string SheetName = "";        // deja "" para usar la 1ra hoja
+        private static readonly string Positive  = "SI TCS";  // valor positivo en la columna ALCANCE
+        private static readonly string ModelDir  = Path.Combine(AppContext.BaseDirectory, "ML");
+        private static readonly string ModelZip  = Path.Combine(ModelDir, "jurisdiction_model.zip");
+        private const double TestFraction = 0.2;              // 80/20 train/test
+
+        private static MLContext _ml = null!;
+
+        public static void Main(string[] args)
+        {
+            // Por si lo corres desde otro working dir, permite pasar la ruta del Excel como arg0
+            string excel = (args.Length > 0 && File.Exists(args[0])) ? args[0] : ExcelPath;
+
+            Directory.CreateDirectory(DataDir);
+            Directory.CreateDirectory(ModelDir);
+
+            // Inicializa ML.NET
+            _ml = new MLContext(seed: 2);
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+
+            // 1) Carga y split train/test
+            var split = LoadCatalogFromExcel(excel, SheetName, Positive, TestFraction);
+
+            // 2) Pipeline: featurizar texto + clasificador binario
+            var pipeline = BuildPipeline();
+
+            // 3) Entrena
+            Console.WriteLine("=== Entrenando modelo... ===");
+            var model = pipeline.Fit(split.TrainSet);
+            Console.WriteLine("Entrenamiento completado.\n");
+
+            // 4) Evalúa
+            Evaluate(split.TestSet, model);
+
+            // 5) Guarda el modelo
+            _ml.Model.Save(model, split.TrainSet.Schema, ModelZip);
+            Console.WriteLine($"Modelo guardado en: {ModelZip}\n");
+
+            // 6) Predicciones de prueba
+            TestSomePredictions(split.TestSet, model, 8);
+
+            Console.WriteLine("\nListo. Presiona una tecla para salir...");
+            Console.ReadKey();
+        }
+
+        // =======================
+        //   DATA MODELS
+        // =======================
+        public class IncidentData
+        {
+            // Texto con el título del problema (columna "Problem Title")
+            public string ProblemTitle { get; set; } = string.Empty;
+
+            // Etiqueta binaria: true = "SI TCS", false = "NO TCS"
+            public bool EsTCS { get; set; }
+        }
+
+        public class IncidentPrediction : IncidentData
+        {
+            [ColumnName("PredictedLabel")]
+            public bool PredictedEsTCS { get; set; }
+
+            public float Probability { get; set; }
+            public float Score { get; set; }
+        }
+
+        // =======================
+        //   EXCEL → IDataView
+        // =======================
+        private static TrainTestData LoadCatalogFromExcel(
+            string excelPath,
+            string sheetName,
+            string positiveText,
+            double testFraction)
+        {
+            if (!File.Exists(excelPath))
+                throw new FileNotFoundException($"No se encontró el Excel: {excelPath}");
+
+            // ExcelDataReader requiere registrar code pages para .xlsx/.xls en .NET Core
+            System.Text.Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+
+            using var stream = File.Open(excelPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+            using var reader = ExcelReaderFactory.CreateReader(stream);
+
+            var conf = new ExcelDataSetConfiguration
+            {
+                ConfigureDataTable = _ => new ExcelDataTableConfiguration
+                {
+                    UseHeaderRow = true
+                }
+            };
+
+            var dataSet = reader.AsDataSet(conf);
+
+            // Selecciona hoja
+            DataTable table = string.IsNullOrWhiteSpace(sheetName)
+                ? dataSet.Tables[0]
+                : dataSet.Tables.Cast<DataTable>()
+                    .FirstOrDefault(t => t.TableName.Equals(sheetName, StringComparison.OrdinalIgnoreCase))
+                  ?? dataSet.Tables[0];
+
+            if (table == null || table.Rows.Count == 0)
+                throw new Exception("El Excel no contiene datos.");
+
+            // Detecta columnas (acepta Problem Title o ShortDescription)
+            string textCol = table.Columns.Contains("Problem Title") ? "Problem Title" :
+                             table.Columns.Contains("ProblemTitle") ? "ProblemTitle" :
+                             table.Columns.Contains("ShortDescription") ? "ShortDescription" : null;
+
+            if (textCol == null)
+                throw new Exception("No se encontró la columna 'Problem Title' ni 'ShortDescription'.");
+
+            // Etiqueta (ALCANCE o EsTCS)
+            string labelCol = table.Columns.Contains("ALCANCE") ? "ALCANCE" :
+                              table.Columns.Contains("EsTCS") ? "EsTCS" : null;
+
+            if (labelCol == null)
+                throw new Exception("No se encontró la columna 'ALCANCE' ni 'EsTCS'.");
+
+            // Convierte filas a IncidentData
+            var list = table.AsEnumerable()
+                .Where(r => !string.IsNullOrWhiteSpace(r[textCol]?.ToString()))
+                .Select(r => new IncidentData
+                {
+                    ProblemTitle = r[textCol]?.ToString() ?? string.Empty,
+                    EsTCS = ToBool(r[labelCol], positiveText)
+                })
+                .ToList();
+
+            // Carga a IDataView y split
+            var dv = _ml.Data.LoadFromEnumerable(list);
+            return _ml.Data.TrainTestSplit(dv, testFraction: testFraction);
+        }
+
+        private static bool ToBool(object? value, string positiveText)
+        {
+            if (value == null) return false;
+            var s = value.ToString()!.Trim();
+            if (string.IsNullOrEmpty(s)) return false;
+
+            // normaliza para comparaciones robustas
+            string norm = s.Replace("_", " ").Replace("-", " ").Trim().ToUpperInvariant();
+            string pos  = positiveText.Replace("_", " ").Replace("-", " ").Trim().ToUpperInvariant();
+
+            if (norm == pos || norm == "SI TCS" || norm == "SI" || norm == "TRUE" || norm == "1")
+                return true;
+            if (norm == "NO TCS" || norm == "NO" || norm == "FALSE" || norm == "0")
+                return false;
+
+            // fallback
+            return false;
+        }
+
+        // =======================
+        //   PIPELINE / TRAINING
+        // =======================
+        private static IEstimator<ITransformer> BuildPipeline()
+        {
+            // Featuriza solo el texto del título; es lo que tienes en tu hoja
+            var pipeline =
+                _ml.Transforms.Text.FeaturizeText(
+                        outputColumnName: "TitleFeaturized",
+                        inputColumnName: nameof(IncidentData.ProblemTitle))
+                .Append(_ml.Transforms.Concatenate(
+                        "Features", "TitleFeaturized"))
+                .Append(_ml.Transforms.ReplaceMissingValues("Features"))
+                .Append(_ml.BinaryClassification.Trainers.SdcaLogisticRegression(
+                        labelColumnName: nameof(IncidentData.EsTCS),
+                        featureColumnName: "Features"));
+
+            return pipeline;
+        }
+
+        private static void Evaluate(IDataView testData, ITransformer model)
+        {
+            Console.WriteLine("=== Evaluando modelo... ===");
+            var predictions = model.Transform(testData);
+            var metrics = _ml.BinaryClassification.Evaluate(
+                predictions,
+                labelColumnName: nameof(IncidentData.EsTCS));
+
+            Console.WriteLine($"Accuracy:           {metrics.Accuracy:P2}");
+            Console.WriteLine($"AUC (ROC):          {metrics.AreaUnderRocCurve:F4}");
+            Console.WriteLine($"AUPRC:              {metrics.AreaUnderPrecisionRecallCurve:F4}");
+            Console.WriteLine($"F1Score:            {metrics.F1Score:F4}");
+            Console.WriteLine($"Pos. Precision/Recall: {metrics.PositivePrecision:F4} / {metrics.PositiveRecall:F4}");
+            Console.WriteLine($"Neg. Precision/Recall: {metrics.NegativePrecision:F4} / {metrics.NegativeRecall:F4}");
+            Console.WriteLine();
+        }
+
+        private static void TestSomePredictions(IDataView testData, ITransformer model, int take = 5)
+        {
+            Console.WriteLine("=== Ejemplos de predicción ===");
+            var engine = _ml.Model.CreatePredictionEngine<IncidentData, IncidentPrediction>(model);
+
+            var samples = _ml.Data.CreateEnumerable<IncidentData>(testData, reuseRowObject: false)
+                                  .Take(take)
+                                  .ToList();
+
+            foreach (var s in samples)
+            {
+                var pred = engine.Predict(s);
+                Console.WriteLine($"TÍTULO: {s.ProblemTitle}");
+                Console.WriteLine($" => Predicción: {(pred.PredictedEsTCS ? "ES TCS" : "NO TCS")} | Prob={pred.Probability:P2}");
+                Console.WriteLine(new string('-', 80));
+            }
+        }
+    }
+}
