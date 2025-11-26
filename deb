@@ -1,0 +1,90 @@
+using Microsoft.ML;
+using Microsoft.ML.Data;
+using System.IO;
+
+namespace DynatraceProblemUpdater.Data.Sources.ML
+{
+    public class MLPredictor
+    {
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "MLModels", "jurisdiction_model.zip");
+
+        private static readonly MLContext _mlContext = new MLContext();
+        private readonly PredictionEngine<IncidentData, IncidentPrediction> _predTitleEngine;
+
+        public MLPredictor()
+        {
+            try
+            {
+                using var fs = File.OpenRead(_modelPath);
+                var loadedModel = _mlContext.Model.Load(fs, out _);
+                _predTitleEngine = _mlContext.Model.CreatePredictionEngine<IncidentData, IncidentPrediction>(loadedModel);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"⚠️ Error al cargar modelo de ML.NET: {ex.Message}");
+            }
+        }
+
+        // 3.1) Predicción ligera SOLO por título (para el cacheo por títulos en Worker)
+        public bool TryPredictByTitle(string? title, out bool isTcs, out float probability, double threshold = 0.5)
+        {
+            isTcs = false; probability = 0f;
+            if (string.IsNullOrWhiteSpace(title)) return false;
+
+            var input = new IncidentData { ProblemTitle = title };
+            var pred  = _predTitleEngine.Predict(input);
+
+            probability = pred.Probability;
+            isTcs = float.IsNaN(probability) ? pred.PredictedEsTCS : probability >= threshold;
+            return true;
+        }
+
+        // 3.2) Método “completo” para no romper tu API actual (usa solo el título)
+        public Models.ML.IssuePrediction Predict(
+            string shortDescription,
+            string? impactLevel = null,
+            string? severityLevel = null,
+            string? affectedCIGroups = null,
+            string? entityTags = null,
+            string? affectedCINames = null,
+            string? affectedCIServerClasses = null,
+            string? problemFilters = null,
+            string? managementZones = null,
+            string? rootCauseEntity = null,
+            float  underMaintenance = 0)
+        {
+            // Tu modelo nuevo usa únicamente el título
+            var title = shortDescription ?? string.Empty;
+
+            var ok = TryPredictByTitle(title, out bool isTcs, out float prob);
+            return new Models.ML.IssuePrediction
+            {
+                EventoTCS   = ok ? isTcs : false,
+                Probability = ok ? prob  : 0f,
+                Score       = ok ? prob  : 0f
+            };
+        }
+
+        // 3.3) Método booleano con umbral (compatibilidad con tu código)
+        public bool PredictEsTCS(
+            string shortDescription,
+            double threshold = 0.5,
+            string? impactLevel = null,
+            string? severityLevel = null,
+            string? affectedCIGroups = null,
+            string? entityTags = null,
+            string? affectedCINames = null,
+            string? affectedCIServerClasses = null,
+            string? problemFilters = null,
+            string? managementZones = null,
+            string? rootCauseEntity = null,
+            float underMaintenance = 0)
+        {
+            var ok = TryPredictByTitle(shortDescription, out bool isTcs, out float prob, threshold);
+            if (!ok) return false;
+            // Si el modelo no expone Probability, caemos al PredictedLabel (cubierto en TryPredictByTitle)
+            return isTcs;
+        }
+    }
+}
