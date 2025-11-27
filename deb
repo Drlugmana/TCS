@@ -1,0 +1,67 @@
+// Worker.cs
+using DynatraceProblemUpdater.Data.Sources.ML;
+// ...tus otros using
+
+namespace DynatraceProblemUpdater.Services
+{
+    public class Worker : BackgroundService
+    {
+        // ... tus campos e inyección (incluye _predictor y _serverMatcher)
+
+        // ===============================================================
+        // MAPEA PROBLEMAS DE DYNATRACE -> ENTIDAD PARA BD (USA ML CACHED)
+        // ===============================================================
+        private async Task<List<DBProblem>> MapToDBProblems(List<DynatraceProblem> problems, APIToken token)
+        {
+            // 1) Calcular descripciones únicas y precargar/renovar predicciones en caché
+            var uniqueDescriptions = problems
+                .Select(p => p?.Title)                              // usamos Title como texto de entrada al modelo
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            await PredictionCache.UpdateOrStorePredictionsAsync(uniqueDescriptions, _predictor);
+
+            // 2) Mapear a DBProblem
+            var dbProblems = new List<DBProblem>();
+
+            foreach (var problem in problems)
+            {
+                if (problem is null) continue;
+
+                // Asegurar entradas no nulas para el matcher
+                var impacted = problem.ImpactedEntities ?? new List<ProblemEntity>();
+                var evidence = problem.EvidenceDetails ?? new EvidenceDetails();
+
+                // Resolver servidores afectados (si aplica en tu lógica)
+                var affectedCI = await _serverMatcher.FindAffectedServersAsync(impacted, evidence);
+
+                // Usamos Title como "ShortDescription"
+                var shortDescription = problem.Title ?? string.Empty;
+
+                // === NUEVA LÓGICA: consultar caché ML para etiqueta y probabilidad ===
+                string jurisdiction = "Unknown";
+                float probability = 0f;
+
+                if (!string.IsNullOrWhiteSpace(shortDescription) &&
+                    PredictionCache.TryGetPrediction(shortDescription, out bool isTcs, out probability))
+                {
+                    jurisdiction = isTcs ? "TCS" : "NO TCS";
+                }
+
+                // Construcción del registro para la BD
+                dbProblems.Add(new DBProblem(
+                    problem,
+                    token.Environment,
+                    token.Tenant,
+                    shortDescription,
+                    affectedCI,
+                    jurisdiction
+                    // ,probability  // <- descomenta si tu constructor de DBProblem tiene este campo
+                ));
+            }
+
+            return dbProblems;
+        }
+    }
+}
