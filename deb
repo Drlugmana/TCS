@@ -1,0 +1,19 @@
+using Microsoft.ML.Data;
+
+namespace DynatraceProblemUpdater.Models.ML
+{
+    public class IncidentData
+    {
+        // ESTE nombre debe coincidir con el usado al entrenar.
+        [ColumnName("ProblemTitle")]
+        public string ProblemTitle { get; set; } = string.Empty;
+    }
+
+    public class IncidentPrediction
+    {
+        [ColumnName("PredictedLabel")]
+        public bool PredictedEsTCS { get; set; }
+        public float Probability { get; set; }
+        public float Score { get; set; }
+    }
+}
