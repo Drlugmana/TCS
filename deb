@@ -1,1 +1,104 @@
+using System;
+using System.IO;
+using Microsoft.ML;
+using DynatraceProblemUpdater.Models.ML;
+
+namespace DynatraceProblemUpdater.Data.Sources.ML
+{
+    /// <summary>
+    /// Carga el modelo de ML.NET y expone métodos de predicción.
+    /// Es compatible tanto con modelos entrenados con "ProblemTitle"
+    /// como con "ProblemTitleTextSpan".
+    /// </summary>
+    public class MLPredictor
+    {
+        // Ruta del modelo (ajusta el nombre si tu ZIP se llama distinto)
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "MLModels", "jurisdiccion_model.zip");
+
+        private static readonly MLContext _mlContext = new MLContext();
+        private readonly PredictionEngine<DynatraceIssue, IssuePrediction> _predictionEngine;
+
+        /// <summary>
+        /// Carga el modelo entrenado en ML.NET.
+        /// </summary>
+        public MLPredictor()
+        {
+            try
+            {
+                using var fs = File.OpenRead(_modelPath);
+                var loadedModel = _mlContext.Model.Load(fs, out _);
+
+                _predictionEngine = _mlContext.Model.CreatePredictionEngine<DynatraceIssue, IssuePrediction>(loadedModel);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"⚠️ Error al cargar el modelo de ML.NET: {ex.Message}");
+            }
+        }
+
+        // ==========================================================
+        // PREDICCIÓN POR TÍTULO (usa ProblemTitle o ProblemTitleTextSpan)
+        // ==========================================================
+        public bool TryPredictByTitle(string title, out bool isTcs, out float probability, double threshold = 0.5)
+        {
+            isTcs = false;
+            probability = float.NaN;
+
+            if (string.IsNullOrWhiteSpace(title))
+                return false;
+
+            // Construimos un input compatible con ambos esquemas
+            var input = BuildInput(title);
+
+            // Ejecutamos la predicción
+            var pred = _predictionEngine.Predict(input);
+
+            // Si el modelo no expone probabilidad, usamos PredictedLabel
+            probability = float.IsNaN(pred.Probability) ? (pred.EventoTCS ? 1f : 0f) : pred.Probability;
+            isTcs = probability >= threshold || pred.EventoTCS;
+            return true;
+        }
+
+        // ==========================================================
+        // CONSTRUCCIÓN DEL INPUT COMPATIBLE
+        // ==========================================================
+        private static DynatraceIssue BuildInput(string title)
+        {
+            var input = new DynatraceIssue
+            {
+                ProblemTitle = title ?? string.Empty,
+                ShortDescription = title ?? string.Empty,
+                ImpactLevel = string.Empty,
+                SeverityLevel = string.Empty,
+                AffectedCI_Groups = string.Empty,
+                EntityTags = string.Empty,
+                AffectedCI_Names = string.Empty,
+                AffectedCI_ServerClasses = string.Empty,
+                ProblemFilters = string.Empty,
+                ManagementZones = string.Empty,
+                UnderMaintenance = 0f,
+                RootCauseEntity = string.Empty
+            };
+
+            // Fallback: setea la columna alternativa si existe
+            TrySetAlternateProperty(input, "ProblemTitleTextSpan", title);
+            TrySetAlternateProperty(input, "ProblemTitle", title);
+
+            return input;
+        }
+
+        /// <summary>
+        /// Intenta asignar dinámicamente una propiedad (por reflexión)
+        /// en caso de que el modelo espere otro nombre de columna.
+        /// </summary>
+        private static void TrySetAlternateProperty(object obj, string propertyName, string value)
+        {
+            var prop = obj.GetType().GetProperty(propertyName);
+            if (prop != null && prop.CanWrite)
+                prop.SetValue(obj, value ?? string.Empty);
+        }
+    }
+}
+
 ñ
