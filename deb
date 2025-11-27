@@ -1,0 +1,26 @@
+public class MLPredictor
+{
+    // Carga el modelo en el ctor (como ya lo tienes)
+    public MLPredictor() { /* ... */ }
+
+    /// <summary>
+    /// Predicción ligera basada SOLO en el título. Devuelve bool + probability.
+    /// </summary>
+    public bool TryPredictByTitle(string title, out bool isTcs, out float probability)
+    {
+        isTcs = false;
+        probability = 0f;
+
+        if (string.IsNullOrWhiteSpace(title)) return false;
+
+        // Construir input compatible con el esquema entrenado (ej.: IncidentData)
+        var input = new IncidentData { ProblemTitle = title };
+
+        // _predictionEngine debe ser PredictionEngine<IncidentData, IncidentPrediction>
+        var pred = _predictionEngine.Predict(input);
+
+        isTcs = pred.PredictedEsTCS;         // tu propiedad de salida
+        probability = pred.Probability;      // tu probabilidad expuesta
+        return true;
+    }
+}
