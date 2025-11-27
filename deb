@@ -1,0 +1,46 @@
+private async Task<List<DBProblem>> MapToDBProblems(List<DynatraceProblem> problems, APIToken token)
+{
+    // 1️⃣ Calcular títulos únicos desde ShortDescription y precargar predicciones en caché
+    var uniqueDescriptions = problems
+        .Select(p => p?.ShortDescription)
+        .Where(s => !string.IsNullOrWhiteSpace(s))
+        .Distinct()
+        .ToList();
+
+    await PredictionCache.UpdateOrStorePredictionsAsync(uniqueDescriptions, _predictor);
+
+    // 2️⃣ Mapeo a DBProblem
+    var dbProblems = new List<DBProblem>();
+
+    foreach (var problem in problems)
+    {
+        if (problem == null) continue;
+
+        // Asegurar entradas no nulas
+        var impacted  = problem.ImpactedEntities ?? new List<ProblemEntity>();
+        var evidence  = problem.EvidenceDetails ?? new EvidenceDetails();
+        var affectedCI = await _serverMatcher.FindAffectedServersAsync(impacted, evidence);
+
+        var shortDescription = problem.ShortDescription ?? string.Empty;
+
+        // 3️⃣ NUEVA LÓGICA: usar ShortDescription para pedir la predicción ML
+        string jurisdiction = "Unknown";
+        if (!string.IsNullOrWhiteSpace(shortDescription) &&
+            PredictionCache.TryGetPrediction(shortDescription, out bool isTcs, out float probability))
+        {
+            jurisdiction = isTcs ? "TCS" : "NO TCS";
+        }
+
+        // 4️⃣ Insertar registro listo para BD
+        dbProblems.Add(new DBProblem(
+            problem,
+            token.Environment,
+            token.Tenant,
+            shortDescription,
+            affectedCI,
+            jurisdiction  // 👉 aquí va el resultado del modelo
+        ));
+    }
+
+    return dbProblems;
+}
