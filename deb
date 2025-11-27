@@ -1,10 +1,14 @@
+using System;
+using System.IO;
+using Microsoft.ML;
 using Microsoft.ML.Data;
 
-namespace DynatraceProblemUpdater.Models.ML
+namespace DynatraceProblemUpdater.Data.Sources.ML
 {
+    // ===== CLASES DE ENTRADA / SALIDA (coinciden con el modelo entrenado) =====
     public class IncidentData
     {
-        // ESTE nombre debe coincidir con el usado al entrenar.
+        // IMPORTANTE: este nombre debe coincidir con el usado al entrenar el modelo
         [ColumnName("ProblemTitle")]
         public string ProblemTitle { get; set; } = string.Empty;
     }
@@ -15,5 +19,107 @@ namespace DynatraceProblemUpdater.Models.ML
         public bool PredictedEsTCS { get; set; }
         public float Probability { get; set; }
         public float Score { get; set; }
+    }
+
+    // ============================== PREDICTOR ==============================
+    public class MLPredictor
+    {
+        private static readonly object _sync = new();
+        private static readonly MLContext _mlContext = new(seed: 1);
+
+        // Ruta por defecto: <base>/MLModels/jurisdiction_model.zip
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "MLModels", "jurisdiction_model.zip");
+
+        private readonly PredictionEngine<IncidentData, IncidentPrediction> _predictionEngine;
+
+        /// <summary>
+        /// Carga el modelo zip y crea el PredictionEngine (IncidentData -> IncidentPrediction).
+        /// </summary>
+        /// <exception cref="Exception">Lanza excepción si el modelo no existe o no coincide el esquema.</exception>
+        public MLPredictor(string? customModelPath = null)
+        {
+            var path = string.IsNullOrWhiteSpace(customModelPath) ? _modelPath : customModelPath;
+
+            if (!File.Exists(path))
+                throw new FileNotFoundException($"No se encontró el modelo de ML.NET en: {path}");
+
+            try
+            {
+                using var fs = File.OpenRead(path);
+                var loadedModel = _mlContext.Model.Load(fs, out _);
+                _predictionEngine = _mlContext.Model.CreatePredictionEngine<IncidentData, IncidentPrediction>(loadedModel);
+            }
+            catch (Exception ex)
+            {
+                // Errores típicos aquí: "Could not find input column 'ProblemTitle' (inputSchema)"
+                // Si te sale, ajusta el [ColumnName] en IncidentData para que coincida con el nombre de entrada real.
+                throw new Exception($"⚠️ Error al cargar el modelo de ML.NET: {ex.Message}", ex);
+            }
+        }
+
+        // -------------------- Helpers de construcción de entrada --------------------
+        private static IncidentData BuildInputFromTitle(string title)
+            => new IncidentData { ProblemTitle = title ?? string.Empty };
+
+        // --------------------------- Predicciones ---------------------------
+
+        /// <summary>
+        /// Predicción completa desde un título (devuelve PredictedLabel, Probability, Score).
+        /// </summary>
+        public IncidentPrediction PredictFullFromTitle(string title)
+        {
+            if (string.IsNullOrWhiteSpace(title))
+                return new IncidentPrediction { PredictedEsTCS = false, Probability = 0f, Score = 0f };
+
+            var input = BuildInputFromTitle(title);
+
+            lock (_sync) // PredictionEngine no es thread-safe
+            {
+                return _predictionEngine.Predict(input);
+            }
+        }
+
+        /// <summary>
+        /// Predicción booleana con umbral (por defecto 0.5). Expone también la probabilidad.
+        /// Pensado para el uso con el caché: TryGetPrediction(title, out bool isTcs, out float probability).
+        /// </summary>
+        public bool TryPredictByTitle(string title, out bool isTcs, out float probability, double threshold = 0.5)
+        {
+            isTcs = false;
+            probability = 0f;
+
+            if (string.IsNullOrWhiteSpace(title))
+                return false;
+
+            IncidentPrediction pred;
+            lock (_sync)
+            {
+                pred = _predictionEngine.Predict(BuildInputFromTitle(title));
+            }
+
+            probability = pred.Probability;
+
+            // Si por alguna razón Probability no viene poblado, cae al PredictedLabel del modelo
+            if (float.IsNaN(probability) || probability <= 0f)
+            {
+                isTcs = pred.PredictedEsTCS;
+                return true;
+            }
+
+            isTcs = probability >= (float)threshold;
+            return true;
+        }
+
+        /// <summary>
+        /// Versión que sólo devuelve el flag (útil si ya no necesitas la probabilidad).
+        /// </summary>
+        public bool PredictFlag(string title, double threshold = 0.5)
+        {
+            if (!TryPredictByTitle(title, out var isTcs, out _, threshold))
+                return false;
+
+            return isTcs;
+        }
     }
 }
