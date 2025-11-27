@@ -1,0 +1,174 @@
+using System;
+using System.IO;
+using Microsoft.ML;
+using DynatraceProblemUpdater.Models.ML; // <- donde viven DynatraceIssue e IssuePrediction
+
+namespace DynatraceProblemUpdater.Data.Sources.ML
+{
+    /// <summary>
+    /// Carga el modelo ML.NET y ofrece métodos de predicción
+    /// (por título o con todas las columnas).
+    /// </summary>
+    public class MLPredictor
+    {
+        private static readonly string _modelPath =
+            Path.Combine(AppContext.BaseDirectory, "MLModels", "jurisdiction_model.zip");
+
+        private static readonly MLContext _mlContext = new MLContext();
+        private readonly PredictionEngine<DynatraceIssue, IssuePrediction> _predictionEngine;
+
+        /// <summary>Carga el modelo entrenado.</summary>
+        public MLPredictor()
+        {
+            try
+            {
+                using var fs = File.OpenRead(_modelPath);
+                var loadedModel = _mlContext.Model.Load(fs, out _);
+                _predictionEngine = _mlContext.Model.CreatePredictionEngine<DynatraceIssue, IssuePrediction>(loadedModel);
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"⚠️ Error al cargar el modelo de ML.NET: {ex.Message}");
+            }
+        }
+
+        // ==========================
+        //        PREDICCIONES
+        // ==========================
+
+        /// <summary>
+        /// Predicción ligera SOLO por título. Devuelve true/false y expone probabilidad (si el modelo la provee).
+        /// threshold: umbral para decidir usando Probability (default 0.5).
+        /// </summary>
+        public bool TryPredictByTitle(string title, out bool isTcs, out float probability, double threshold = 0.5)
+        {
+            isTcs = false;
+            probability = float.NaN;
+
+            if (string.IsNullOrWhiteSpace(title))
+                return false;
+
+            var input = BuildInputFromTitle(title);
+
+            var pred = _predictionEngine.Predict(input);
+
+            probability = SanitizeProbability(pred.Probability);
+            if (!float.IsNaN(probability))
+            {
+                isTcs = probability >= (float)threshold;
+                return true;
+            }
+
+            // Fallback: usar etiqueta booleana del modelo
+            isTcs = ReadBooleanLabel(pred);
+            return true;
+        }
+
+        /// <summary>
+        /// Wrapper compatible con el caché existente (si lo usas).
+        /// </summary>
+        public bool PredictFlag(string title, double threshold = 0.5)
+        {
+            _ = TryPredictByTitle(title, out bool isTcs, out float _, threshold);
+            return isTcs;
+        }
+
+        /// <summary>
+        /// Predicción completa con todas las columnas (si las tienes disponibles).
+        /// Rellena strings vacíos para evitar nulos.
+        /// </summary>
+        public IssuePrediction Predict(
+            string shortDescription,
+            string impactLevel = null,
+            string severityLevel = null,
+            string affectedCIGroups = null,
+            string entityTags = null,
+            string affectedCINames = null,
+            string affectedCIServerClasses = null,
+            string problemFilters = null,
+            string managementZones = null,
+            float underMaintenance = 0f,
+            string rootCauseEntity = null)
+        {
+            var input = new DynatraceIssue
+            {
+                ShortDescription = shortDescription ?? string.Empty,
+                ImpactLevel = impactLevel ?? string.Empty,
+                SeverityLevel = severityLevel ?? string.Empty,
+                AffectedCI_Groups = affectedCIGroups ?? string.Empty,
+                EntityTags = entityTags ?? string.Empty,
+                AffectedCI_Names = affectedCINames ?? string.Empty,
+                AffectedCI_Server_Classes = affectedCIServerClasses ?? string.Empty,
+                ProblemFilters = problemFilters ?? string.Empty,
+                ManagementZones = managementZones ?? string.Empty,
+                UnderMaintenance = underMaintenance,
+                RootCauseEntity = rootCauseEntity ?? string.Empty
+            };
+
+            // Si tu clase tuviera ProblemTitle, también lo seteamos
+            TrySetProblemTitle(input, shortDescription);
+
+            return _predictionEngine.Predict(input);
+        }
+
+        // ==========================
+        //       HELPERS PRIVADOS
+        // ==========================
+
+        private static DynatraceIssue BuildInputFromTitle(string title)
+        {
+            var input = new DynatraceIssue
+            {
+                ShortDescription = title ?? string.Empty,
+                ImpactLevel = string.Empty,
+                SeverityLevel = string.Empty,
+                AffectedCI_Groups = string.Empty,
+                EntityTags = string.Empty,
+                AffectedCI_Names = string.Empty,
+                AffectedCI_Server_Classes = string.Empty,
+                ProblemFilters = string.Empty,
+                ManagementZones = string.Empty,
+                UnderMaintenance = 0f,
+                RootCauseEntity = string.Empty
+            };
+
+            // Si existe la propiedad ProblemTitle en DynatraceIssue, la llenamos
+            TrySetProblemTitle(input, title);
+            return input;
+        }
+
+        private static void TrySetProblemTitle(DynatraceIssue input, string title)
+        {
+            var p = typeof(DynatraceIssue).GetProperty("ProblemTitle");
+            if (p != null && p.CanWrite && p.PropertyType == typeof(string))
+            {
+                p.SetValue(input, title ?? string.Empty);
+            }
+        }
+
+        /// <summary>Devuelve la etiqueta booleana sin depender del nombre exacto.</summary>
+        private static bool ReadBooleanLabel(IssuePrediction pred)
+        {
+            // Orden de preferencia de nombres comunes
+            var names = new[] { "PredictedEsTCS", "EventoTCS", "PredictedLabel" };
+            foreach (var n in names)
+            {
+                var pi = typeof(IssuePrediction).GetProperty(n);
+                if (pi != null && pi.PropertyType == typeof(bool))
+                    return (bool)pi.GetValue(pred);
+            }
+            // Si no hay ninguna propiedad esperada, asumimos false
+            return false;
+        }
+
+        /// <summary>Limpia NaN/Inf por si el trainer no expone probabilidad.</summary>
+        private static float SanitizeProbability(float p)
+        {
+            if (float.IsNaN(p) || float.IsInfinity(p))
+                return float.NaN;
+            if (p < 0f) return 0f;
+            if (p > 1f) return 1f;
+            return p;
+        }
+    }
+}
