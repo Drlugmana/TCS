@@ -1,0 +1,259 @@
+// src/api/problems.js
+
+// 1) URL base desde .env (Vite)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+if (!BASE) {
+  throw new Error("❌ ERROR: Faltó VITE_API_URL en .env (ej: VITE_API_URL=https://tu-backend)");
+}
+
+// Tu endpoint swagger de problemas
+const API = `${BASE}/api/Problems`;
+
+// -----------------------------
+// Utilidades de fechas (sin libs)
+// -----------------------------
+function asDate(v) {
+  // Acepta epoch, ISO, string con UTC/Z o sin Z
+  if (v == null) return null;
+  if (typeof v === "number") return new Date(v);
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+function dayRangeUTC(yyyy, mm, dd) {
+  // mm: 1-12
+  const start = new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0, 0));
+  const end = new Date(Date.UTC(yyyy, mm - 1, dd, 23, 59, 59, 999));
+  return { start, end };
+}
+
+function isWithin(date, start, end) {
+  if (!date) return false;
+  const t = date.getTime();
+  return t >= start.getTime() && t <= end.getTime();
+}
+
+// -----------------------------
+// Normalizador de problemas
+// -----------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+
+  return list.map((p) => {
+    // jurisdiction puede venir como string ("TCS"/"NO TCS")
+    // o como objeto { isTcs: bool, label: "TCS" }
+    const juris = p.jurisdiction ?? p.Jurisdiction ?? p.juris;
+    let isTcs = false;
+    let label = "NO TCS";
+
+    if (typeof juris === "object" && juris) {
+      if (typeof juris.isTcs === "boolean") isTcs = juris.isTcs;
+      label = juris.label ?? (isTcs ? "TCS" : "NO TCS");
+    } else if (typeof juris === "string") {
+      isTcs = juris.trim().toUpperCase() === "TCS";
+      label = isTcs ? "TCS" : "NO TCS";
+    }
+
+    // Campos comunes con fallback
+    const title = p.title || p.shortDescription || "(sin título)";
+    const severityLevel = p.severityLevel || p.severity || "";
+    const impactLevel = p.impactLevel || p.impact || "";
+    const startTime =
+      p.startTimeUtc ? asDate(p.startTimeUtc) :
+      p.startTime    ? asDate(p.startTime)    :
+      asDate(null);
+
+    const affectedCI = p.affectedEntities || p.affectedCI || [];
+    const environment = p.environment || p.environmentName || "";
+    const problemId = p.problemId || p.displayId || p.id || "";
+
+    // URL para el botón (usa lo que tengas del backend)
+    const detailUrl =
+      p.url ||
+      p.problemUrl ||
+      p.links?.detail ||
+      "";
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      title,
+      severityLevel,
+      impactLevel,
+      startTime,     // Date o null
+      affectedCI,
+      environment,
+      problemId,
+      detailUrl,
+    };
+  });
+}
+
+// -----------------------------
+// Traer UNA página
+// -----------------------------
+async function fetchPage(page = 1, size = 200) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} al obtener problemas:\n${txt}`);
+  }
+
+  const json = await res.json();
+  // Soportar diferentes envolturas del backend
+  const data =
+    Array.isArray(json) ? json :
+    json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(data);
+}
+
+// -----------------------------
+// Traer MUCHAS páginas y filtrar por día
+// -----------------------------
+export async function fetchAllProblemsForDay(yyyy, mm, dd, pageSize = 200, maxPages = 400) {
+  const { start, end } = dayRangeUTC(yyyy, mm, dd);
+
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, pageSize);
+
+    if (!batch || batch.length === 0) break;
+    // Acumula solo los que caen en el día buscado (por startTime)
+    const filtered = batch.filter((p) => isWithin(p.startTime, start, end));
+    all = all.concat(filtered);
+
+    // Si la página vino incompleta, asumimos que no hay más
+    if (batch.length < pageSize) break;
+
+    page++;
+  }
+
+  // Ordena por hora de inicio ascendente
+  all.sort((a, b) => {
+    const ta = a.startTime ? a.startTime.getTime() : 0;
+    const tb = b.startTime ? b.startTime.getTime() : 0;
+    return ta - tb;
+  });
+
+  return all;
+}
+
+----
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblemsForDay } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // ✅ Día fijo: 25/11/2025 (UTC)
+        const data = await fetchAllProblemsForDay(2025, 11, 25, 200, 400);
+
+        const onlyTcs = data.filter((p) => p.isTcs === true);
+
+        if (alive) setProblems(onlyTcs);
+      } catch (e) {
+        if (alive) setError(e.message || String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { alive = false; };
+  }, []);
+
+  if (loading) return <h2 style={{ padding: "1rem" }}>Cargando problemas TCS…</h2>;
+  if (error)   return <h2 style={{ padding: "1rem", color: "red" }}>{error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS ({problems.length})</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.length === 0 ? (
+        <h3>No hay problemas TCS el 25/11/2025.</h3>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
+
+----
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblemsForDay } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // ✅ Día fijo: 25/11/2025 (UTC)
+        const data = await fetchAllProblemsForDay(2025, 11, 25, 200, 400);
+
+        const nonTcs = data.filter((p) => p.isTcs === false);
+
+        if (alive) setProblems(nonTcs);
+      } catch (e) {
+        if (alive) setError(e.message || String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { alive = false; };
+  }, []);
+
+  if (loading) return <h2 style={{ padding: "1rem" }}>Cargando problemas de terceros…</h2>;
+  if (error)   return <h2 style={{ padding: "1rem", color: "red" }}>{error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros ({problems.length})</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.length === 0 ? (
+        <h3>No hay problemas de terceros el 25/11/2025.</h3>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
