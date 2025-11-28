@@ -1,0 +1,240 @@
+// src/api/problems.js
+
+// 1️⃣ LEER LA URL BASE DEL BACKEND DESDE .env
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+if (!BASE) {
+  throw new Error("❌ ERROR: Falta definir VITE_API_URL en .env (ejemplo: VITE_API_URL=https://tu-backend)");
+}
+
+// Endpoint base
+const API = `${BASE}/api/Problems`;
+
+// ------------------------------------------------------
+// 2️⃣ NORMALIZAR ALERTAS DEL BACKEND
+// ------------------------------------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+
+  return list.map((p) => {
+    const rawJuris =
+      p.jurisdiction ??
+      p.juris ??
+      p?.jurisdiction?.label ??
+      p?.label ??
+      "";
+
+    let isTcs = false;
+    if (typeof rawJuris === "string") {
+      isTcs = /(^|\s)TCS(\s|$)/i.test(rawJuris);
+    } else if (rawJuris && typeof rawJuris === "object") {
+      isTcs = !!rawJuris.isTcs;
+    }
+
+    const label =
+      typeof rawJuris === "string"
+        ? rawJuris.toUpperCase()
+        : isTcs
+        ? "TCS"
+        : "NO TCS";
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      title: p.title || p.shortDescription || "(sin título)",
+      severityLevel: p.severityLevel || p.severity || "",
+      impactLevel: p.impactLevel || p.impact || "",
+      startTime: p.startTime || p.startTimeUtc || null,
+      affectedCI: p.affectedEntities || p.affectedCI || [],
+      environment: p.environment || p.environmentName || "",
+      problemId: p.problemId || p.displayId || p.id || "",
+      status: p.status || p.state || "",
+    };
+  });
+}
+
+// ------------------------------------------------------
+// 3️⃣ PARSEAR FECHAS DE FORMA SEGURA
+// ------------------------------------------------------
+function parseDate(d) {
+  if (!d) return null;
+  const dt = d instanceof Date ? d : new Date(d);
+  return Number.isNaN(dt.getTime()) ? null : dt;
+}
+
+// ------------------------------------------------------
+// 4️⃣ FILTRO POR RANGO DE FECHAS
+// ------------------------------------------------------
+export function isWithinRange(p, from, to) {
+  const dt = parseDate(p.startTime);
+  if (!dt) return false;
+
+  const a = parseDate(from);
+  const b = parseDate(to);
+
+  if (a && dt < a) return false;
+  if (b && dt > b) return false;
+
+  return true;
+}
+
+// ------------------------------------------------------
+// 5️⃣ ORDENAR DESC POR FECHA
+// ------------------------------------------------------
+export function sortByStartTimeDesc(list) {
+  return [...list].sort(
+    (a, b) =>
+      (parseDate(b.startTime)?.getTime() || 0) -
+      (parseDate(a.startTime)?.getTime() || 0)
+  );
+}
+
+// ------------------------------------------------------
+// 6️⃣ OBTENER UNA PÁGINA DEL BACKEND
+// ------------------------------------------------------
+async function fetchPage(page, size = 50) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`❌ HTTP ${res.status} al obtener problemas:\n${txt}`);
+  }
+
+  const json = await res.json();
+  const data = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(data);
+}
+
+// ------------------------------------------------------
+// 7️⃣ TRAER HISTÓRICO CON PÁGINAS LIMITADAS
+// ------------------------------------------------------
+export async function fetchAllProblems(size = 50, maxPages = 10) {
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, size);
+    if (!batch || batch.length === 0) break;
+
+    all = [...all, ...batch];
+    if (batch.length < size) break;
+    page++;
+  }
+
+  return all;
+}
+
+------
+
+import React, { useEffect, useState } from "react";
+import {
+  fetchAllProblems,
+  isWithinRange,
+  sortByStartTimeDesc,
+} from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+const FROM = new Date("2025-11-25T00:00:00");
+const TO = new Date("2025-11-25T23:59:59");
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems();
+
+        const onlyTcsInRange = data.filter(
+          (p) => p.isTcs === true && isWithinRange(p, FROM, TO)
+        );
+
+        setProblems(sortByStartTimeDesc(onlyTcsInRange));
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas TCS...</h2>;
+  if (error) return <h2 style={{ color: "red" }}>{error}</h2>;
+  if (problems.length === 0)
+    return <h2>No hay problemas TCS entre el 25/11/2025 y hoy.</h2>;
+
+  return (
+    <>
+      <h2>Problemas TCS</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </>
+  );
+}
+
+----
+
+import React, { useEffect, useState } from "react";
+import {
+  fetchAllProblems,
+  isWithinRange,
+  sortByStartTimeDesc,
+} from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+const FROM = new Date("2025-11-25T00:00:00");
+const TO = new Date("2025-11-25T23:59:59");
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems();
+
+        const othersInRange = data.filter(
+          (p) => p.isTcs === false && isWithinRange(p, FROM, TO)
+        );
+
+        setProblems(sortByStartTimeDesc(othersInRange));
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas de terceros...</h2>;
+  if (error) return <h2 style={{ color: "red" }}>{error}</h2>;
+  if (problems.length === 0)
+    return <h2>No hay problemas de terceros entre el 25/11/2025 y hoy.</h2>;
+
+  return (
+    <>
+      <h2>Problemas Otros</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </>
+  );
+}
+
