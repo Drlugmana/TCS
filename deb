@@ -1,0 +1,193 @@
+// src/api/problems.js
+
+// 1) BASE desde .env y construcción del endpoint correcto
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+if (!BASE) {
+  throw new Error("❌ ERROR: Falta definir VITE_API_URL en .env (ej: VITE_API_URL=https://tu-tunel)");
+}
+const API = `${BASE}/api/Problems`;
+
+// 2) Normalizar alertas (TCS/NO TCS robusto y campos útiles)
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+
+  return list.map((p) => {
+    const jurisObj = p.jurisdiction || p.Jurisdiction || null;
+    const jurisStr = typeof p.juris === "string" ? p.juris : null;
+    const labelIn = typeof p.label === "string" ? p.label : null;
+
+    const isTcs =
+      (jurisObj && (jurisObj.isTcs === true || jurisObj.isTcs === "true")) ||
+      (jurisStr && jurisStr.toUpperCase() === "TCS") ||
+      (labelIn && labelIn.toUpperCase() === "TCS") ||
+      false;
+
+    const label =
+      (jurisObj && (jurisObj.label || (isTcs ? "TCS" : "NO TCS"))) ||
+      (labelIn || (isTcs ? "TCS" : "NO TCS"));
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      title: p.title || p.shortDescription || "(sin título)",
+      severityLevel: p.severityLevel || p.severity || "",
+      impactLevel: p.impactLevel || p.impact || "",
+      startTime: p.startTime || p.startTimeUtc || p.start || null,
+      affectedCI: p.affectedEntities || p.affectedCI || [],
+      environment: p.environment || p.environmentName || "",
+      problemId: p.problemId || p.displayId || p.id || "",
+      status: p.status || p.state || "",
+      tenant: p.tenant || p.environmentId || "",
+    };
+  });
+}
+
+// 3) Obtener una página
+async function fetchPage(page, size = 500) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+  const json = await res.json();
+
+  // Backends típicos: array directo o envueltos en results/items/data/value
+  if (Array.isArray(json)) return json;
+  const j = json ?? {};
+  return j.results || j.items || j.data || j.value || [];
+}
+
+// 4) Traer histórico paginado (opción de filtrar por un día exacto)
+function yyyy_mm_dd_fromDate(d) {
+  // usaremos fecha en UTC para comparar por día y no depender de TZ del browser
+  return new Date(d).toISOString().slice(0, 10);
+}
+export async function fetchAllProblems(opts = {}) {
+  const { pageSize = 500, maxPages = 20, onlyDate } = opts;
+
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, pageSize);
+    if (!batch || batch.length === 0) break;
+
+    all.push(...batch);
+    if (batch.length < pageSize) break;
+    page++;
+  }
+
+  let normalized = normalize(all);
+
+  // Filtro por día exacto (ej: "2025-11-25")
+  if (onlyDate) {
+    normalized = normalized.filter((p) => {
+      if (!p.startTime) return false;
+      const d = yyyy_mm_dd_fromDate(p.startTime);
+      return d === onlyDate;
+    });
+  }
+
+  // Orden: más recientes arriba
+  normalized.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+  return normalized;
+}
+
+------
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        // Solo el día 25/11/2025
+        const data = await fetchAllProblems({ onlyDate: "2025-11-25" });
+        setProblems(data.filter((p) => p.isTcs === true));
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS <span>({problems.length})</span></h2>
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.length === 0 && <p>No hay problemas TCS el 25/11/2025.</p>}
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+-----
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        // Solo el día 25/11/2025
+        const data = await fetchAllProblems({ onlyDate: "2025-11-25" });
+        setProblems(data.filter((p) => p.isTcs === false));
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros <span>({problems.length})</span></h2>
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.length === 0 && <p>No hay problemas de terceros el 25/11/2025.</p>}
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
