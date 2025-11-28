@@ -1,51 +1,227 @@
-// src/main.jsx
-import React from "react";
-import ReactDOM from "react-dom/client";
-import { BrowserRouter } from "react-router-dom";
-import App from "./App.jsx";
-import ErrorBoundary from "./components/ErrorBoundary.jsx";
+// src/api/problems.js
 
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <ErrorBoundary>
-      <BrowserRouter>
-        <App />
-      </BrowserRouter>
-    </ErrorBoundary>
-  </React.StrictMode>
-);
+// Lee la URL base del backend (Vite)
+const RAW_BASE = (import.meta.env.VITE_API_URL || "").trim();
+// Normaliza (quita slash al final si viene con él)
+const BASE = RAW_BASE.replace(/\/$/, "");
+if (!BASE) {
+  throw new Error("❌ Falta VITE_API_URL en .env (ej: https://host/api/Problems)");
+}
+
+// Helper seguro para leer fechas
+function toDateSafe(v) {
+  if (!v) return null;
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+// Normalizador: deja todo con claves consistentes
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+  return list.map(p => {
+    // la jurisdicción puede venir como objeto { isTcs, label }, como string "TCS" o no venir
+    const isTcsFromObj   = p?.jurisdiction?.isTcs;
+    const isTcsFromStr   = typeof p?.juris === "string"
+      ? p.juris.toUpperCase() === "TCS"
+      : undefined;
+    const isTcsFromLabel = typeof p?.label === "string"
+      ? p.label.toUpperCase() === "TCS"
+      : undefined;
+
+    const isTcs = (isTcsFromObj ?? isTcsFromStr ?? isTcsFromLabel ?? false);
+    const label = p?.jurisdiction?.label ?? p?.label ?? (isTcs ? "TCS" : "NO TCS");
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      title: p.title || p.shortDescription || "(sin título)",
+      severityLevel: p.severityLevel || p.severity || "",
+      impactLevel: p.impactLevel || p.impact || "",
+      startTime: p.startTime ?? p.startTimeUtc ?? p.start_time ?? null,
+      affectedCI: p.affectedEntities ?? p.affectedCI ?? [],
+      environment: p.environment ?? p.environmentName ?? "",
+      problemId: p.problemId ?? p.displayId ?? p.id ?? "",
+      status: p.status ?? p.state ?? "",
+      tenant: p.tenant ?? p.tenantId ?? "",
+    };
+  });
+}
+
+// Llama a una página del backend (usa tu swagger /api/Problems?pageNumber=&pageSize=)
+async function fetchPage(page = 1, size = 50) {
+  const url = `${BASE}?pageNumber=${page}&pageSize=${size}`;
+  const res = await fetch(url, {
+    headers: { accept: "application/json" },
+  });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+  const json = await res.json();
+  // la API puede devolver {data:[]} o directamente []
+  const items = Array.isArray(json)
+    ? json
+    : (json.data || json.results || json.items || json.value || []);
+  return items;
+}
+
+/**
+ * Trae N páginas y normaliza.
+ * @param {number} size - tamaño de página
+ * @param {number} maxPages - cuántas páginas traer
+ */
+export async function fetchAllProblems(size = 200, maxPages = 60) {
+  let page = 1;
+  let all = [];
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, size);
+    if (!batch || batch.length === 0) break;
+    all = all.concat(batch);
+    if (batch.length < size) break; // última
+    page++;
+  }
+  return normalize(all);
+}
+
+// Utilidades de fecha que usaremos en las páginas
+export function isSameDayUTC(dateStr, yyyy, mm, dd) {
+  const d = toDateSafe(dateStr);
+  if (!d) return false;
+  // Comparamos en UTC para no depender del huso del navegador
+  return (
+    d.getUTCFullYear() === yyyy &&
+    (d.getUTCMonth() + 1) === mm &&
+    d.getUTCDate() === dd
+  );
+}
+
+---
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems, isSameDayUTC } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+  const [username, setUsername] = useState("");
+
+  // >>> Configura aquí el filtro por fecha (25/11/2025) <<<
+  const FILTER_DAY = { y: 2025, m: 11, d: 25 };
+
+  useEffect(() => {
+    async function load() {
+      try {
+        // trae mucho volumen para cubrir tu conteo (513 TCS)
+        const data = await fetchAllProblems(500, 40);
+        const onlyTcs = data
+          .filter(p => p.isTcs === true)
+          .filter(p => isSameDayUTC(p.startTime, FILTER_DAY.y, FILTER_DAY.m, FILTER_DAY.d))
+          // ordena por hora ascendente del mismo día
+          .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+        setProblems(onlyTcs);
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error)   return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS <span style={{
+        fontSize: "0.85rem",
+        background: "#34495e",
+        color: "#fff",
+        borderRadius: "999px",
+        padding: "0.15rem 0.55rem",
+        marginLeft: "0.5rem"
+      }}>{problems.length}</span></h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.length === 0 ? (
+        <h3>No hay problemas TCS el 25/11/2025.</h3>
+      ) : (
+        problems.map(p => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
 
 ----
 
-// src/components/ErrorBoundary.jsx
-import React from "react";
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems, isSameDayUTC } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-export default class ErrorBoundary extends React.Component {
-  constructor(props) {
-    super(props);
-    this.state = { hasError: false, error: null };
-  }
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
+  const [username, setUsername] = useState("");
 
-  static getDerivedStateFromError(error) {
-    return { hasError: true, error };
-  }
+  // Mismo día de prueba
+  const FILTER_DAY = { y: 2025, m: 11, d: 25 };
 
-  componentDidCatch(error, info) {
-    console.error("[ErrorBoundary]", error, info);
-  }
+  useEffect(() => {
+    async function load() {
+      try {
+        // trae mucho volumen para cubrir las ~6.539 NO TCS
+        const data = await fetchAllProblems(500, 80);
+        const others = data
+          .filter(p => p.isTcs === false)
+          .filter(p => isSameDayUTC(p.startTime, FILTER_DAY.y, FILTER_DAY.m, FILTER_DAY.d))
+          .sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
 
-  render() {
-    if (this.state.hasError) {
-      return (
-        <div style={{ padding: "2rem" }}>
-          <h2 style={{ color: "crimson" }}>⚠️ Se produjo un error en la aplicación</h2>
-          <pre style={{ whiteSpace: "pre-wrap", color: "black" }}>
-            {String(this.state.error)}
-          </pre>
-        </div>
-      );
+        setProblems(others);
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        setLoading(false);
+      }
     }
-    return this.props.children;
-  }
+    load();
+  }, []);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error)   return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros <span style={{
+        fontSize: "0.85rem",
+        background: "#34495e",
+        color: "#fff",
+        borderRadius: "999px",
+        padding: "0.15rem 0.55rem",
+        marginLeft: "0.5rem"
+      }}>{problems.length}</span></h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.length === 0 ? (
+        <h3>No hay problemas de terceros el 25/11/2025.</h3>
+      ) : (
+        problems.map(p => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
 }
 
