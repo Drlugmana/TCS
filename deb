@@ -1,0 +1,298 @@
+// src/api/problems.js
+
+// -----------------------------
+// CARGA ROBUSTA DE URL BASE
+// -----------------------------
+let _cachedBase = null;   // cache en memoria para no pedirlo siempre
+
+async function getBaseUrl() {
+  if (_cachedBase) return _cachedBase;
+
+  // 1) Primero: variable de Vite (.env)
+  try {
+    const fromEnv = (import.meta?.env?.VITE_API_URL || "").trim();
+    if (fromEnv) {
+      _cachedBase = fromEnv.replace(/\/$/, "");
+      return _cachedBase;
+    }
+  } catch (_) {}
+
+  // 2) Segundo: public/config.json  { "API_BASE_URL": "https://.../api/Problems" ó "https://..."}
+  try {
+    const res = await fetch("/config.json", { cache: "no-cache" });
+    if (res.ok) {
+      const cfg = await res.json().catch(() => ({}));
+      const raw = (cfg.API_BASE_URL || cfg.api_base_url || "").trim();
+      if (raw) {
+        // Si ya viene con /api/Problems lo usamos tal cual; si no, lo completamos abajo
+        _cachedBase = raw.replace(/\/$/, "");
+        return _cachedBase;
+      }
+    }
+  } catch (_) {}
+
+  // 3) Último recurso: relativo
+  _cachedBase = "";
+  return _cachedBase;
+}
+
+function buildApiUrl(base) {
+  // Si el usuario puso ya .../api/Problems en config.json, respétalo
+  if (/\/api\/Problems$/i.test(base)) return base;
+  if (!base) return "/api/Problems";
+  return `${base}/api/Problems`;
+}
+
+// -----------------------------
+// Utilidades de fechas
+// -----------------------------
+function asDate(v) {
+  if (v == null) return null;
+  if (typeof v === "number") return new Date(v);
+  const d = new Date(v);
+  return isNaN(d) ? null : d;
+}
+
+function dayRangeUTC(yyyy, mm, dd) {
+  const start = new Date(Date.UTC(yyyy, mm - 1, dd, 0, 0, 0, 0));
+  const end   = new Date(Date.UTC(yyyy, mm - 1, dd, 23, 59, 59, 999));
+  return { start, end };
+}
+
+function isWithin(date, start, end) {
+  if (!date) return false;
+  const t = date.getTime();
+  return t >= start.getTime() && t <= end.getTime();
+}
+
+// -----------------------------
+// Normalizador de problemas
+// -----------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+
+  return list.map((p) => {
+    const juris = p.jurisdiction ?? p.Jurisdiction ?? p.juris;
+
+    let isTcs = false;
+    let label = "NO TCS";
+
+    if (typeof juris === "object" && juris) {
+      if (typeof juris.isTcs === "boolean") isTcs = juris.isTcs;
+      label = juris.label ?? (isTcs ? "TCS" : "NO TCS");
+    } else if (typeof juris === "string") {
+      isTcs = juris.trim().toUpperCase() === "TCS";
+      label = isTcs ? "TCS" : "NO TCS";
+    }
+
+    const title         = p.title || p.shortDescription || "(sin título)";
+    const severityLevel = p.severityLevel || p.severity || "";
+    const impactLevel   = p.impactLevel || p.impact || "";
+
+    const startTime =
+      p.startTimeUtc ? asDate(p.startTimeUtc) :
+      p.startTime    ? asDate(p.startTime)    :
+      null;
+
+    const affectedCI  = p.affectedEntities || p.affectedCI || [];
+    const environment = p.environment || p.environmentName || "";
+    const problemId   = p.problemId || p.displayId || p.id || "";
+
+    // URL para el botón
+    const detailUrl =
+      p.url ||
+      p.problemUrl ||
+      p.links?.detail ||
+      "";
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      title,
+      severityLevel,
+      impactLevel,
+      startTime,
+      affectedCI,
+      environment,
+      problemId,
+      detailUrl,
+    };
+  });
+}
+
+// -----------------------------
+// Traer UNA página (usa getBaseUrl en runtime)
+// -----------------------------
+async function fetchPage(page = 1, size = 200) {
+  const base = await getBaseUrl();
+  const API  = buildApiUrl(base);
+  const url  = `${API}?pageNumber=${page}&pageSize=${size}`;
+
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    // NO lanzamos fuera de control; devolvemos [] y logeamos
+    console.error(`HTTP ${res.status} al obtener problemas:\n${txt}`);
+    return [];
+  }
+
+  const json = await res.json().catch(() => ({}));
+  const data =
+    Array.isArray(json) ? json :
+    json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(data);
+}
+
+// -----------------------------
+// Traer MUCHAS páginas y filtrar por día
+// -----------------------------
+export async function fetchAllProblemsForDay(yyyy, mm, dd, pageSize = 200, maxPages = 400) {
+  const { start, end } = dayRangeUTC(yyyy, mm, dd);
+
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, pageSize);
+    if (!batch || batch.length === 0) break;
+
+    // Filtrar por el rango del día
+    const filtered = batch.filter((p) => isWithin(p.startTime, start, end));
+    all = all.concat(filtered);
+
+    if (batch.length < pageSize) break; // no hay más
+    page++;
+  }
+
+  // Orden por hora asc
+  all.sort((a, b) => {
+    const ta = a.startTime ? a.startTime.getTime() : 0;
+    const tb = b.startTime ? b.startTime.getTime() : 0;
+    return ta - tb;
+  });
+
+  return all;
+}
+
+------
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblemsForDay } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // Día fijo de pruebas: 25/11/2025
+        const data = await fetchAllProblemsForDay(2025, 11, 25, 250, 600);
+        const onlyTcs = data.filter((p) => p.isTcs === true);
+
+        if (alive) setProblems(onlyTcs);
+      } catch (e) {
+        if (alive) setError(e.message || String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { alive = false; };
+  }, []);
+
+  if (loading) return <h2 style={{ padding: "1rem" }}>Cargando problemas TCS…</h2>;
+  if (error)   return <h2 style={{ padding: "1rem", color: "red" }}>{error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS ({problems.length})</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.length === 0 ? (
+        <h3>No hay problemas TCS el 25/11/2025.</h3>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
+
+ ----
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblemsForDay } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+
+        // Día fijo de pruebas: 25/11/2025
+        const data = await fetchAllProblemsForDay(2025, 11, 25, 250, 600);
+        const nonTcs = data.filter((p) => p.isTcs === false);
+
+        if (alive) setProblems(nonTcs);
+      } catch (e) {
+        if (alive) setError(e.message || String(e));
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { alive = false; };
+  }, []);
+
+  if (loading) return <h2 style={{ padding: "1rem" }}>Cargando problemas de terceros…</h2>;
+  if (error)   return <h2 style={{ padding: "1rem", color: "red" }}>{error}</h2>;
+
+  return (
+    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros ({problems.length})</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {problems.length === 0 ? (
+        <h3>No hay problemas de terceros el 25/11/2025.</h3>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
+
+----
+// dentro de ProblemCard.jsx
+{problem.detailUrl ? (
+  <a href={problem.detailUrl} target="_blank" rel="noreferrer">
+    <button>Revisar problema</button>
+  </a>
+) : null}
