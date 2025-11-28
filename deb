@@ -1,0 +1,67 @@
+// src/pages/AllProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems, ONLY_DATE } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function AllProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        setProblems([]);
+
+        // ✅ Llamamos al fetchAllProblems que trae tanto TCS como NO TCS
+        await fetchAllProblems({
+          onlyDate: ONLY_DATE,
+          onBatch: (batch) => {
+            if (!mounted || !batch?.length) return;
+            setProblems((prev) =>
+              [...prev, ...batch].sort(
+                (a, b) => new Date(b.startTime) - new Date(a.startTime)
+              )
+            );
+          },
+        });
+      } catch (e) {
+        setError(e.message);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>
+        Todos los Problemas del {ONLY_DATE} <span>({problems.length})</span>
+      </h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {loading && problems.length === 0 && <p>Cargando todos los problemas...</p>}
+      {!loading && problems.length === 0 && (
+        <p>No hay problemas registrados el {ONLY_DATE}.</p>
+      )}
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
