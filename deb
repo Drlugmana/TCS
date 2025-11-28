@@ -1,0 +1,258 @@
+// src/api/problems.js
+
+// 1) BASE del backend (desde .env)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+if (!BASE) {
+  throw new Error(
+    "❌ ERROR: Falta definir VITE_API_URL en .env (ejemplo: VITE_API_URL=https://tu-backend)"
+  );
+}
+
+// Si en .env ya pusiste .../api, no dupliques. Aquí asumimos BASE es la raíz SIN /api.
+// Cambia esta línea a: const API = `${BASE}`;  si tu BASE ya termina en /api/Problems
+const API = `${BASE}/api/Problems`;
+
+// -------------------------------
+// Helper robusto para fechas
+// -------------------------------
+export function toDate(x) {
+  if (!x) return null;
+  if (x instanceof Date) return x;
+  if (typeof x === "number") return new Date(x);
+  if (typeof x === "string") {
+    // ISO
+    const d = new Date(x);
+    if (!Number.isNaN(d.getTime())) return d;
+    // /Date(1698450000000)/
+    const m = x.match(/\/Date\((\d+)\)\//);
+    if (m) return new Date(Number(m[1]));
+  }
+  return null;
+}
+
+// -------------------------------
+// 2) Normalizar alertas del backend
+// -------------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) list = [];
+
+  return list.map((p) => {
+    // 2.1 Jurisdicción -> booleano isTcs + etiqueta
+    const jurisRaw =
+      (p?.jurisdiction ??
+        p?.Jurisdiction ??
+        p?.juris ??
+        p?.Juris ??
+        "").toString().trim().toUpperCase();
+
+    const isTcsFromString =
+      jurisRaw === "TCS" || jurisRaw === "SI TCS" || jurisRaw === "SI_TCS";
+
+    const isTcsFromObject = p?.jurisdiction?.isTcs === true;
+
+    const isTcs = isTcsFromObject || isTcsFromString;
+    const label = isTcs ? "TCS" : "NO TCS";
+
+    // 2.2 Fecha de inicio robusta
+    const start =
+      p?.startTime ?? p?.StartTime ?? p?.startTimeUtc ?? p?.StartTimeUtc;
+    const startTime = toDate(start);
+
+    return {
+      ...p,
+      isTcs,
+      label,
+      // Campos “planos” para usar en tus tarjetas
+      title: p?.title || p?.shortDescription || "(sin título)",
+      severityLevel: p?.severityLevel || p?.severity || "",
+      impactLevel: p?.impactLevel || p?.impact || "",
+      startTime, // ya como Date
+      affectedCI: p?.affectedEntities || p?.affectedCI || [],
+      environment: p?.environment || p?.environmentName || "",
+      problemId: p?.problemId || p?.displayId || p?.id || "",
+      status: p?.status || p?.state || "",
+    };
+  });
+}
+
+// -------------------------------
+// 3) Obtener una única página
+// -------------------------------
+async function fetchPage(page, size = 50) {
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+
+  const res = await fetch(url, {
+    headers: { accept: "application/json" },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`❌ HTTP ${res.status} al obtener problemas:\n${txt}`);
+  }
+
+  const json = await res.json();
+
+  // El swagger a veces devuelve { data: [...] } o { items|results|value }
+  return Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+}
+
+// -------------------------------
+// 4) Traer histórico con páginas limitadas
+// -------------------------------
+export async function fetchAllProblems(size = 50, maxPages = 10) {
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, size);
+    if (!batch || batch.length === 0) break;
+
+    all = [...all, ...batch];
+
+    // Si la página vino “corta”, asumimos que no hay más
+    if (batch.length < size) break;
+
+    page++;
+  }
+
+  return normalize(all);
+}
+
+-------
+
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems, toDate } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  const DATE_FROM = new Date(2025, 10, 25, 0, 0, 0); // 25/11/2025
+  const DATE_TO = new Date();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems(50, 20);
+
+        const onlyTcs = data
+          .filter((p) => p.isTcs)
+          .filter((p) => {
+            const d = toDate(p.startTime);
+            return d && d >= DATE_FROM && d <= DATE_TO;
+          })
+          .sort((a, b) => +toDate(b.startTime) - +toDate(a.startTime));
+
+        setProblems(onlyTcs);
+        // ➜ número en la pestaña del navegador
+        document.title = `TCS (${onlyTcs.length}) • DT Problems Viewer`;
+      } catch (e) {
+        setError(e.message);
+      }
+      setLoading(false);
+    }
+    load();
+    // opcional: limpiar título al salir
+    return () => { document.title = "DT Problems Viewer"; };
+  }, []);
+
+  if (loading) return <h2>Cargando problemas TCS…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>{error}</h2>;
+  if (problems.length === 0)
+    return <h2>No hay problemas TCS entre el 25/11/2025 y hoy.</h2>;
+
+  return (
+    <>
+      <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        Problemas TCS <span className="pill">{problems.length}</span>
+      </h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </>
+  );
+}
+
+----
+
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems, toDate } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  const DATE_FROM = new Date(2025, 10, 25, 0, 0, 0); // 25/11/2025
+  const DATE_TO = new Date();
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems(50, 20);
+
+        const others = data
+          .filter((p) => !p.isTcs)
+          .filter((p) => {
+            const d = toDate(p.startTime);
+            return d && d >= DATE_FROM && d <= DATE_TO;
+          })
+          .sort((a, b) => +toDate(b.startTime) - +toDate(a.startTime));
+
+        setProblems(others);
+        // ➜ número en la pestaña del navegador
+        document.title = `Otros (${others.length}) • DT Problems Viewer`;
+      } catch (e) {
+        setError(e.message);
+      }
+      setLoading(false);
+    }
+    load();
+    return () => { document.title = "DT Problems Viewer"; };
+  }, []);
+
+  if (loading) return <h2>Cargando problemas de terceros…</h2>;
+  if (error) return <h2 style={{ color: "red" }}>{error}</h2>;
+  if (problems.length === 0)
+    return <h2>No hay problemas de terceros entre el 25/11/2025 y hoy.</h2>;
+
+  return (
+    <>
+      <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        Problemas Otros <span className="pill">{problems.length}</span>
+      </h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </>
+  );
+}
+
+----
+
+.pill {
+  display: inline-block;
+  min-width: 28px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 0.9rem;
+  font-weight: 700;
+  line-height: 1.6;
+  text-align: center;
+  background: rgba(0,0,0,0.08);
+}
