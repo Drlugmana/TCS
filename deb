@@ -1,3 +1,25 @@
+// src/main.jsx
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App.jsx";
+
+// 👇 Ruta correcta (dentro de /components)
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
+  </React.StrictMode>
+);
+
+--
+
+// src/components/ErrorBoundary.jsx
 import React from "react";
 
 export default class ErrorBoundary extends React.Component {
