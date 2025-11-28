@@ -1,178 +1,222 @@
-// src/components/ProblemCard.jsx
-import React, { useEffect, useState } from 'react';
-import {
-  getSlaMinutes,
-  getColorByPercent,
-  getButtonColorByPercent,
-  calcularCriticidad,
-} from '../utils/slaUtils';
+import React from "react";
 
-export default function ProblemCard({ problem, username }) {
-  if (!problem) return null;
+export default class ErrorBoundary extends React.Component {
+  constructor(props){ super(props); this.state = { hasError:false, err:null }; }
+  static getDerivedStateFromError(err){ return { hasError:true, err }; }
+  componentDidCatch(err, info){ console.error("[ErrorBoundary]", err, info); }
+  render(){
+    if (this.state.hasError){
+      return (
+        <div style={{padding:"2rem"}}>
+          <h2 style={{color:"crimson"}}>Se produjo un error en la UI</h2>
+          <pre style={{whiteSpace:"pre-wrap"}}>{String(this.state.err)}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
-  // ===== Normalización de campos =====
-  const title =
-    problem.title ||
-    problem.shortDescription ||
-    '(sin título)';
+---
 
-  const severityLevel =
-    problem.severityLevel ||
-    problem.severity ||
-    '';
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App.jsx";
+import ErrorBoundary from "./ErrorBoundary.jsx";
 
-  const impactLevel =
-    problem.impactLevel ||
-    problem.impact ||
-    '';
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
+  </React.StrictMode>
+);
 
-  // Fecha/Hora de inicio
-  const start =
-    problem.startTime
-      ? new Date(problem.startTime)
-      : (problem.startTimeUtc ? new Date(problem.startTimeUtc) : null);
+----
 
-  const environment =
-    problem.environment ||
-    problem.environmentName ||
-    '';
+// 1) Base segura desde .env (Vite)
+const BASE_RAW = (import.meta?.env?.VITE_API_URL || "").trim();
+const BASE = BASE_RAW.replace(/\/+$/,""); // sin "/" final
+const API = BASE ? `${BASE}/api/Problems` : "";
 
-  // Affected CI / Entities → string bonito
-  const affectedCIArray =
-    problem.affectedCI ||
-    problem.affectedEntities ||
-    [];
+// 2) Normalización robusta (nunca rompas si faltan campos)
+function normalize(list){
+  const arr = Array.isArray(list) ? list : [];
+  return arr.map(p => {
+    const isTcsFromObj   = p?.jurisdiction?.isTcs;
+    const isTcsFromLabel = typeof p?.label === "string"
+      ? p.label.toUpperCase() === "TCS" : undefined;
+    const isTcsFromStr   = typeof p?.juris === "string"
+      ? p.juris.toUpperCase() === "TCS" : undefined;
 
-  const affectedNames = (Array.isArray(affectedCIArray) ? affectedCIArray : [])
-    .map(ci => ci?.name || ci?.Name || ci?.displayName || ci?.DisplayName)
-    .filter(Boolean);
+    const isTcs = [isTcsFromObj, isTcsFromLabel, isTcsFromStr]
+                  .find(v => typeof v === "boolean") ?? false;
 
-  const equipos = affectedNames.length > 0 ? affectedNames.join(', ') : '—';
+    return {
+      ...p,
+      isTcs,
+      label: isTcs ? "TCS" : "NO TCS",
+      title: p?.title || p?.shortDescription || "(sin título)",
+      severityLevel: p?.severityLevel || p?.severity || "",
+      impactLevel: p?.impactLevel || p?.impact || "",
+      startTime: p?.startTime || p?.startTimeUtc || null,
+      affectedCI: p?.affectedEntities || p?.affectedCI || [],
+      environment: p?.environment || p?.environmentName || "",
+      problemId: p?.problemId || p?.displayId || p?.id || "",
+      status: p?.status || p?.state || "",
+      tenant: p?.tenant || "", // importante para el enlace Dynatrace
+    };
+  });
+}
 
-  // Tenant + problemId para abrir Dynatrace
-  const tenant = problem.tenant || ''; // ej. "htit12521"
-  const problemId = problem.problemId || problem.displayId || problem.id || '';
-  const dynatraceUrl =
-    tenant && problemId
-      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
-      : null;
+// 3) Trae 1 página
+async function fetchPage(page=1, size=50){
+  if(!API){
+    console.warn("VITE_API_URL no definido. Retornando lista vacía.");
+    return [];
+  }
+  const url = `${API}?pageNumber=${page}&pageSize=${size}`;
+  const res = await fetch(url, { headers:{ accept:"application/json" } });
+  if(!res.ok){
+    const txt = await res.text().catch(()=> "");
+    throw new Error(`HTTP ${res.status} al obtener problemas:\n${txt}`);
+  }
+  const json = await res.json();
+  const data = Array.isArray(json) ? json
+    : (json?.results || json?.items || json?.data || json?.value || []);
+  return data;
+}
 
-  // ===== TCS / NO TCS robusto =====
-  // Acepta múltiples formatos desde el backend/DB
-  const isTcsFromObject = problem.jurisdiction?.isTcs;
-  const isTcsFromString =
-    typeof problem.juris === 'string'
-      ? problem.juris.toUpperCase() === 'TCS'
-      : (typeof problem.label === 'string'
-          ? problem.label.toUpperCase() === 'TCS'
-          : undefined);
+// 4) Trae varias páginas (limite razonable)
+export async function fetchAllProblems(size=50, maxPages=10){
+  let page=1; let all=[];
+  while(page <= maxPages){
+    const batch = await fetchPage(page, size);
+    if(!batch || batch.length===0) break;
+    all = all.concat(batch);
+    if(batch.length < size) break;
+    page++;
+  }
+  return normalize(all);
+}
 
-  const isTcs = (problem.isTcs ?? isTcsFromObject ?? isTcsFromString) ?? false;
+// 5) Utilidad de rango por día (inclusive)
+export function filterByDate(list, dateYYYYMMDD){
+  const dayStart = new Date(`${dateYYYYMMDD}T00:00:00`);
+  const dayEnd   = new Date(`${dateYYYYMMDD}T23:59:59.999`);
+  return (list||[]).filter(p=>{
+    const t = p?.startTime ? new Date(p.startTime) : null;
+    return t && t >= dayStart && t <= dayEnd;
+  });
+}
 
-  const label =
-    problem.jurisdiction?.label ??
-    problem.label ??
-    (isTcs ? 'TCS' : 'NO TCS');
+-----
 
-  // ===== SLA / Timer visual =====
-  // Si tu cálculo de criticidad depende de la lista de equipos, se la pasamos.
-  const criticidad = calcularCriticidad(affectedCIArray || []);
-  const slaMinutes = getSlaMinutes(criticidad);
+
+import React, { useEffect, useState } from "react";
+import { getSlaMinutes, getColorByPercent, getButtonColorByPercent, calcularCriticidad } from "../utils/slaUtils";
+
+export default function ProblemCard({ problem, username }){
+  if(!problem) return null;
+
+  const {
+    title, severityLevel, impactLevel, startTime,
+    environment, affectedCI, tenant, problemId,
+    label, isTcs
+  } = problem;
+
+  // etiqueta final
+  const finalLabel = label || (isTcs ? "TCS" : "NO TCS");
+
+  // íconos opcionales (si los tienes en /public)
+  const criticidad = calcularCriticidad(affectedCI || []);
+  const criticidadIcon = `/severidadS${criticidad || "4"}.svg`;
+  const environmentIcon = environment === "Productivo"
+    ? "/icon-productivo.svg" : "/icon-noproductivo.svg";
+
+  // SLA
+  const slaMinutes = getSlaMinutes(criticidad) || 0;
+  const start = startTime ? new Date(startTime) : null;
 
   const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
+  useEffect(()=>{
+    const id = setInterval(()=> setNow(new Date()), 1000);
+    return ()=> clearInterval(id);
   }, []);
 
-  const elapsedMinutes = Math.max(
-    0,
-    start ? (now - start) / 60000 : 0
-  );
-  const remainingMinutes = Math.max(
-    0,
-    Math.max(slaMinutes - elapsedMinutes, 0)
-  );
-  const percentRemaining = Math.min(
-    (remainingMinutes / (slaMinutes || 1)) * 100,
-    100
-  );
-
+  const elapsedMin = start ? Math.max((now - start)/60000, 0) : 0;
+  const remainingMin = Math.max(slaMinutes - elapsedMin, 0);
+  const percentRemaining = Math.min(((slaMinutes ? remainingMin/slaMinutes : 1)*100), 100);
   const bgColor = getColorByPercent(percentRemaining);
   const buttonColor = getButtonColorByPercent(percentRemaining);
 
-  const formatTime = (minutes) => {
-    const total = Math.floor(minutes * 60);
-    const h = Math.floor(total / 3600);
-    const m = Math.floor((total % 3600) / 60);
-    const s = total % 60;
-    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const formatTime = (minutes)=>{
+    const total = Math.floor(minutes*60);
+    const h = Math.floor(total/3600);
+    const m = Math.floor((total%3600)/60);
+    const s = total%60;
+    return `${String(h).padStart(2,"0")}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
   };
 
-  // Deshabilitar botón si no hay usuario o URL
-  const disabled = !username || !dynatraceUrl;
+  // equipos
+  const equipos = [...new Set((affectedCI||[]).map(ci=>ci?.name).filter(Boolean))].join(", ") || "–";
+
+  // enlace Dynatrace (sólo si hay tenant + problemId + username)
+  const hasLink = Boolean(username && tenant && problemId);
+  const dynatraceUrl = hasLink
+    ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+    : null;
+
+  const disabled = !hasLink;
 
   return (
-    <div
-      style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        borderRadius: '12px',
-        padding: '1rem',
-        marginBottom: '1rem',
-        background: bgColor,
-        boxShadow: '0 4px 10px rgba(0,0,0,0.1)',
-      }}
-    >
-      {/* Info / Etiquetas */}
-      <div style={{ flex: 1, paddingLeft: '1rem' }}>
-        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
-          <span
-            style={{
-              padding: '0.25rem 0.5rem',
-              borderRadius: '999px',
-              fontSize: '0.8rem',
-              fontWeight: 700,
-              backgroundColor: isTcs ? '#1b5e20' : '#b71c1c',
-              color: '#fff',
-              marginRight: '0.5rem',
-            }}
-          >
-            {label}
+    <div style={{
+      display:"flex", justifyContent:"space-between", alignItems:"center",
+      borderRadius:"12px", padding:"1rem", marginBottom:"1rem",
+      background: bgColor, boxShadow:"0 4px 10px rgba(0,0,0,0.1)"
+    }}>
+      {/* Íconos */}
+      <div style={{ display:"flex", flexDirection:"column", alignItems:"center", gap:"0.5rem" }}>
+        <img src={criticidadIcon} alt={`criticidad ${criticidad}`} width="40" height="40" />
+        <img src={environmentIcon} alt={environment || "ambiente"} width="36" height="36" />
+      </div>
+
+      {/* Info */}
+      <div style={{ flex:1, paddingLeft:"1rem" }}>
+        <div style={{ display:"flex", alignItems:"center", marginBottom: 8 }}>
+          <span style={{
+            padding:"0.25rem 0.5rem", borderRadius:"999px", fontSize:"0.8rem",
+            fontWeight:700, backgroundColor: isTcs ? "#1b5e20" : "#b71c1c", color:"#fff", marginRight:"0.5rem"
+          }}>
+            {finalLabel}
           </span>
         </div>
 
-        <p style={{ margin: 0 }}><strong>Título:</strong> {title}</p>
-        <p style={{ margin: 0 }}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
-        <p style={{ margin: 0 }}><strong>Impacto:</strong> {impactLevel}</p>
-        <p style={{ margin: 0 }}>
-          <strong>Inicio:</strong>{' '}
-          {start ? start.toLocaleString() : '—'}
-        </p>
-        <p style={{ margin: 0 }}><strong>Criticidad CI:</strong> {criticidad}</p>
-        <p style={{ margin: 0 }}><strong>Equipos afectados:</strong> {equipos}</p>
-        <p style={{ margin: 0 }}><strong>Ambiente:</strong> {environment}</p>
+        <p style={{margin:0}}><strong>Título:</strong> {title}</p>
+        <p style={{margin:0}}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+        <p style={{margin:0}}><strong>Impacto:</strong> {impactLevel}</p>
+        <p style={{margin:0}}><strong>Inicio:</strong> {start ? start.toLocaleString() : "–"}</p>
+        <p style={{margin:0}}><strong>Equipos afectados:</strong> {equipos}</p>
       </div>
 
       {/* Timer + botón */}
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
-          {formatTime(remainingMinutes)}
+      <div style={{ textAlign:"center" }}>
+        <div style={{ fontSize:"2rem", fontWeight:"bold" }}>
+          {formatTime(remainingMin)}
         </div>
         <button
           disabled={disabled}
-          onClick={() => !disabled && window.open(dynatraceUrl, '_blank', 'noopener,noreferrer')}
+          onClick={()=> !disabled && window.open(dynatraceUrl, "_blank")}
           style={{
-            marginTop: '0.5rem',
-            padding: '0.5rem 1rem',
-            border: 'none',
-            borderRadius: '6px',
-            color: '#fff',
-            background: disabled ? '#808080' : buttonColor,
-            cursor: disabled ? 'not-allowed' : 'pointer',
+            marginTop:"0.5rem", padding:"0.5rem 1rem", border:"none",
+            borderRadius:"6px", color:"#fff",
+            background: disabled ? "#808080" : buttonColor,
+            cursor: disabled ? "not-allowed" : "pointer"
           }}
-          title={username ? 'Abrir en Dynatrace' : 'Ingresa tu usuario para habilitar'}
+          title={disabled ? "Ingresa tu usuario para habilitar" : "Abrir en Dynatrace"}
         >
           Revisar problema
         </button>
@@ -181,4 +225,5 @@ export default function ProblemCard({ problem, username }) {
   );
 }
 
-m
+---
+
