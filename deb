@@ -1,1 +1,184 @@
+// src/components/ProblemCard.jsx
+import React, { useEffect, useState } from 'react';
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  getButtonColorByPercent,
+  calcularCriticidad,
+} from '../utils/slaUtils';
+
+export default function ProblemCard({ problem, username }) {
+  if (!problem) return null;
+
+  // ===== Normalización de campos =====
+  const title =
+    problem.title ||
+    problem.shortDescription ||
+    '(sin título)';
+
+  const severityLevel =
+    problem.severityLevel ||
+    problem.severity ||
+    '';
+
+  const impactLevel =
+    problem.impactLevel ||
+    problem.impact ||
+    '';
+
+  // Fecha/Hora de inicio
+  const start =
+    problem.startTime
+      ? new Date(problem.startTime)
+      : (problem.startTimeUtc ? new Date(problem.startTimeUtc) : null);
+
+  const environment =
+    problem.environment ||
+    problem.environmentName ||
+    '';
+
+  // Affected CI / Entities → string bonito
+  const affectedCIArray =
+    problem.affectedCI ||
+    problem.affectedEntities ||
+    [];
+
+  const affectedNames = (Array.isArray(affectedCIArray) ? affectedCIArray : [])
+    .map(ci => ci?.name || ci?.Name || ci?.displayName || ci?.DisplayName)
+    .filter(Boolean);
+
+  const equipos = affectedNames.length > 0 ? affectedNames.join(', ') : '—';
+
+  // Tenant + problemId para abrir Dynatrace
+  const tenant = problem.tenant || ''; // ej. "htit12521"
+  const problemId = problem.problemId || problem.displayId || problem.id || '';
+  const dynatraceUrl =
+    tenant && problemId
+      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+      : null;
+
+  // ===== TCS / NO TCS robusto =====
+  // Acepta múltiples formatos desde el backend/DB
+  const isTcsFromObject = problem.jurisdiction?.isTcs;
+  const isTcsFromString =
+    typeof problem.juris === 'string'
+      ? problem.juris.toUpperCase() === 'TCS'
+      : (typeof problem.label === 'string'
+          ? problem.label.toUpperCase() === 'TCS'
+          : undefined);
+
+  const isTcs = (problem.isTcs ?? isTcsFromObject ?? isTcsFromString) ?? false;
+
+  const label =
+    problem.jurisdiction?.label ??
+    problem.label ??
+    (isTcs ? 'TCS' : 'NO TCS');
+
+  // ===== SLA / Timer visual =====
+  // Si tu cálculo de criticidad depende de la lista de equipos, se la pasamos.
+  const criticidad = calcularCriticidad(affectedCIArray || []);
+  const slaMinutes = getSlaMinutes(criticidad);
+
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const elapsedMinutes = Math.max(
+    0,
+    start ? (now - start) / 60000 : 0
+  );
+  const remainingMinutes = Math.max(
+    0,
+    Math.max(slaMinutes - elapsedMinutes, 0)
+  );
+  const percentRemaining = Math.min(
+    (remainingMinutes / (slaMinutes || 1)) * 100,
+    100
+  );
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const total = Math.floor(minutes * 60);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  };
+
+  // Deshabilitar botón si no hay usuario o URL
+  const disabled = !username || !dynatraceUrl;
+
+  return (
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderRadius: '12px',
+        padding: '1rem',
+        marginBottom: '1rem',
+        background: bgColor,
+        boxShadow: '0 4px 10px rgba(0,0,0,0.1)',
+      }}
+    >
+      {/* Info / Etiquetas */}
+      <div style={{ flex: 1, paddingLeft: '1rem' }}>
+        <div style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+          <span
+            style={{
+              padding: '0.25rem 0.5rem',
+              borderRadius: '999px',
+              fontSize: '0.8rem',
+              fontWeight: 700,
+              backgroundColor: isTcs ? '#1b5e20' : '#b71c1c',
+              color: '#fff',
+              marginRight: '0.5rem',
+            }}
+          >
+            {label}
+          </span>
+        </div>
+
+        <p style={{ margin: 0 }}><strong>Título:</strong> {title}</p>
+        <p style={{ margin: 0 }}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+        <p style={{ margin: 0 }}><strong>Impacto:</strong> {impactLevel}</p>
+        <p style={{ margin: 0 }}>
+          <strong>Inicio:</strong>{' '}
+          {start ? start.toLocaleString() : '—'}
+        </p>
+        <p style={{ margin: 0 }}><strong>Criticidad CI:</strong> {criticidad}</p>
+        <p style={{ margin: 0 }}><strong>Equipos afectados:</strong> {equipos}</p>
+        <p style={{ margin: 0 }}><strong>Ambiente:</strong> {environment}</p>
+      </div>
+
+      {/* Timer + botón */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>
+          {formatTime(remainingMinutes)}
+        </div>
+        <button
+          disabled={disabled}
+          onClick={() => !disabled && window.open(dynatraceUrl, '_blank', 'noopener,noreferrer')}
+          style={{
+            marginTop: '0.5rem',
+            padding: '0.5rem 1rem',
+            border: 'none',
+            borderRadius: '6px',
+            color: '#fff',
+            background: disabled ? '#808080' : buttonColor,
+            cursor: disabled ? 'not-allowed' : 'pointer',
+          }}
+          title={username ? 'Abrir en Dynatrace' : 'Ingresa tu usuario para habilitar'}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
+
 m
