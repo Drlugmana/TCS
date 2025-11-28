@@ -1,0 +1,157 @@
+// src/api/problems.js
+
+// ====== 0) CONFIG FECHA DE PRUEBA ======
+export const ONLY_DATE = "2025-11-25"; // <- cambia si quieres
+
+// ====== 1) BASE de la API (de .env) ======
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+
+// endpoint final
+const API = `${BASE}/api/Problems`;
+
+// ====== 2) Normalizador robusto ======
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // start/end
+    const startRaw =
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      null;
+
+    const endRaw =
+      p.endTime ??
+      p.endTimeUtc ??
+      p.EndTime ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      null;
+
+    // jurisdicción (varios posibles campos)
+    const jurisRaw =
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction?.Jurisdiction ??
+      p.Jurisdiction ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
+
+    const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+
+    const isTcs =
+      p.jurisdiction?.isTcs ??
+      (typeof juris === "string" ? juris === "TCS" : false) ??
+      false;
+
+    // ids/títulos
+    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
+    const title = p.title ?? p.shortDescription ?? "(sin título)";
+
+    // otros campos que usa tu ProblemCard
+    const severityLevel = p.severityLevel ?? p.severity ?? "";
+    const impactLevel = p.impactLevel ?? p.impact ?? "";
+    const environment = p.environment ?? p.environmentName ?? "";
+    const affectedCI =
+      p.affectedCI ??
+      p.affectedEntities ??
+      p.affectedEntitiesList ??
+      [];
+
+    const status = p.status ?? p.state ?? "";
+    const tenant = p.tenant ?? p.domain ?? "";
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+    };
+  });
+}
+
+// ====== 3) Fetch de UNA página ======
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+
+  const res = await fetch(url, {
+    headers: { accept: "application/json" },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  // puede venir array directo o envuelto
+  const json = await res.json();
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// ====== 4) Rango para un solo día local ======
+function getDayRange(dateStr /* YYYY-MM-DD */) {
+  // 00:00:00 y 23:59:59 LOCAL convertidos a ISO
+  const start = new Date(`${dateStr}T00:00:00`);
+  const end = new Date(`${dateStr}T23:59:59`);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+// ====== 5) Fetch histórico con paginado + onBatch ======
+export async function fetchAllProblems({
+  onlyDate = ONLY_DATE,
+  pageSize = 500,
+  maxPages = 40,
+  onBatch, // function (items) { ... } (opcional)
+  tcsFilter, // true -> solo TCS, false -> solo NO TCS, undefined -> todos
+} = {}) {
+  const { startIso, endIso } = getDayRange(onlyDate);
+
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
+    if (!batch.length) break;
+
+    // filtrar por TCS/NO TCS si lo piden
+    const filtered =
+      typeof tcsFilter === "boolean" ? batch.filter((x) => x.isTcs === tcsFilter) : batch;
+
+    if (onBatch) onBatch(filtered);
+    all = all.concat(filtered);
+
+    if (batch.length < pageSize) break; // última página
+  }
+
+  return all;
+}
+
+// Conveniencias
+export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
+
+export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
