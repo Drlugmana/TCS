@@ -1,0 +1,176 @@
+// src/api/problems.js
+// ===================================================
+// Cliente de API de Problemas + normalizador robusto
+// ===================================================
+
+// 1) BASE desde .env  (VITE_API_URL = https://tu-backend)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+if (!BASE) {
+  // No detenemos la app, pero dejamos un mensaje útil en consola
+  // y cualquier fetch fallará de forma explícita.
+  console.warn("[problems.js] Falta VITE_API_URL en tu .env");
+}
+const API = `${BASE}/api/Problems`;
+
+// ---------------------------------------------------
+// 2) Normalizador robusto
+// ---------------------------------------------------
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // --- fechas (buscamos en varias llaves posibles) ---
+    const startRaw =
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      null;
+
+    const endRaw =
+      p.endTime ??
+      p.endTimeUtc ??
+      p.EndTime ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      null;
+
+    // --- jurisdicción / TCS (varias formas que envía el backend) ---
+    const jurisRaw =
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction2?.Jurisdiction ??
+      p.Jurisdiction ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
+
+    const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+    const isTcs =
+      p.jurisdiction2?.isTcs ??
+      (typeof juris === "string" ? juris === "TCS" : false) ??
+      false;
+
+    // --- ids / títulos ---
+    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
+    const title = p.title ?? p.shortDescription ?? "(sin título)";
+
+    // --- otros campos usados por la UI ---
+    const severityLevel = p.severityLevel ?? p.severity ?? "";
+    const impactLevel = p.impactLevel ?? p.impact ?? "";
+    const environment = p.environment ?? p.environmentName ?? "";
+    const affectedCI = p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
+    const status = p.status ?? p.state ?? "";
+
+    // --- tenant / url para “Revisar problema” ---
+    const tenant = p.tenant ?? environment ?? "";
+    // Prioridad: si el backend ya manda una URL directa, úsala.
+    // Si no, fabricamos una con tenant + problemId (ajusta dominio si tu Dynatrace usa otro host).
+    const dynatraceUrl =
+      p.dynatraceUrl ??
+      p.url ??
+      (problemId && tenant
+        ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+        : null);
+
+    // === Objeto final homogeneizado ===
+    return {
+      ...p,
+
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+
+      tenant,
+      dynatraceUrl,
+
+      isTcs,
+      label: isTcs ? "TCS" : "NO TCS",
+
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+    };
+  });
+}
+
+// ---------------------------------------------------
+// 3) Traer UNA página del backend
+//    Soporta page/pageSize y (opcional) start/end ISO
+//    Además acepta diferentes envolturas de respuesta.
+// ---------------------------------------------------
+async function fetchPage(page = 1, size = 500, startIso, endIso) {
+  if (!BASE) throw new Error("ERROR: VITE_API_URL no configurada en .env");
+
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(page));
+  params.set("pageSize", String(size));
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} al obtener problemas:\n${txt}`);
+  }
+
+  const json = await res.json();
+
+  // La API puede devolver la lista en distintas llaves
+  const list =
+    Array.isArray(json)
+      ? json
+      : json?.results ||
+        json?.items ||
+        json?.data ||
+        json?.value ||
+        [];
+
+  return list;
+}
+
+// ---------------------------------------------------
+// 4) Traer TODO con paginación (y fechas opcionales)
+//    Limita páginas para evitar “rate limit” del túnel.
+// ---------------------------------------------------
+export async function fetchAllProblems({
+  pageSize = 500,
+  maxPages = 40,
+  startIso,   // ej: '2025-11-25T00:00:00.000Z'
+  endIso,     // ej: '2025-11-25T23:59:59.000Z'
+} = {}) {
+  let page = 1;
+  let all = [];
+
+  while (page <= maxPages) {
+    const batch = await fetchPage(page, pageSize, startIso, endIso);
+
+    if (!batch || batch.length === 0) break;
+
+    all = all.concat(batch);
+
+    // si la página vino incompleta, asumimos fin
+    if (batch.length < pageSize) break;
+
+    page++;
+  }
+
+  return normalize(all);
+}
+
+// ---------------------------------------------------
+// 5) Helper simple: rango de un solo día local a ISO
+// ---------------------------------------------------
+export function isoDayRangeLocal(y, m, d) {
+  // m = 1..12
+  const start = new Date(y, m - 1, d, 0, 0, 0, 0);
+  const end = new Date(y, m - 1, d, 23, 59, 59, 999);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
