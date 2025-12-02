@@ -1,1 +1,267 @@
-ñ
+
+
+// src/api/problems.js
+// Capa de datos con normalización robusta y helpers por pestaña.
+
+const BASE = (import.meta?.env?.VITE_API_URL || "").replace(/\/+$/, ""); // sin trailing /
+const PAGE_SIZE = 500;
+
+// --- 1) Normalizador robusto (acepta múltiples variantes de campos) ---
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // --- fechas (varias formas posibles) ---
+    const startRaw =
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      null;
+
+    const endRaw =
+      p.endTime ??
+      p.endTimeUtc ??
+      p.EndTime ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      null;
+
+    // --- jurisdicción / label (varios nombres) ---
+    const jurisRaw =
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction?.Jurisdiction ??
+      p.Jurisdiction ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
+
+    const juris =
+      typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+
+    // isTcs puede venir directo o lo inferimos por la cadena "TCS"
+    const isTcs =
+      p.isTcs ??
+      p.jurisdiction?.isTcs ??
+      (typeof juris === "string" ? juris === "TCS" : false);
+
+    // --- ids/títulos ---
+    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
+    const title = p.title ?? p.shortDescription ?? "(sin título)";
+
+    // --- otros campos usados por tu tarjeta ---
+    const severityLevel = p.severityLevel ?? p.severity ?? "";
+    const impactLevel = p.impactLevel ?? p.impact ?? "";
+    const environment = p.environment ?? p.environmentName ?? "";
+    const affectedCI =
+      p.affectedCI ??
+      p.affectedEntities ??
+      p.affectedEntitiesList ??
+      p.affectedCIs ??
+      [];
+
+    const status = p.status ?? p.state ?? "";
+    const tenant = p.tenant ?? ""; // si tu back lo envía
+
+    // URL directa si el back ya te la manda
+    const dynatraceUrl =
+      p.dynatraceUrl ??
+      p.problemUrl ??
+      p.url ??
+      null; // si no, la arma el ProblemCard con tenant+id
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+      dynatraceUrl,
+    };
+  });
+}
+
+// --- 2) Fetch de UNA página ---
+async function fetchProblemsPage({ pageNumber, start, end }) {
+  const url = new URL(`${BASE}/api/Problems`);
+  url.searchParams.set("pageNumber", String(pageNumber));
+  url.searchParams.set("pageSize", String(PAGE_SIZE));
+  if (start) url.searchParams.set("start", start);
+  if (end) url.searchParams.set("end", end);
+
+  const res = await fetch(url.toString(), { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url.toString()} :: ${txt}`);
+  }
+  const data = await res.json();
+  // data.items || data.data || array directo
+  const items = Array.isArray(data) ? data : (data.items ?? data.data ?? []);
+  return normalize(items);
+}
+
+// --- 3) Descarga TODAS las páginas (paginación defensiva) ---
+export async function fetchAllProblems({ start, end, maxPages = 50 }) {
+  const all = [];
+  let page = 1;
+
+  // corta si el backend devuelve página vacía
+  while (page <= maxPages) {
+    const chunk = await fetchProblemsPage({ pageNumber: page, start, end });
+    if (!chunk.length) break;
+    all.push(...chunk);
+    if (chunk.length < PAGE_SIZE) break; // última página
+    page += 1;
+  }
+
+  // orden por fecha de inicio más reciente
+  all.sort(
+    (a, b) =>
+      new Date(b.startTime ?? 0).getTime() - new Date(a.startTime ?? 0).getTime()
+  );
+  return all;
+}
+
+// --- 4) Helpers de pestañas ---
+const DAY = "2025-11-25"; // fijo, lo que pediste
+const RANGE = {
+  start: `${DAY}T00:00:00`,
+  end: `${DAY}T23:59:59`,
+};
+
+export async function fetchTcsProblems() {
+  const all = await fetchAllProblems(RANGE);
+  return all.filter((p) => p.isTcs === true);
+}
+
+export async function fetchOtherProblems() {
+  const all = await fetchAllProblems(RANGE);
+  return all.filter((p) => p.isTcs === false);
+}
+
+----
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchTcsProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+        const data = await fetchTcsProblems();
+        setProblems(data);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  if (loading) return <p style={{ textAlign: "center" }}>Cargando problemas TCS…</p>;
+  if (error)
+    return (
+      <p style={{ color: "crimson", whiteSpace: "pre-wrap" }}>
+        Error: {error}
+      </p>
+    );
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "1rem" }}>
+      <h2 style={{ marginTop: 0 }}>
+        Problemas TCS ({problems.length})
+      </h2>
+
+      <div style={{ margin: "0 0 1rem" }}>
+        <label style={{ marginRight: 8 }}>Usuario:</label>
+        <UsernameInput value={username} onChange={setUsername} placeholder="Tu usuario" />
+      </div>
+
+      {problems.length === 0 ? (
+        <p>No hay problemas TCS en el rango.</p>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || crypto.randomUUID()} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
+
+-----
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchOtherProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setLoading(true);
+        const data = await fetchOtherProblems();
+        setProblems(data);
+      } catch (err) {
+        setError(err.message || String(err));
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  if (loading) return <p style={{ textAlign: "center" }}>Cargando problemas de terceros…</p>;
+  if (error)
+    return (
+      <p style={{ color: "crimson", whiteSpace: "pre-wrap" }}>
+        Error: {error}
+      </p>
+    );
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "1rem" }}>
+      <h2 style={{ marginTop: 0 }}>
+        Problemas Otros ({problems.length})
+      </h2>
+
+      <div style={{ margin: "0 0 1rem" }}>
+        <label style={{ marginRight: 8 }}>Usuario:</label>
+        <UsernameInput value={username} onChange={setUsername} placeholder="Tu usuario" />
+      </div>
+
+      {problems.length === 0 ? (
+        <p>No hay problemas de terceros en el rango.</p>
+      ) : (
+        problems.map((p) => (
+          <ProblemCard key={p.problemId || crypto.randomUUID()} problem={p} username={username} />
+        ))
+      )}
+    </div>
+  );
+}
