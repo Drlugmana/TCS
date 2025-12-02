@@ -1,214 +1,86 @@
-// src/components/ProblemCard.jsx
-import React, { useEffect, useState } from "react";
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
 
-export default function ProblemCard({ problem, username }) {
-  if (!problem) return null;
-
-  const {
-    title,
-    severityLevel,
-    impactLevel,
-    startTime,
-    environment,
-    affectedCI = [],
-    label,
-    isTcs,
-    dynatraceUrl,
-  } = problem;
-
-  // Timer SLA “dummy” (si tienes util, puedes cambiarlo)
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  const start = startTime ? new Date(startTime) : null;
-  const minutes = start ? Math.max(0, Math.floor((now - start) / 60000)) : 0;
-  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
-  const mm = String(minutes % 60).padStart(2, "0");
-  const timeStr = `${hh}:${mm}:00`;
-
-  const equipos = (Array.isArray(affectedCI) ? affectedCI : [])
-    .map((ci) => ci?.name || ci?.Nombre || ci)
-    .filter(Boolean)
-    .join(", ");
-
-  const disabled = !username || !dynatraceUrl;
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem",
-        marginBottom: "1rem",
-        background: "#e89aa0",
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-      }}
-    >
-      {/* Izquierda: info */}
-      <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <div style={{ display: "flex", alignItems: "center", marginBottom: 8 }}>
-          <span
-            style={{
-              padding: "0.25rem 0.5rem",
-              borderRadius: 999,
-              fontSize: ".8rem",
-              fontWeight: 700,
-              backgroundColor: isTcs ? "#1b5e20" : "#b71c1c",
-              color: "#fff",
-              marginRight: ".5rem",
-            }}
-          >
-            {label || (isTcs ? "TCS" : "NO TCS")}
-          </span>
-        </div>
-
-        <p style={{ margin: 0 }}>
-          <strong>Título:</strong> {title}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Severidad Dynatrace:</strong> {severityLevel}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Impacto:</strong> {impactLevel}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Inicio:</strong>{" "}
-          {start ? start.toLocaleString() : "—"}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Equipos afectados:</strong> {equipos || "—"}
-        </p>
-      </div>
-
-      {/* Derecha: contador + botón */}
-      <div style={{ textAlign: "center", minWidth: 160 }}>
-        <div style={{ fontSize: "22px", fontWeight: "bold" }}>{timeStr}</div>
-        <button
-          disabled={disabled}
-          onClick={() => !disabled && window.open(dynatraceUrl, "_blank")}
-          style={{
-            marginTop: ".5rem",
-            padding: ".5rem 1rem",
-            border: "none",
-            borderRadius: "6px",
-            color: "#fff",
-            background: disabled ? "#808080" : "#444",
-            cursor: disabled ? "not-allowed" : "pointer",
-          }}
-          title={
-            !username
-              ? "Ingresa tu usuario para habilitar"
-              : !dynatraceUrl
-                ? "No hay URL del problema"
-                : "Abrir en Dynatrace"
-          }
-        >
-          Revisar problema
-        </button>
-      </div>
-    </div>
-  );
-}
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
+  </React.StrictMode>
+);
 
 ----
 
-// src/pages/TCSProblems.jsx
-import React, { useEffect, useState } from "react";
-import { fetchTcsProblems } from "../api/problems";
-import ProblemCard from "../components/ProblemCard";
-import UsernameInput from "../components/UsernameInput";
+import React from "react";
+import { Routes, Route, Navigate, Link } from "react-router-dom";
+import TCSProblems from "./pages/TCSProblems.jsx";
+import OtherProblems from "./pages/OtherProblems.jsx";
+import AllProblems from "./pages/AllProblems.jsx";
 
-export default function TCSProblems() {
-  const [username, setUsername] = useState("");
-  const [list, setList] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState(null);
-
-  // Ejemplo: sin filtro de fechas (o usa start/end si deseas)
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchTcsProblems(); // {start, end}
-        if (alive) setList(data);
-      } catch (e) {
-        setErr(e.message);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  if (loading) return <h2 style={{ textAlign: "center" }}>Cargando problemas TCS…</h2>;
-  if (err) return <h2 style={{ color: "red" }}>Error: {err}</h2>;
-
+function Nav() {
+  const linkStyle = { color: "#fff", textDecoration: "none", padding: "0.5rem 1rem" };
   return (
-    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
-      <h2>Problemas TCS ({list.length})</h2>
-      <div style={{ marginBottom: 12 }}>
-        <UsernameInput value={username} onChange={setUsername} />
+    <div style={{ background: "#1f2a38", padding: "0.5rem 0", marginBottom: "1rem" }}>
+      <div style={{ maxWidth: 900, margin: "0 auto", display: "flex", gap: 12 }}>
+        <Link to="/tcs" style={linkStyle}>TCS</Link>
+        <Link to="/otros" style={linkStyle}>Otros</Link>
+        <Link to="/todos" style={linkStyle}>Todos</Link>
       </div>
-      {list.length === 0 ? (
-        <p>No hay problemas TCS.</p>
-      ) : (
-        list.map((p) => <ProblemCard key={p.problemId || p.id} problem={p} username={username} />)
-      )}
     </div>
   );
+}
+
+export default function App() {
+  return (
+    <div>
+      <Nav />
+      <Routes>
+        <Route path="/" element={<Navigate to="/tcs" replace />} />
+        <Route path="/tcs" element={<TCSProblems />} />
+        <Route path="/otros" element={<OtherProblems />} />
+        <Route path="/todos" element={<AllProblems />} />
+        {/* 404 controlado */}
+        <Route path="*" element={<div style={{ padding: 24 }}>Ruta no encontrada</div>} />
+      </Routes>
+    </div>
+  );
+}
+
+
+---
+
+import React from "react";
+
+export default class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+  static getDerivedStateFromError(err) {
+    return { hasError: true, error: err };
+  }
+  componentDidCatch(error, info) {
+    // Muestra en consola para depurar
+    console.error("[ErrorBoundary]", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: "2rem" }}>
+          <h2 style={{ color: "crimson" }}>Se produjo un error en la aplicación</h2>
+          <pre style={{ whiteSpace: "pre-wrap", color: "#111", background:"#f6f6f6", padding:"1rem", borderRadius:8 }}>
+            {String(this.state.error?.stack || this.state.error || "Error")}
+          </pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 ------
-
-
-// src/pages/OtherProblems.jsx
-import React, { useEffect, useState } from "react";
-import { fetchOtherProblems } from "../api/problems";
-import ProblemCard from "../components/ProblemCard";
-import UsernameInput from "../components/UsernameInput";
-
-export default function OtherProblems() {
-  const [username, setUsername] = useState("");
-  const [list, setList] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [err, setErr] = useState(null);
-
-  useEffect(() => {
-    let alive = true;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchOtherProblems(); // {start, end}
-        if (alive) setList(data);
-      } catch (e) {
-        setErr(e.message);
-      } finally {
-        if (alive) setLoading(false);
-      }
-    })();
-    return () => { alive = false; };
-  }, []);
-
-  if (loading) return <h2 style={{ textAlign: "center" }}>Cargando problemas NO TCS…</h2>;
-  if (err) return <h2 style={{ color: "red" }}>Error: {err}</h2>;
-
-  return (
-    <div style={{ maxWidth: 900, margin: "0 auto", padding: "1rem" }}>
-      <h2>Problemas Otros ({list.length})</h2>
-      <div style={{ marginBottom: 12 }}>
-        <UsernameInput value={username} onChange={setUsername} />
-      </div>
-      {list.length === 0 ? (
-        <p>No hay problemas de terceros.</p>
-      ) : (
-        list.map((p) => <ProblemCard key={p.problemId || p.id} problem={p} username={username} />)
-      )}
-    </div>
-  );
-}
