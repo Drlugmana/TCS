@@ -1,60 +1,63 @@
 // src/api/problems.js
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/,"");
-const PAGE_SIZE = 250;          // baja si tu túnel se ahoga
-const MAX_PAGES = 80;           // ajusta a tu volumen
-const REQUEST_TIMEOUT_MS = 20000;
+// Trae problemas paginando y normaliza campos para el UI
 
-function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
+const DYN_TENANT = (import.meta.env.VITE_DYNATRACE_TENANT || "").replace(/\/$/, "");
 
-async function fetchWithTimeout(url, options={}, ms=REQUEST_TIMEOUT_MS){
-  const c = new AbortController();
-  const id = setTimeout(()=>c.abort(new Error("timeout")), ms);
-  try{
-    const res = await fetch(url, { ...options, signal: c.signal });
-    return res;
-  } finally {
-    clearTimeout(id);
-  }
-}
+// ---------- Normalizador robusto ----------
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
 
-// Normalizador robusto (soporta campos variados)
-function normalize(list){
-  if(!Array.isArray(list)) return [];
-  return list.map(p=>{
+  return list.map((p) => {
+    // Fechas (acepta múltiples variantes)
     const startRaw =
-      p.startTime ?? p.startTimeUtc ?? p.StartTime ?? p.StartTimeUtc ?? p.start_date ?? null;
-    const endRaw =
-      p.endTime ?? p.endTimeUtc ?? p.EndTime ?? p.EndTimeUtc ?? p.end_date ?? null;
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      null;
 
+    const endRaw =
+      p.endTime ??
+      p.endTimeUtc ??
+      p.EndTime ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      null;
+
+    // Jurisdicción / etiqueta
     const jurisRaw =
-      p.jurisdiction?.label ?? p.jurisdiction?.name ??
-      p.jurisdiction2?.Jurisdiction ?? p.Jurisdiction ??
-      p.jurisdiction ?? p.label ?? p.Label ?? "";
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction2?.Jurisdiction ??
+      p.Jurisdiction ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
 
     const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
-    const isTcs =
-      p.jurisdiction2?.isTcs ??
-      (typeof juris === "string" ? juris === "TCS" : false) ?? false;
+    const isTcs = p.jurisdiction?.isTcs ??
+                  (typeof juris === "string" ? juris === "TCS" : false);
 
+    // Ids y título
     const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
-    const title     = p.title ?? p.shortDescription ?? "(sin título)";
-    const severityLevel = p.severityLevel ?? p.severity ?? "";
-    const impactLevel   = p.impactLevel ?? p.impact ?? "";
-    const environment   = p.environment ?? p.environmentName ?? "";
-    const affectedCI    = p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
+    const title = p.title ?? p.shortDescription ?? "(sin título)";
 
-    // intentar construir URL de Dynatrace
-    let dynatraceUrl = p.url ?? p.dynatraceUrl ?? null;
-    if(!dynatraceUrl && (p.problemId || p.displayId || p.id)){
-      const pid = problemId;
-      const tenant =
-        p.tenant ||
-        p.dynatraceTenant ||
-        (typeof p.environmentUrl === "string" ? new URL(p.environmentUrl).host : null);
-      if(tenant && pid){
-        dynatraceUrl = `https://${tenant}/#problems/problemdetails;pid=${encodeURIComponent(pid)}`;
-      }
-    }
+    // Otros campos usados por el card
+    const severityLevel = p.severityLevel ?? p.severity ?? "";
+    const impactLevel   = p.impactLevel   ?? p.impact   ?? "";
+    const environment   = p.environment   ?? p.environmentName ?? ""; // "Productivo"/"No productivo"
+    const affectedCI    = p.affectedCI    ?? p.affectedEntitiesList ?? [];
+
+    const status = p.status ?? p.state ?? "";
+
+    // URL de Dynatrace (si tenemos tenant e id)
+    const dynatraceUrl =
+      DYN_TENANT && problemId
+        ? `${DYN_TENANT}/#problems/problemdetails;pid=${encodeURIComponent(problemId)}`
+        : null;
 
     return {
       ...p,
@@ -64,170 +67,156 @@ function normalize(list){
       impactLevel,
       environment,
       affectedCI,
-      status: p.status ?? p.state ?? "",
-      tenant: p.tenant ?? "",
+      status,
       label: isTcs ? "TCS" : "NO TCS",
       isTcs,
       startTime: startRaw ? new Date(startRaw).toISOString() : null,
-      endTime:   endRaw ? new Date(endRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
       dynatraceUrl,
     };
   });
 }
 
-// Descarga paginada (confecciona query con fechas y jurisdicción)
-async function fetchPage({ pageNumber, pageSize, start, end, jurisdiction }){
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize",   String(pageSize));
-  if(start) params.set("start", new Date(start).toISOString());
-  if(end)   params.set("end",   new Date(end).toISOString());
-  if(jurisdiction) params.set("jurisdiction", jurisdiction); // "TCS" o "NOTCS"
-
-  const url = `${BASE}/api/Problems?${params.toString()}`;
-  console.log("[GET]", url);
-
-  const res = await fetchWithTimeout(url);
-  if(!res.ok){
-    const txt = await res.text().catch(()=>String(res.status));
-    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+// ---------- Paginación ----------
+async function fetchPage({ pageNumber = 1, pageSize = 500 }) {
+  const url = `${API_BASE}/api/Problems?pageNumber=${pageNumber}&pageSize=${pageSize}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url} :: ${txt || res.statusText}`);
   }
-  const json = await res.json().catch(()=>[]);
-  return normalize(json);
+  return res.json();
 }
 
-export async function fetchProblemsByJuris({ isTcs, start, end }){
-  const results = [];
-  const jurisParam = isTcs ? "TCS" : "NO TCS";
+export async function fetchAllProblems({ pageSize = 500 } = {}) {
+  if (!API_BASE) throw new Error("VITE_API_URL no está configurado");
+  const all = [];
+  let page = 1;
 
-  for(let page=1; page<=MAX_PAGES; page++){
-    let chunk = [];
-    try{
-      chunk = await fetchPage({
-        pageNumber: page,
-        pageSize: PAGE_SIZE,
-        start, end,
-        jurisdiction: jurisParam
-      });
-    }catch(err){
-      console.error("[fetchProblemsByJuris] Error página", page, err);
-      // si el túnel rate-limitea, espera un poco y reintenta una vez
-      await sleep(800);
-      throw err;
-    }
-
-    if(!chunk.length){
-      console.log("[fetchProblemsByJuris] fin en página", page);
-      break;
-    }
-    results.push(...chunk);
-
-    if(chunk.length < PAGE_SIZE){
-      break; // última página
-    }
+  while (true) {
+    const data = await fetchPage({ pageNumber: page, pageSize });
+    const items = Array.isArray(data) ? data : (data?.items ?? []);
+    all.push(...items);
+    if (!Array.isArray(items) || items.length < pageSize) break; // última página
+    page += 1;
+    // pequeño respiro para no saturar el túnel/servidor
+    await new Promise(r => setTimeout(r, 80));
   }
 
-  console.log(`[fetchProblemsByJuris] total ${jurisParam}:`, results.length);
-  return results;
+  return normalize(all);
 }
 
-----
+// Helpers específicos
+export async function fetchTcsProblems() {
+  const all = await fetchAllProblems();
+  return all.filter(p => p.isTcs);
+}
 
+export async function fetchOtherProblems() {
+  const all = await fetchAllProblems();
+  return all.filter(p => !p.isTcs);
+}
+
+---
+
+// src/pages/TCSProblems.jsx
 import React, { useEffect, useState } from "react";
-import { fetchProblemsByJuris } from "../api/problems";
+import { fetchTcsProblems } from "../api/problems";
 import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-export default function TCSProblems(){
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]   = useState(null);
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
   const [username, setUsername] = useState("");
 
-  useEffect(()=>{
+  useEffect(() => {
     let mounted = true;
-    (async ()=>{
-      setLoading(true); setError(null);
-      try{
-        // FECHA FIJA 25/11/2025 como pediste:
-        const start = new Date("2025-11-25T00:00:00");
-        const end   = new Date("2025-11-25T23:59:59");
-        const data  = await fetchProblemsByJuris({ isTcs:true, start, end });
-        if(mounted) setItems(data);
-      }catch(err){
-        console.error("[TCSProblems] error", err);
-        if(mounted) setError(err.message || String(err));
-      }finally{
-        if(mounted) setLoading(false);
+    (async () => {
+      try {
+        const data = await fetchTcsProblems();
+        if (!mounted) return;
+        // Orden descendente por fecha de inicio
+        data.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+        setProblems(data);
+      } catch (err) {
+        if (!mounted) return;
+        setError(err.message || String(err));
+      } finally {
+        if (mounted) setLoading(false);
       }
     })();
-    return ()=>{ mounted=false; };
-  },[]);
+    return () => { mounted = false; };
+  }, []);
 
-  if(loading) return <p style={{textAlign:"center"}}>Cargando problemas TCS…</p>;
-  if(error)   return <p style={{color:"crimson",whiteSpace:"pre-wrap"}}>Error: {error}</p>;
-  if(!items.length) return <p>No hay problemas TCS en el rango.</p>;
+  if (loading) return <p style={{ textAlign: "center" }}>Cargando problemas TCS…</p>;
+  if (error)   return <p style={{ color: "crimson" }}>Error: {error}</p>;
 
   return (
-    <div>
-      <h2>Problemas TCS ({items.length})</h2>
-      <div style={{margin:"8px 0"}}>
-        Usuario:{" "}
-        <input value={username} onChange={e=>setUsername(e.target.value)} />
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS ({problems.length})</h2>
+      <div style={{ marginBottom: "0.75rem" }}>
+        <label style={{ marginRight: 8 }}>Usuario: </label>
+        <UsernameInput value={username} onChange={setUsername} />
       </div>
 
-      {items.map(p=>(
-        <ProblemCard key={p.problemId || p.id} problem={p} username={username}/>
+      {problems.length === 0 && <p>No hay problemas TCS en el rango.</p>}
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
-----
+---
 
+// src/pages/OtherProblems.jsx
 import React, { useEffect, useState } from "react";
-import { fetchProblemsByJuris } from "../api/problems";
+import { fetchOtherProblems } from "../api/problems";
 import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-export default function TCSProblems(){
-  const [items, setItems] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError]   = useState(null);
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading]   = useState(true);
+  const [error, setError]       = useState(null);
   const [username, setUsername] = useState("");
 
-  useEffect(()=>{
+  useEffect(() => {
     let mounted = true;
-    (async ()=>{
-      setLoading(true); setError(null);
-      try{
-        // FECHA FIJA 25/11/2025 como pediste:
-        const start = new Date("2025-11-25T00:00:00");
-        const end   = new Date("2025-11-25T23:59:59");
-        const data  = await fetchProblemsByJuris({ isTcs:true, start, end });
-        if(mounted) setItems(data);
-      }catch(err){
-        console.error("[TCSProblems] error", err);
-        if(mounted) setError(err.message || String(err));
-      }finally{
-        if(mounted) setLoading(false);
+    (async () => {
+      try {
+        const data = await fetchOtherProblems();
+        if (!mounted) return;
+        data.sort((a, b) => new Date(b.startTime) - new Date(a.startTime));
+        setProblems(data);
+      } catch (err) {
+        if (!mounted) return;
+        setError(err.message || String(err));
+      } finally {
+        if (mounted) setLoading(false);
       }
     })();
-    return ()=>{ mounted=false; };
-  },[]);
+    return () => { mounted = false; };
+  }, []);
 
-  if(loading) return <p style={{textAlign:"center"}}>Cargando problemas TCS…</p>;
-  if(error)   return <p style={{color:"crimson",whiteSpace:"pre-wrap"}}>Error: {error}</p>;
-  if(!items.length) return <p>No hay problemas TCS en el rango.</p>;
+  if (loading) return <p style={{ textAlign: "center" }}>Cargando problemas de terceros…</p>;
+  if (error)   return <p style={{ color: "crimson" }}>Error: {error}</p>;
 
   return (
-    <div>
-      <h2>Problemas TCS ({items.length})</h2>
-      <div style={{margin:"8px 0"}}>
-        Usuario:{" "}
-        <input value={username} onChange={e=>setUsername(e.target.value)} />
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros ({problems.length})</h2>
+      <div style={{ marginBottom: "0.75rem" }}>
+        <label style={{ marginRight: 8 }}>Usuario: </label>
+        <UsernameInput value={username} onChange={setUsername} />
       </div>
 
-      {items.map(p=>(
-        <ProblemCard key={p.problemId || p.id} problem={p} username={username}/>
+      {problems.length === 0 && <p>No hay problemas de terceros en el rango.</p>}
+
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.id} problem={p} username={username} />
       ))}
     </div>
   );
