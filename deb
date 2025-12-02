@@ -1,42 +1,43 @@
 // src/api/problems.js
-// ===================================================
-// Cliente de API de Problemas + normalizador robusto
-// ===================================================
+const API_BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, ""); // sin slash final
+const PROBLEMS_PATH = "/api/Problems";
+const PAGE_SIZE = 500;              // ajusta si tu API permite más/menos
+const MAX_PAGES = 200;              // tope de seguridad
 
-// 1) BASE desde .env  (VITE_API_URL = https://tu-backend)
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/$/, "");
-if (!BASE) {
-  // No detenemos la app, pero dejamos un mensaje útil en consola
-  // y cualquier fetch fallará de forma explícita.
-  console.warn("[problems.js] Falta VITE_API_URL en tu .env");
+// ===== 1) URL builder =====
+function buildQueryUrl({ pageNumber, pageSize, start, end }) {
+  const u = new URL(API_BASE + PROBLEMS_PATH);
+  u.searchParams.set("pageNumber", String(pageNumber));
+  u.searchParams.set("pageSize", String(pageSize));
+  if (start) u.searchParams.set("start", new Date(start).toISOString());
+  if (end)   u.searchParams.set("end",   new Date(end).toISOString());
+  return u.toString();
 }
-const API = `${BASE}/api/Problems`;
 
-// ---------------------------------------------------
-// 2) Normalizador robusto
-// ---------------------------------------------------
+// ===== 2) Normalizador robusto =====
+function buildDynatraceUrl({ problemId, tenant, href }) {
+  // Si backend ya entrega un link directo
+  if (typeof href === "string" && href.startsWith("http")) return href;
+
+  // Si tenemos tenant + pid, construimos
+  if (!problemId || !tenant) return "";
+  const clean = String(tenant).trim().replace(/\/+$/, "");
+  const base = clean.startsWith("http") ? clean : `https://${clean}`;
+  return `${base}/#problems/problemdetails;pid=${problemId}`;
+}
+
 function normalize(list) {
   if (!Array.isArray(list)) return [];
 
   return list.map((p) => {
-    // --- fechas (buscamos en varias llaves posibles) ---
+    // Fechas (varias variantes)
     const startRaw =
-      p.startTime ??
-      p.startTimeUtc ??
-      p.StartTime ??
-      p.StartTimeUtc ??
-      p.start_date ??
-      null;
+      p.startTime ?? p.startTimeUtc ?? p.StartTime ?? p.StartTimeUtc ?? p.start_date ?? null;
 
     const endRaw =
-      p.endTime ??
-      p.endTimeUtc ??
-      p.EndTime ??
-      p.EndTimeUtc ??
-      p.end_date ??
-      null;
+      p.endTime ?? p.endTimeUtc ?? p.EndTime ?? p.EndTimeUtc ?? p.end_date ?? null;
 
-    // --- jurisdicción / TCS (varias formas que envía el backend) ---
+    // Jurisdicción -> TCS/NO TCS
     const jurisRaw =
       p.jurisdiction?.label ??
       p.jurisdiction?.name ??
@@ -48,37 +49,26 @@ function normalize(list) {
       "";
 
     const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
-    const isTcs =
-      p.jurisdiction2?.isTcs ??
-      (typeof juris === "string" ? juris === "TCS" : false) ??
-      false;
+    const isTcs = p.jurisdiction?.isTcs ?? (juris === "TCS");
 
-    // --- ids / títulos ---
-    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
-    const title = p.title ?? p.shortDescription ?? "(sin título)";
-
-    // --- otros campos usados por la UI ---
+    // Campos clave que usa la tarjeta
+    const problemId     = p.problemId ?? p.displayId ?? p.id ?? "";
+    const title         = p.title ?? p.shortDescription ?? "(sin título)";
     const severityLevel = p.severityLevel ?? p.severity ?? "";
-    const impactLevel = p.impactLevel ?? p.impact ?? "";
-    const environment = p.environment ?? p.environmentName ?? "";
-    const affectedCI = p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
-    const status = p.status ?? p.state ?? "";
+    const impactLevel   = p.impactLevel ?? p.impact ?? "";
+    const environment   = p.environment ?? p.environmentName ?? "";
+    const affectedCI    = p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
+    const status        = p.status ?? p.state ?? "";
+    const tenant        = p.tenant ?? p.environmentTenant ?? p.dynatraceTenant ?? "";
 
-    // --- tenant / url para “Revisar problema” ---
-    const tenant = p.tenant ?? environment ?? "";
-    // Prioridad: si el backend ya manda una URL directa, úsala.
-    // Si no, fabricamos una con tenant + problemId (ajusta dominio si tu Dynatrace usa otro host).
-    const dynatraceUrl =
-      p.dynatraceUrl ??
-      p.url ??
-      (problemId && tenant
-        ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
-        : null);
+    // Posibles links directos del backend
+    const href =
+      p.problemUrl ?? p.url ?? p.link ?? (Array.isArray(p.links) ? p.links[0]?.href : "");
 
-    // === Objeto final homogeneizado ===
+    const dynatraceUrl = buildDynatraceUrl({ problemId, tenant, href });
+
     return {
       ...p,
-
       problemId,
       title,
       severityLevel,
@@ -86,91 +76,47 @@ function normalize(list) {
       environment,
       affectedCI,
       status,
-
       tenant,
-      dynatraceUrl,
-
-      isTcs,
       label: isTcs ? "TCS" : "NO TCS",
-
+      isTcs,
       startTime: startRaw ? new Date(startRaw).toISOString() : null,
-      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+      endTime:   endRaw   ? new Date(endRaw).toISOString()   : null,
+      dynatraceUrl,
     };
   });
 }
 
-// ---------------------------------------------------
-// 3) Traer UNA página del backend
-//    Soporta page/pageSize y (opcional) start/end ISO
-//    Además acepta diferentes envolturas de respuesta.
-// ---------------------------------------------------
-async function fetchPage(page = 1, size = 500, startIso, endIso) {
-  if (!BASE) throw new Error("ERROR: VITE_API_URL no configurada en .env");
-
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(page));
-  params.set("pageSize", String(size));
-  if (startIso) params.set("start", startIso);
-  if (endIso) params.set("end", endIso);
-
-  const url = `${API}?${params.toString()}`;
-
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} al obtener problemas:\n${txt}`);
-  }
-
-  const json = await res.json();
-
-  // La API puede devolver la lista en distintas llaves
-  const list =
-    Array.isArray(json)
-      ? json
-      : json?.results ||
-        json?.items ||
-        json?.data ||
-        json?.value ||
-        [];
-
-  return list;
+// ===== 3) Fetch con paginación =====
+async function fetchPage({ pageNumber, pageSize, start, end }) {
+  const url = buildQueryUrl({ pageNumber, pageSize, start, end });
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
+  const data = await res.json();
+  return Array.isArray(data) ? data : (data?.items ?? []); // soporta formato { items: [] }
 }
 
-// ---------------------------------------------------
-// 4) Traer TODO con paginación (y fechas opcionales)
-//    Limita páginas para evitar “rate limit” del túnel.
-// ---------------------------------------------------
-export async function fetchAllProblems({
-  pageSize = 500,
-  maxPages = 40,
-  startIso,   // ej: '2025-11-25T00:00:00.000Z'
-  endIso,     // ej: '2025-11-25T23:59:59.000Z'
-} = {}) {
+async function fetchAllPages({ start, end }) {
   let page = 1;
-  let all = [];
-
-  while (page <= maxPages) {
-    const batch = await fetchPage(page, pageSize, startIso, endIso);
-
-    if (!batch || batch.length === 0) break;
-
-    all = all.concat(batch);
-
-    // si la página vino incompleta, asumimos fin
-    if (batch.length < pageSize) break;
-
-    page++;
+  const out = [];
+  for (; page <= MAX_PAGES; page++) {
+    const items = await fetchPage({ pageNumber: page, pageSize: PAGE_SIZE, start, end });
+    if (!items.length) break;
+    out.push(...items);
   }
-
-  return normalize(all);
+  return normalize(out);
 }
 
-// ---------------------------------------------------
-// 5) Helper simple: rango de un solo día local a ISO
-// ---------------------------------------------------
-export function isoDayRangeLocal(y, m, d) {
-  // m = 1..12
-  const start = new Date(y, m - 1, d, 0, 0, 0, 0);
-  const end = new Date(y, m - 1, d, 23, 59, 59, 999);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
+// ===== 4) Helpers por pestaña =====
+export async function fetchTcsProblems({ start, end } = {}) {
+  const all = await fetchAllPages({ start, end });
+  return all.filter((p) => p.isTcs);
+}
+
+export async function fetchOtherProblems({ start, end } = {}) {
+  const all = await fetchAllPages({ start, end });
+  return all.filter((p) => !p.isTcs);
+}
+
+export async function fetchAllProblems({ start, end } = {}) {
+  return fetchAllPages({ start, end });
 }
