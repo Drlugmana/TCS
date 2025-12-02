@@ -1,0 +1,547 @@
+
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/dynatrace-icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DT Problems Viewer</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+-------
+
+VITE_API_URL=https://<tu-devtunnel-o-servidor>
+
+-----
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import { BrowserRouter } from "react-router-dom";
+import App from "./App.jsx";
+import ErrorBoundary from "./components/ErrorBoundary.jsx";
+import "./App.css";
+
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <React.StrictMode>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </ErrorBoundary>
+  </React.StrictMode>
+);
+
+------
+
+import React from "react";
+import { Routes, Route, NavLink, Navigate } from "react-router-dom";
+import TCSProblems from "./pages/TCSProblems.jsx";
+import OtherProblems from "./pages/OtherProblems.jsx";
+import MockProblems from "./pages/MockProblems.jsx";
+import AllProblems from "./pages/AllProblems.jsx";
+
+function Navbar() {
+  const linkStyle = ({ isActive }) => ({
+    padding: "0.5rem 1rem",
+    borderRadius: "8px",
+    color: "#fff",
+    textDecoration: "none",
+    background: isActive ? "#2a3240" : "transparent",
+  });
+
+  return (
+    <div
+      style={{
+        background: "#1f2633",
+        color: "#fff",
+        padding: "0.5rem",
+        display: "flex",
+        gap: "1rem",
+        alignItems: "center",
+      }}
+    >
+      <NavLink to="/tcs" style={linkStyle}>
+        TCS
+      </NavLink>
+      <NavLink to="/otros" style={linkStyle}>
+        Otros
+      </NavLink>
+      <NavLink to="/mock" style={linkStyle}>
+        Mock
+      </NavLink>
+      <NavLink to="/todos" style={linkStyle}>
+        Todos
+      </NavLink>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <>
+      <Navbar />
+      <div style={{ maxWidth: 1000, margin: "1rem auto", padding: "1rem" }}>
+        <Routes>
+          <Route path="/" element={<Navigate to="/tcs" replace />} />
+          <Route path="/tcs" element={<TCSProblems />} />
+          <Route path="/otros" element={<OtherProblems />} />
+          <Route path="/mock" element={<MockProblems />} />
+          <Route path="/todos" element={<AllProblems />} />
+          <Route path="*" element={<div>404</div>} />
+        </Routes>
+      </div>
+    </>
+  );
+}
+
+----
+
+import React from "react";
+
+export default class ErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { hasError: false, error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("[ErrorBoundary]", error, info);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div style={{ padding: "2rem" }}>
+          <h2 style={{ color: "crimson" }}>⚠ Error en la aplicación</h2>
+          <pre>{String(this.state.error)}</pre>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+-----
+
+import React from "react";
+
+export default function UsernameInput({ value, onChange }) {
+  return (
+    <div>
+      <label>Usuario:&nbsp;</label>
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder="Tu usuario"
+      />
+    </div>
+  );
+}
+
+------
+
+import React, { useState, useEffect } from "react";
+
+export default function ProblemCard({ problem, username }) {
+  if (!problem) return null;
+
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    environment,
+    affectedCI = [],
+    label,
+    isTcs,
+    dynatraceUrl,
+  } = problem;
+
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  const start = startTime ? new Date(startTime) : null;
+  const minutes = start ? Math.max(0, Math.floor((now - start) / 60000)) : 0;
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+
+  const equipos = (Array.isArray(affectedCI) ? affectedCI : [])
+    .map((ci) => ci?.name || ci)
+    .filter(Boolean)
+    .join(", ");
+
+  const disabled = !username || !dynatraceUrl;
+
+  return (
+    <div
+      style={{
+        background: "#f4bcbc",
+        borderRadius: 12,
+        padding: 16,
+        marginBottom: 12,
+        boxShadow: "0 3px 8px rgba(0,0,0,0.1)",
+      }}
+    >
+      <div style={{ marginBottom: 8 }}>
+        <span
+          style={{
+            background: isTcs ? "#1b5e20" : "#b71c1c",
+            color: "#fff",
+            padding: "4px 8px",
+            borderRadius: 8,
+            fontSize: 12,
+            fontWeight: 700,
+          }}
+        >
+          {label}
+        </span>
+      </div>
+
+      <p><strong>Título:</strong> {title}</p>
+      <p><strong>Severidad:</strong> {severityLevel}</p>
+      <p><strong>Impacto:</strong> {impactLevel}</p>
+      <p><strong>Inicio:</strong> {start ? start.toLocaleString() : "—"}</p>
+      <p><strong>Equipos:</strong> {equipos || "—"}</p>
+
+      <div style={{ textAlign: "center", marginTop: 8 }}>
+        <div style={{ fontSize: 20, fontWeight: "bold" }}>
+          {hh}:{mm}:00
+        </div>
+        <button
+          onClick={() => window.open(dynatraceUrl, "_blank")}
+          disabled={disabled}
+          style={{
+            marginTop: 8,
+            background: disabled ? "gray" : "#333",
+            color: "#fff",
+            padding: "6px 12px",
+            border: "none",
+            borderRadius: 6,
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
+
+-----
+
+body {
+  font-family: Arial, sans-serif;
+  background: #fafafa;
+  margin: 0;
+  padding: 0;
+}
+h2 {
+  color: #222;
+}
+
+----
+
+// src/api/problems.js
+// Cliente y normalizador de problemas para DT Problems Viewer
+
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+
+const PAGE_SIZE = 500;      // ajusta si tu API lo permite
+const MAX_PAGES = 40;       // límite de seguridad (500 * 40 = 20.000 ítems)
+
+// ---------- Utilidades ----------
+
+function safeDate(v) {
+  // Acepta string, número (epoch), o Date; retorna ISO o null
+  if (!v && v !== 0) return null;
+  try {
+    if (v instanceof Date) return v.toISOString();
+    // algunos backends mandan "2025-11-25 09:14:00" sin zona
+    const d = new Date(v);
+    if (isNaN(d.getTime())) return null;
+    return d.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+function firstTruthy(obj, keys, fallback = null) {
+  for (const k of keys) {
+    const v = obj?.[k];
+    if (v !== undefined && v !== null && v !== "") return v;
+  }
+  return fallback;
+}
+
+function buildDynatraceUrl(tenant, problemId, rawCandidate) {
+  // Prioridad: url ya lista -> tenant + pid -> imposible
+  if (typeof rawCandidate === "string" && rawCandidate.includes("#problems/")) {
+    return rawCandidate;
+  }
+  if (!problemId) return null;
+  // tenant: e.g. mytenant.live.dynatrace.com
+  if (tenant && /^https?:\/\//i.test(tenant)) {
+    // si ya vino como https://tenant/
+    return `${tenant.replace(/\/+$/, "")}/#problems/problemdetails;pid=${problemId}`;
+  }
+  if (tenant && /\./.test(tenant)) {
+    return `https://${tenant.replace(/\/+$/, "")}/#problems/problemdetails;pid=${problemId}`;
+  }
+  // si no hay tenant pero el backend expone un "baseUrl" o similar
+  const base = firstTruthy(
+    { baseUrl: rawCandidate, tenant },
+    ["baseUrl", "tenant"],
+    null
+  );
+  if (base) {
+    return `${String(base).replace(/\/+$/, "")}/#problems/problemdetails;pid=${problemId}`;
+  }
+  return null;
+}
+
+// ---------- Normalizador ----------
+
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // —— fechas ——
+    const startRaw = firstTruthy(p, [
+      "startTime",
+      "startTimeUtc",
+      "StartTime",
+      "StartTimeUtc",
+      "start_date",
+      "StartDate",
+    ]);
+    const endRaw = firstTruthy(p, [
+      "endTime",
+      "endTimeUtc",
+      "EndTime",
+      "EndTimeUtc",
+      "end_date",
+      "EndDate",
+    ]);
+
+    // —— jurisdicción / etiqueta (TCS vs NO TCS) ——
+    const jurisRaw = firstTruthy(p, [
+      "jurisdiction2.label",
+      "jurisdiction2.name",
+      "jurisdiction2.Jurisdiction",
+      "Jurisdiction2",
+      "jurisdiction",
+      "Jurisdiction",
+      "label",
+      "Label",
+    ]);
+    const juris =
+      typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+    const isTcs = p?.jurisdiction2?.isTcs ?? (juris === "TCS");
+
+    // —— id / título / severidad / impacto / ambiente / equipos ——
+    const problemId = firstTruthy(p, ["problemId", "displayId", "id"]);
+    const title = firstTruthy(p, ["title", "shortDescription"], "(sin título)");
+    const severityLevel = firstTruthy(p, ["severityLevel", "severity"], "");
+    const impactLevel = firstTruthy(p, ["impactLevel", "impact"], "");
+    const environment = firstTruthy(p, ["environment", "environmentName"], "");
+    const affectedCI =
+      p?.affectedCI ??
+      p?.affectedEntities ??
+      p?.affectedEntitiesList ??
+      [];
+
+    // —— tenant y/o url cruda si ya viene armada ——
+    const tenant = firstTruthy(p, ["tenant", "Tenant", "tenantUrl"]);
+    const rawUrl = firstTruthy(p, ["url", "problemUrl", "ProblemUrl"]);
+    const dynatraceUrl = buildDynatraceUrl(tenant, problemId, rawUrl);
+
+    // —— estado (opcional) ——
+    const status = firstTruthy(p, ["status", "state"], "");
+
+    return {
+      ...p, // conserva todo por si algo necesitas luego
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,            // útil para depurar
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+      startTime: safeDate(startRaw),
+      endTime: safeDate(endRaw),
+      dynatraceUrl,      // <—— el botón usa esto
+    };
+  });
+}
+
+function sortByStartDesc(list) {
+  return [...list].sort((a, b) => {
+    const da = a.startTime ? Date.parse(a.startTime) : 0;
+    const db = b.startTime ? Date.parse(b.startTime) : 0;
+    return db - da;
+  });
+}
+
+// ---------- Fetch (paginado robusto) ----------
+
+async function fetchOnePage(pageNumber = 1, pageSize = PAGE_SIZE, extra = "") {
+  const qs = `?pageNumber=${pageNumber}&pageSize=${pageSize}${extra}`;
+  const candidates = [
+    `${BASE}/api/Problems${qs}`,
+    `${BASE}/Problems${qs}`, // fallback si no hay /api
+  ];
+
+  let lastErr = null;
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`HTTP ${res.status} en ${url}`);
+      const data = await res.json();
+      // Muchos APIs devuelven { items, total } o un array plano
+      const items = Array.isArray(data) ? data : (data.items ?? data.data ?? []);
+      const normalized = normalize(items);
+      return { items: normalized, raw: data };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr || new Error("No se pudo obtener la página de problemas");
+}
+
+async function fetchProblems(extraQs = "") {
+  const pages = [];
+  for (let page = 1; page <= MAX_PAGES; page++) {
+    const { items } = await fetchOnePage(page, PAGE_SIZE, extraQs);
+    pages.push(...items);
+    if (items.length < PAGE_SIZE) break; // no hay más
+  }
+  return sortByStartDesc(pages);
+}
+
+// ---------- API pública ----------
+
+export async function fetchAllProblems() {
+  return fetchProblems("");
+}
+
+export async function fetchTcsProblems() {
+  const all = await fetchProblems("");
+  return all.filter((p) => p.isTcs);
+}
+
+export async function fetchOtherProblems() {
+  const all = await fetchProblems("");
+  return all.filter((p) => !p.isTcs);
+}
+
+-----------
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchTcsProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function TCSProblems() {
+  const [username, setUsername] = useState("");
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const data = await fetchTcsProblems();
+        if (!cancelled) setProblems(data);
+      } catch (e) {
+        if (!cancelled) setErr(e.message || String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) return <p>Cargando problemas TCS…</p>;
+  if (err) return <p style={{ color: "crimson" }}>Error: {err}</p>;
+
+  return (
+    <div>
+      <h2>Problemas TCS ({problems.length})</h2>
+      <div style={{ marginBottom: 12 }}>
+        <UsernameInput value={username} onChange={setUsername} />
+      </div>
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.title} problem={p} username={username} />
+      ))}
+      {!problems.length && <p>No hay problemas TCS en el rango consultado.</p>}
+    </div>
+  );
+}
+
+-------
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useState } from "react";
+import { fetchOtherProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const data = await fetchOtherProblems();
+        if (!cancelled) setProblems(data);
+      } catch (e) {
+        if (!cancelled) setErr(e.message || String(e));
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  if (loading) return <p>Cargando problemas de terceros…</p>;
+  if (err) return <p style={{ color: "crimson" }}>Error: {err}</p>;
+
+  return (
+    <div>
+      <h2>Problemas Otros ({problems.length})</h2>
+      <div style={{ marginBottom: 12 }}>
+        <UsernameInput value={username} onChange={setUsername} />
+      </div>
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId || p.title} problem={p} username={username} />
+      ))}
+      {!problems.length && <p>No hay problemas de terceros en el rango consultado.</p>}
+    </div>
+  );
+}
+
