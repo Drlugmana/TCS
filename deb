@@ -1,0 +1,224 @@
+// src/api/problems.js
+const BASE_URL = import.meta.env.VITE_API_URL;
+
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    const startRaw =
+      p.startTime ||
+      p.startTimeUtc ||
+      p.StartTime ||
+      p.StartTimeUtc ||
+      p.start_date ||
+      null;
+
+    const endRaw =
+      p.endTime ||
+      p.endTimeUtc ||
+      p.EndTime ||
+      p.EndTimeUtc ||
+      p.end_date ||
+      null;
+
+    const jurisRaw =
+      p.jurisdiction?.label ||
+      p.jurisdiction?.name ||
+      p.jurisdiction?.Jurisdiccion ||
+      p.Jurisdiction ||
+      p.jurisdiction ||
+      p.label ||
+      p.Label ||
+      "";
+
+    const juris =
+      typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+    const isTcs = p.jurisdiction?.isTcs
+      ? p.jurisdiction.isTcs
+      : juris === "TCS";
+
+    const problemId = p.problemId || p.displayId || p.id || "";
+    const title = p.title || p.shortDescription || "(sin título)";
+    const severityLevel = p.severityLevel || p.severity || "";
+    const impactLevel = p.impactLevel || p.impact || "";
+    const environment = p.environment || p.environmentName || "";
+    const affectedCI = p.affectedCI || p.affectedEntitiesList || [];
+    const status = p.status || p.state || "";
+    const tenant = p.tenant || "";
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+    };
+  });
+}
+
+export async function fetchAllProblems({ jurisdiction }) {
+  try {
+    const today = new Date();
+    const start = new Date(today);
+    start.setDate(today.getDate() - 7); // últimos 7 días
+    const startStr = start.toISOString();
+    const endStr = today.toISOString();
+
+    const url = new URL("/api/Problems", BASE_URL);
+    url.searchParams.set("pageNumber", 1);
+    url.searchParams.set("pageSize", 500);
+    url.searchParams.set("start", startStr);
+    url.searchParams.set("end", endStr);
+
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+
+    const normalized = normalize(data);
+    return jurisdiction
+      ? normalized.filter((p) =>
+          jurisdiction === "TCS" ? p.isTcs : !p.isTcs
+        )
+      : normalized;
+  } catch (err) {
+    console.error("Error al traer problemas:", err);
+    throw err;
+  }
+}
+
+---
+
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems({ jurisdiction: "TCS" });
+        setProblems(data);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <p>Cargando problemas TCS...</p>;
+  if (error) return <p style={{ color: "red" }}>Error: {error}</p>;
+  if (!problems.length) return <p>No hay problemas TCS en el rango.</p>;
+
+  return (
+    <div>
+      <h2>Problemas TCS ({problems.length})</h2>
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} />
+      ))}
+    </div>
+  );
+}
+
+--
+
+import React, { useEffect, useState } from "react";
+import { fetchAllProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const data = await fetchAllProblems({ jurisdiction: "NO TCS" });
+        setProblems(data);
+      } catch (err) {
+        setError(err.message);
+      } finally {
+        setLoading(false);
+      }
+    }
+    load();
+  }, []);
+
+  if (loading) return <p>Cargando problemas de terceros...</p>;
+  if (error) return <p style={{ color: "red" }}>Error: {error}</p>;
+  if (!problems.length)
+    return <p>No hay problemas de terceros en el rango.</p>;
+
+  return (
+    <div>
+      <h2>Problemas Otros ({problems.length})</h2>
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} />
+      ))}
+    </div>
+  );
+}
+
+--
+
+import React from "react";
+
+export default function ProblemCard({ problem }) {
+  const {
+    problemId,
+    title,
+    severityLevel,
+    impactLevel,
+    environment,
+    affectedCI,
+    tenant,
+    label,
+  } = problem;
+
+  const dynatraceUrl =
+    tenant && problemId
+      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+      : null;
+
+  return (
+    <div
+      style={{
+        backgroundColor: label === "TCS" ? "#e4f5e4" : "#f5e4e4",
+        padding: "1rem",
+        marginBottom: "1rem",
+        borderRadius: "8px",
+      }}
+    >
+      <h3>{label}</h3>
+      <p>
+        <b>Título:</b> {title}
+      </p>
+      <p>
+        <b>Severidad:</b> {severityLevel} <br />
+        <b>Impacto:</b> {impactLevel} <br />
+        <b>Entorno:</b> {environment} <br />
+        <b>Equipos:</b> {Array.isArray(affectedCI) ? affectedCI.join(", ") : ""}
+      </p>
+      <button
+        onClick={() => window.open(dynatraceUrl, "_blank")}
+        disabled={!dynatraceUrl}
+      >
+        Revisar problema
+      </button>
+    </div>
+  );
+}
