@@ -1,0 +1,119 @@
+{/* CONTENEDOR PRINCIPAL: INFO + ICONOS + TEMPORIZADOR */}
+<div
+  style={{
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    padding: "1rem",
+    gap: "1rem",
+  }}
+>
+  {/* IZQUIERDA: INFORMACIÓN DEL PROBLEMA */}
+  <div style={{ flex: 1 }}>
+    <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: "bold" }}>{title}</h3>
+    <p><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+    <p><strong>Impacto:</strong> {impactLevel}</p>
+    <p><strong>Inicio:</strong> {start.toLocaleString()}</p>
+    <p><strong>Estado:</strong> {problem.status?.toUpperCase() || "OPEN"}</p>
+    <p><strong>Criticidad (BIA):</strong> {criticidad}</p>
+    <p><strong>Equipos afectados:</strong> <small>{equipos}</small></p>
+    {hitFromCatalog?.tower && (
+      <p><strong>Torre:</strong> {hitFromCatalog.towerRaw || hitFromCatalog.tower}</p>
+    )}
+  </div>
+
+  {/* CENTRO: ICONOS */}
+  <div
+    style={{
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      gap: "1rem",
+      flexShrink: 0,
+      minWidth: "180px",
+    }}
+  >
+    {/* Tamaño de íconos */}
+    {(() => {
+      const size = 50; // 🔧 AJUSTA EL TAMAÑO AQUÍ (px)
+      return (
+        <>
+          <img
+            src={`/severidad${criticidad}.svg`}
+            width={size}
+            height={size}
+            title={`Criticidad ${criticidad}`}
+            style={{
+              borderRadius: "8px",
+              backgroundColor: "rgba(255,255,255,0.9)",
+              padding: "4px",
+            }}
+          />
+          <img
+            src={
+              environment === "Productivo"
+                ? "/icon-productivo.svg"
+                : "/icon-noproductivo.svg"
+            }
+            width={size}
+            height={size}
+            title={environment}
+            style={{
+              borderRadius: "8px",
+              backgroundColor: "rgba(255,255,255,0.9)",
+              padding: "4px",
+            }}
+          />
+          {towerIcon && (
+            <img
+              src={towerIcon}
+              alt="tower"
+              width={size}
+              height={size}
+              title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+              style={{
+                borderRadius: "8px",
+                backgroundColor: "rgba(255,255,255,0.9)",
+                padding: "4px",
+              }}
+            />
+          )}
+        </>
+      );
+    })()}
+  </div>
+
+  {/* DERECHA: TEMPORIZADOR Y BOTÓN */}
+  <div
+    style={{
+      textAlign: "center",
+      minWidth: "120px",
+    }}
+  >
+    <div
+      style={{
+        fontSize: "1.5rem",
+        fontWeight: "bold",
+        marginBottom: "0.5rem",
+      }}
+    >
+      {formatTime(remainingMinutes)}
+    </div>
+
+    <button
+      disabled={isDisabled}
+      onClick={() => window.open(dynatraceUrl, "_blank")}
+      style={{
+        padding: "0.5rem 1rem",
+        border: "none",
+        borderRadius: "8px",
+        fontWeight: "bold",
+        cursor: isDisabled ? "not-allowed" : "pointer",
+        backgroundColor: isDisabled ? "#bebebe" : buttonColor,
+        color: "white",
+      }}
+    >
+      Revisar problema
+    </button>
+  </div>
+</div>
