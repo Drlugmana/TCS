@@ -1,164 +1,133 @@
-// --- SLA (sin cambios) ---
-export function getSlaMinutes(criticidad) {
-  switch (criticidad) {
-    case 'S1': return 10;
-    case 'S2': return 30;
-    case 'S3': return 45;
-    default:   return 120; // S4
-  }
-}
+// src/components/ProblemCard.jsx
+import React, { useEffect, useState } from 'react';
+import {
+  calcularCriticidadDetallada,
+  getSlaMinutes,
+  getColorByPercent,
+  getButtonColorByPercent,
+} from '../utils/slaUtils';
 
-// --- Helpers de color (si ya los tienes, deja los tuyos) ---
-export function getColorByPercent(percent) {
-  if (percent > 75) return '#ffffff';
-  if (percent > 50) return '#fff9c4';
-  if (percent > 25) return '#ffe082';
-  return '#ef9a9a';
-}
-export function getButtonColorByPercent(percent) {
-  if (percent > 75) return '#1565c0';
-  if (percent > 50) return '#fbc02d';
-  if (percent > 25) return '#fb8c00';
-  return '#d32f2f';
-}
+export default function ProblemCard({ problem, username }) {
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    environment,
+    affectedCI = [],
+    tenant,
+    problemId,
+  } = problem || {};
 
-// ------------------ CRITICIDAD ------------------
+  // === Criticidad (BIA) con trazabilidad ===
+  const { criticidad, fuente, detalles } = calcularCriticidadDetallada(problem);
+  const criticidadIcon = `/severidad${criticidad}.svg`;
 
-const rank = { S1: 0, S2: 1, S3: 2, S4: 3 };
-const peor = (a, b) => (rank[a] < rank[b] ? a : b);
+  // Icono de entorno (más tolerante con variantes)
+  const envStr = String(environment || '').toLowerCase();
+  const environmentIcon =
+    envStr.includes('prod') && !envStr.includes('no')
+      ? '/icon-productivo.svg'
+      : '/icon-noproductivo.svg';
 
-// 1) Mapea letra A–E de cadenas como "C - BIA Crítica" a S1..S4
-function letraBIAaSx(str) {
-  if (!str) return null;
-  const v = String(str).trim().toUpperCase();
+  // === SLA y temporizador ===
+  const slaMinutes = getSlaMinutes(criticidad);
+  const start = new Date(startTime);
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
-  // Busca una letra A-E al inicio o antes de guión/espacio: "A - ...", "B) ...", "C ...", etc.
-  const m = v.match(/^\s*([A-E])(?:\s*[-) ]|$)/);
-  if (m) {
-    const L = m[1];
-    if (L === 'A') return 'S1';
-    if (L === 'B') return 'S2';
-    if (L === 'C') return 'S3';
-    // D y E son S4 según tu documento
-    return 'S4';
-  }
-  return null;
-}
+  const elapsedMs = Math.max(now - start.getTime(), 0);
+  const elapsedMinutes = elapsedMs / 60000;
+  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
+  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
 
-// 2) Mapea severidades "humanas" SOLO cuando son etiquetas estándar
-function textoSeveridadASx(str) {
-  if (!str) return null;
-  const v = String(str).trim().toUpperCase();
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
 
-  // Evita confundir "BIA CRÍTICA" con "CRITICAL"
-  if (/\bCRITICAL\b/.test(v)) return 'S1';
-  if (/\bHIGH\b|\bALTA\b/.test(v)) return 'S2';
-  if (/\bMEDIUM\b|\bMEDIA\b/.test(v)) return 'S3';
-  if (/\bLOW\b|\bBAJA\b/.test(v)) return 'S4';
+  const formatTime = (minutes) => {
+    const total = Math.floor(minutes * 60);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return (
+      String(h).padStart(2, '0') +
+      ':' +
+      String(m).padStart(2, '0') +
+      ':' +
+      String(s).padStart(2, '0')
+    );
+  };
 
-  return null;
-}
+  // Lista única de equipos
+  const uniqueNames = [...new Set(affectedCI.map((ci) => ci?.name || ci?.Nombre).filter(Boolean))];
+  const equipos = uniqueNames.join(', ');
 
-// 3) Normaliza una fuente cualquiera a Sx (usa letra BIA si existe)
-export function normalizarCriticidad(valor) {
-  if (valor == null) return 'S4';
-  // Primero, intenta extraer la letra BIA (A–E) si la cadena la trae
-  const viaLetra = letraBIAaSx(valor);
-  if (viaLetra) return viaLetra;
+  const isDisabled = !username;
+  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
 
-  const v = String(valor).trim().toUpperCase();
-
-  // Directo S1..S4
-  if (/^S[1-4]$/.test(v)) return v;
-
-  // Una sola letra "A|B|C" aislada
-  if (v === 'A') return 'S1';
-  if (v === 'B') return 'S2';
-  if (v === 'C') return 'S3';
-
-  // Severidades estándar (evita mapear "CRITICA" por BIA)
-  const sev = textoSeveridadASx(v);
-  if (sev) return sev;
-
-  return 'S4';
-}
-
-// Detecta EnP / No Productivo (flexible a variantes)
-function esNoProductivo(env) {
-  if (!env) return false;
-  const e = String(env).toUpperCase();
   return (
-    e.includes('ENP') ||
-    e.includes('NO PRODUCT') ||
-    e.includes('NON PROD') ||
-    e.includes('NPRD') ||
-    e.includes('NP')
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderRadius: '12px',
+        padding: '1rem 1.5rem',
+        marginBottom: '1rem',
+        backgroundColor: bgColor,
+        boxShadow: '0 4px 10px rgba(0,0,0,.1)',
+      }}
+    >
+      {/* Iconos */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '.5rem' }}>
+        <img src={criticidadIcon} alt={criticidad} width="40" height="40" title={`Criticidad ${criticidad}`} />
+        <img src={environmentIcon} alt={environment} width="36" height="36" title={environment} />
+      </div>
+
+      {/* Info del problema */}
+      <div style={{ flex: 1, paddingLeft: '1rem' }}>
+        <h3 style={{ margin: '0 0 .5rem 0' }}>{title}</h3>
+        <p style={{ margin: 0 }}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+        <p style={{ margin: 0 }}><strong>Impacto:</strong> {impactLevel}</p>
+        <p style={{ margin: 0 }}><strong>Inicio:</strong> {new Date(startTime).toLocaleString()}</p>
+
+        {/* Badge de auditoría: ver de dónde salió la Sx */}
+        <p style={{ margin: 0 }}>
+          <strong>Criticidad (BIA):</strong> {criticidad}{' '}
+          <small style={{ opacity: .7 }}>
+            (Fuente: {fuente}
+            {detalles?.ci ? ` · CI: ${detalles.ci}` : ''}
+            {detalles?.valor ? ` · Valor: ${String(detalles.valor)}` : ''})
+          </small>
+        </p>
+
+        <p style={{ margin: 0 }}><strong>Equipos afectados:</strong> {equipos}</p>
+      </div>
+
+      {/* Temporizador + botón */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{formatTime(remainingMinutes)}</div>
+        <button
+          disabled={isDisabled}
+          onClick={() => window.open(dynatraceUrl, '_blank')}
+          style={{
+            marginTop: '.5rem',
+            padding: '.4rem 1rem',
+            fontSize: '.9rem',
+            fontWeight: 'bold',
+            color: '#fff',
+            backgroundColor: isDisabled ? '#b0b0b0' : buttonColor,
+            border: 'none',
+            borderRadius: '8px',
+            cursor: isDisabled ? 'not-allowed' : 'pointer',
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
   );
-}
-
-/**
- * Devuelve:
- *  - criticidad: 'S1'|'S2'|'S3'|'S4'
- *  - fuente: 'ENP'|'CI'|'SEVERITY/IMPACT'|'DEFAULT'
- *  - detalles: { ... }
- */
-export function calcularCriticidadDetallada(problem) {
-  // Regla 0: En Entorno no Productivo todo es S4
-  const env = problem?.environment || problem?.entorno;
-  if (esNoProductivo(env)) {
-    return { criticidad: 'S4', fuente: 'ENP', detalles: { environment: env } };
-  }
-
-  // Regla 1: de las CIs afectadas, tomar la peor criticidad
-  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-  let worstFromCI = 'S4';
-  let tuvoCI = false;
-  let fuenteCampo = null;
-  let ciElegida = null;
-  let valorOriginal = null;
-
-  for (const ci of affected) {
-    // Contempla nombres comunes de CMDB
-    const candRaw =
-      ci?.criticidad ??
-      ci?.criticality ??
-      ci?.businessCriticality ??
-      ci?.ciBusinessCriticality ??
-      ci?.ci_business_criticality ??
-      ci?.severity ??                 // por si alguna CI trae severidad en vez de criticidad
-      ci?.tier;
-
-    const cand = normalizarCriticidad(candRaw);
-
-    if (candRaw != null) {
-      tuvoCI = true;
-      if (rank[cand] < rank[worstFromCI]) {
-        worstFromCI = cand;
-        fuenteCampo = Object.keys(ci).find(k =>
-          ['criticidad','criticality','businessCriticality','ciBusinessCriticality','ci_business_criticality','severity','tier']
-            .includes(k)
-        ) || 'desconocido';
-        ciElegida = ci?.name || ci?.Nombre || ci?.id || '';
-        valorOriginal = candRaw;
-      }
-    }
-  }
-  if (tuvoCI) {
-    return { criticidad: worstFromCI, fuente: 'CI', detalles: { campo: fuenteCampo, ci: ciElegida, valor: valorOriginal } };
-  }
-
-  // Regla 2: severidad/impacto del problema (la peor)
-  const sev = normalizarCriticidad(problem?.severityLevel);
-  const imp = normalizarCriticidad(problem?.impactLevel);
-  if (problem?.severityLevel || problem?.impactLevel) {
-    return { criticidad: peor(sev, imp), fuente: 'SEVERITY/IMPACT', detalles: { severityLevel: problem?.severityLevel, impactLevel: problem?.impactLevel } };
-  }
-
-  // Regla 3: fallback
-  return { criticidad: 'S4', fuente: 'DEFAULT', detalles: {} };
-}
-
-// Azúcar
-export function calcularCriticidad(p) {
-  return calcularCriticidadDetallada(p).criticidad;
 }
