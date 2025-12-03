@@ -1,218 +1,354 @@
 import React, { useEffect, useState } from "react";
-import { useBiaCatalog } from "../context/BiaCatalogContext";
-import {
-  getSlaMinutes,
-  getColorByPercent,
-  calcularCriticidadDetallada,
-  getButtonColorByPercent,
-} from "../utils/slaUtils";
+import { fetchNoTcsProblemsDay, ONLY_DATE } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-// === Helper para normalizar estado OPEN / CLOSED ===
-function normalizeStatus(p) {
+/* ===== Detección de ambiente (idéntico a antes) ===== */
+function detectEnvironmentRaw(problem) {
   const raw =
-    p?.status ??
-    p?.Status ??
-    p?.problemStatus ??
+    problem?.environmentIcon ||
+    problem?.environmentText ||
+    problem?.environment ||
+    problem?.entorno ||
+    problem?.env ||
     "";
+  return String(raw).toLowerCase().trim();
+}
 
-  let s = String(raw).trim().toUpperCase();
+function isProd(problem) {
+  const env = detectEnvironmentRaw(problem);
 
-  if (!s) {
-    // Fallback por tiempo
-    if (p?.endTime) return "CLOSED";
-    return "OPEN";
+  // iconos primero (evita falso positivo por "productivo" dentro de "noproductivo")
+  if (env.includes("icon-noproductivo") || env.includes("no-productivo") || env.includes("noproductivo")) {
+    return false;
   }
+  if (env.includes("icon-productivo")) return true;
+
+  const nonProdRegex =
+    /\b(enp|np|qa|q\/a|dev|desa|desarrollo|test|testing|stg|stage|staging|uat|preprod|pre-prod|pre\s*prod|preproducci[oó]n|no\s*prod|non[-\s]*prod)\b/;
+  if (nonProdRegex.test(env)) return false;
+
+  if (/\b(productivo|producci[oó]n|production)\b/.test(env)) return true;
+  if (/\bprod\b/.test(env) || /^prod[\w-]*/.test(env)) return true;
+
+  return false; // desconocido => no productivo
+}
+
+/* ===== Normalización de estado OPEN/CLOSED ===== */
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? "";
+  let s = String(raw).trim().toUpperCase();
+  if (!s) return p?.endTime ? "CLOSED" : "OPEN";
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
   if (s.includes("OPEN")) return "OPEN";
   return "OPEN";
 }
 
-// === Traduce towerKey a icono correspondiente ===
-function towerToIconPath(towerKey) {
-  if (!towerKey) return null;
-  const key = String(towerKey).toLowerCase();
+export default function OtherProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
 
-  // Wintel
-  if (key.includes("wintel") || key.includes("windows")) {
-    return "/icons/towers/wintel.jfif";
-  }
-
-  // Base de datos / BDD
-  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd")) {
-    return "/icons/towers/base.jfif";
-  }
-
-  // Unix / Linux / AIX
-  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) {
-    return "/icons/towers/unix.jfif";
-  }
-
-  return null;
-}
-
-// === Componente principal ===
-export default function ProblemCard({ problem, username }) {
-  const {
-    title,
-    severityLevel,
-    impactLevel,
-    startTime,
-    endTime,
-    environment,
-    affectedCI = [],
-    tenant,
-    problemId,
-  } = problem;
-
-  const { get: catalogGet } = useBiaCatalog();
-
-  // Buscar coincidencia con catálogo
-  const hitFromCatalog = (() => {
-    for (const ci of affectedCI || []) {
-      const name = ci?.name || ci?.Nombre;
-      const hit = name ? catalogGet(name) : null;
-      if (hit) return hit;
-    }
-    return null;
-  })();
-
-  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
-  const { criticidad } = calcularCriticidadDetallada(problem, {
-    catalogLookup: (ciName) => catalogGet(ciName),
-  });
-
-  // === ESTADO OPEN/CLOSED ===
-  const status = normalizeStatus(problem);
-  const statusStyle = status === "CLOSED"
-    ? { background: "#16a34a", color: "#fff" } // Verde
-    : { background: "#dc2626", color: "#fff" }; // Rojo
-
-  const statusBadgeBase = {
-    padding: "0.15rem .55rem",
-    borderRadius: "999px",
-    fontSize: ".8rem",
-    fontWeight: 700,
-    lineHeight: 1.4,
-    display: "inline-block",
-  };
-
-  // === SLA / colores ===
-  const slaMinutes = getSlaMinutes(criticidad);
-  const start = new Date(startTime);
-  const [now, setNow] = useState(new Date());
+  // pestañas
+  const [envTab, setEnvTab] = useState("prod");     // 'prod' | 'nonprod'
+  const [statusTab, setStatusTab] = useState("open"); // 'open' | 'closed'
 
   useEffect(() => {
-    const interval = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(interval);
+    let mounted = true;
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        setProblems([]);
+        await fetchNoTcsProblemsDay(ONLY_DATE, {
+          onBatch: (batch) => {
+            if (!mounted || !batch?.length) return;
+            setProblems((prev) =>
+              [...prev, ...batch].sort(
+                (a, b) => new Date(b.startTime) - new Date(a.startTime)
+              )
+            );
+          },
+        });
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
-  const elapsedMinutes = (now - start) / 60000;
-  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
-  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
 
-  const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor = getButtonColorByPercent(percentRemaining);
+  // 1) separar por ambiente
+  const prodList = problems.filter(isProd);
+  const nonProdList = problems.filter((p) => !isProd(p));
+  const envList = envTab === "prod" ? prodList : nonProdList;
 
-  const formatTime = (minutes) => {
-    const totalSeconds = Math.floor(minutes * 60);
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  };
-
-  const uniqueNames = [...new Set(affectedCI.map((ci) => ci?.name).filter(Boolean))];
-  const equipos = uniqueNames.join(", ");
-  const isDisabled = !username;
-  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
+  // 2) dentro del ambiente, separar por estado
+  const openList = envList.filter((p) => normalizeStatus(p) === "OPEN");
+  const closedList = envList.filter((p) => normalizeStatus(p) === "CLOSED");
+  const selectedList = statusTab === "open" ? openList : closedList;
 
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem 1.5rem",
-        marginBottom: "1rem",
-        backgroundColor: bgColor,
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-        opacity: status === "CLOSED" ? 0.9 : 1, // opcional: atenuar cerrado
-      }}
-    >
-      {/* ICONOS */}
-      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: ".5rem" }}>
-        <img src={`/severidad${criticidad}.svg`} width="40" height="40" title={`Criticidad ${criticidad}`} />
-        <img
-          src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-          width="36"
-          height="36"
-          title={environment}
-        />
-        {towerIcon && (
-          <img src={towerIcon} alt="tower" width="42" height="42" title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower} />
-        )}
-      </div>
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas Otros <span>({problems.length})</span></h2>
 
-      {/* INFORMACIÓN */}
-      <div style={{ flex: 1, paddingLeft: "1rem" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
-          <h3 style={{ margin: 0, fontSize: "1.1rem" }}>{title}</h3>
-          <span style={{ ...statusBadgeBase, ...statusStyle }}>{status}</span>
-        </div>
+      <UsernameInput value={username} onChange={setUsername} />
 
-        <p style={{ margin: 0 }}>
-          <strong>Severidad Dynatrace:</strong> {severityLevel}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Impacto:</strong> {impactLevel}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Inicio:</strong> {start.toLocaleString()}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Estado:</strong> {status}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Criticidad (BIA):</strong> {criticidad}
-        </p>
-        <p style={{ margin: 0 }}>
-          <strong>Equipos afectados:</strong> {equipos}
-        </p>
-        {hitFromCatalog?.tower && (
-          <p style={{ margin: 0 }}>
-            <strong>Torre:</strong> {hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-          </p>
-        )}
-      </div>
+      {loading && problems.length === 0 && <p>Cargando problemas…</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas de terceros el {ONLY_DATE}.</p>}
 
-      {/* TEMPORIZADOR Y BOTÓN */}
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
-          {formatTime(remainingMinutes)}
-        </div>
+      {/* Tabs de ambiente */}
+      <div style={{ display: "flex", gap: ".5rem", margin: "1rem 0 .5rem" }}>
         <button
-          disabled={isDisabled}
-          onClick={() => window.open(dynatraceUrl, "_blank")}
+          onClick={() => setEnvTab("prod")}
+          disabled={envTab === "prod"}
           style={{
-            marginTop: ".5rem",
-            padding: ".4rem 1rem",
-            fontSize: ".9rem",
-            fontWeight: "bold",
-            color: "#fff",
-            backgroundColor: isDisabled
-              ? "#b0b0b0"
-              : status === "CLOSED"
-              ? "#6b7280"
-              : buttonColor,
-            border: "none",
-            borderRadius: "8px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "prod" ? "#dbeafe" : "#f8fafc",
+            fontWeight: envTab === "prod" ? "bold" : "normal",
+            cursor: envTab === "prod" ? "default" : "pointer",
           }}
         >
-          Revisar problema
+          Productivo ({prodList.length})
+        </button>
+        <button
+          onClick={() => setEnvTab("nonprod")}
+          disabled={envTab === "nonprod"}
+          style={{
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "nonprod" ? "#fef3c7" : "#f8fafc",
+            fontWeight: envTab === "nonprod" ? "bold" : "normal",
+            cursor: envTab === "nonprod" ? "default" : "pointer",
+          }}
+        >
+          No Productivo ({nonProdList.length})
         </button>
       </div>
+
+      {/* Subtabs de estado */}
+      <div style={{ display: "flex", gap: ".5rem", margin: ".25rem 0 1rem" }}>
+        <button
+          onClick={() => setStatusTab("open")}
+          disabled={statusTab === "open"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "open" ? "#fde68a" : "#ffffff",
+            fontWeight: statusTab === "open" ? "bold" : "normal",
+            cursor: statusTab === "open" ? "default" : "pointer",
+          }}
+        >
+          Abiertas ({openList.length})
+        </button>
+        <button
+          onClick={() => setStatusTab("closed")}
+          disabled={statusTab === "closed"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "closed" ? "#bbf7d0" : "#ffffff",
+            fontWeight: statusTab === "closed" ? "bold" : "normal",
+            cursor: statusTab === "closed" ? "default" : "pointer",
+          }}
+        >
+          Cerradas ({closedList.length})
+        </button>
+      </div>
+
+      {selectedList.map((p) => (
+        <ProblemCard key={p.problemId || p.pid} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+----
+
+import React, { useEffect, useState } from "react";
+import { fetchTcsProblemsDay, ONLY_DATE } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+/* ===== Detección de ambiente (idéntico) ===== */
+function detectEnvironmentRaw(problem) {
+  const raw =
+    problem?.environmentIcon ||
+    problem?.environmentText ||
+    problem?.environment ||
+    problem?.entorno ||
+    problem?.env ||
+    "";
+  return String(raw).toLowerCase().trim();
+}
+
+function isProd(problem) {
+  const env = detectEnvironmentRaw(problem);
+
+  if (env.includes("icon-noproductivo") || env.includes("no-productivo") || env.includes("noproductivo")) {
+    return false;
+  }
+  if (env.includes("icon-productivo")) return true;
+
+  const nonProdRegex =
+    /\b(enp|np|qa|q\/a|dev|desa|desarrollo|test|testing|stg|stage|staging|uat|preprod|pre-prod|pre\s*prod|preproducci[oó]n|no\s*prod|non[-\s]*prod)\b/;
+  if (nonProdRegex.test(env)) return false;
+
+  if (/\b(productivo|producci[oó]n|production)\b/.test(env)) return true;
+  if (/\bprod\b/.test(env) || /^prod[\w-]*/.test(env)) return true;
+
+  return false;
+}
+
+/* ===== Normalización de estado OPEN/CLOSED ===== */
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? "";
+  let s = String(raw).trim().toUpperCase();
+  if (!s) return p?.endTime ? "CLOSED" : "OPEN";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+  if (s.includes("OPEN")) return "OPEN";
+  return "OPEN";
+}
+
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  const [envTab, setEnvTab] = useState("prod");      // 'prod' | 'nonprod'
+  const [statusTab, setStatusTab] = useState("open"); // 'open' | 'closed'
+
+  useEffect(() => {
+    let mounted = true;
+    async function load() {
+      try {
+        setLoading(true);
+        setError(null);
+        setProblems([]);
+
+        await fetchTcsProblemsDay(ONLY_DATE, {
+          onBatch: (batch) => {
+            if (!mounted || !batch?.length) return;
+            setProblems((prev) =>
+              [...prev, ...batch].sort(
+                (a, b) => new Date(b.startTime) - new Date(a.startTime)
+              )
+            );
+          },
+        });
+      } catch (e) {
+        setError(e.message || String(e));
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+    load();
+    return () => {
+      mounted = false;
+    };
+  }, []);
+
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  // 1) por ambiente
+  const prodList = problems.filter(isProd);
+  const nonProdList = problems.filter((p) => !isProd(p));
+  const envList = envTab === "prod" ? prodList : nonProdList;
+
+  // 2) por estado
+  const openList = envList.filter((p) => normalizeStatus(p) === "OPEN");
+  const closedList = envList.filter((p) => normalizeStatus(p) === "CLOSED");
+  const selectedList = statusTab === "open" ? openList : closedList;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS <span>({problems.length})</span></h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {loading && problems.length === 0 && <p>Cargando problemas TCS…</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas TCS el {ONLY_DATE}.</p>}
+
+      {/* Tabs de ambiente */}
+      <div style={{ display: "flex", gap: ".5rem", margin: "1rem 0 .5rem" }}>
+        <button
+          onClick={() => setEnvTab("prod")}
+          disabled={envTab === "prod"}
+          style={{
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "prod" ? "#dbeafe" : "#f8fafc",
+            fontWeight: envTab === "prod" ? "bold" : "normal",
+            cursor: envTab === "prod" ? "default" : "pointer",
+          }}
+        >
+          Productivo ({prodList.length})
+        </button>
+        <button
+          onClick={() => setEnvTab("nonprod")}
+          disabled={envTab === "nonprod"}
+          style={{
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "nonprod" ? "#fef3c7" : "#f8fafc",
+            fontWeight: envTab === "nonprod" ? "bold" : "normal",
+            cursor: envTab === "nonprod" ? "default" : "pointer",
+          }}
+        >
+          No Productivo ({nonProdList.length})
+        </button>
+      </div>
+
+      {/* Subtabs de estado */}
+      <div style={{ display: "flex", gap: ".5rem", margin: ".25rem 0 1rem" }}>
+        <button
+          onClick={() => setStatusTab("open")}
+          disabled={statusTab === "open"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "open" ? "#fde68a" : "#ffffff",
+            fontWeight: statusTab === "open" ? "bold" : "normal",
+            cursor: statusTab === "open" ? "default" : "pointer",
+          }}
+        >
+          Abiertas ({openList.length})
+        </button>
+        <button
+          onClick={() => setStatusTab("closed")}
+          disabled={statusTab === "closed"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "closed" ? "#bbf7d0" : "#ffffff",
+            fontWeight: statusTab === "closed" ? "bold" : "normal",
+            cursor: statusTab === "closed" ? "default" : "pointer",
+          }}
+        >
+          Cerradas ({closedList.length})
+        </button>
+      </div>
+
+      {selectedList.map((p) => (
+        <ProblemCard key={p.problemId || p.pid} problem={p} username={username} />
+      ))}
     </div>
   );
 }
