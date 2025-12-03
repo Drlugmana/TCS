@@ -1,0 +1,77 @@
+// utils/slaUtils.js
+export function getSlaMinutes(criticidad) {
+  switch (criticidad) {
+    case 'S1': return 10;
+    case 'S2': return 30;
+    case 'S3': return 45;
+    default:   return 120; // S4
+  }
+}
+
+export function getColorByPercent(percent) {
+  if (percent > 75) return '#ffffff';
+  if (percent > 50) return '#fff9c4';
+  if (percent > 25) return '#ffe082';
+  return '#ef9a9a';
+}
+export function getButtonColorByPercent(percent) {
+  if (percent > 75) return '#1565c0';
+  if (percent > 50) return '#fbc02d';
+  if (percent > 25) return '#fb8c00';
+  return '#d32f2f';
+}
+
+// --- Criticidad ---
+const rank = { S1: 0, S2: 1, S3: 2, S4: 3 };
+const peor = (a, b) => (rank[a] < rank[b] ? a : b);
+
+export function normalizarCriticidad(valor) {
+  if (!valor) return 'S4';
+  const v = String(valor).trim().toUpperCase();
+
+  if (/^S[1-4]$/.test(v)) return v;   // S1..S4
+  if (v === 'A') return 'S1';
+  if (v === 'B') return 'S2';
+  if (v === 'C') return 'S3';
+
+  if (v.includes('CRITIC')) return 'S1';               // critical, crítica, crítico
+  if (v.includes('HIGH') || v.includes('ALTA')) return 'S2';
+  if (v.includes('MED')  || v.includes('MEDIA')) return 'S3';
+  if (v.includes('LOW')  || v.includes('BAJA'))  return 'S4';
+
+  return 'S4';
+}
+
+/** Devuelve criticidad + trazabilidad para depurar/validar */
+export function calcularCriticidadDetallada(problem) {
+  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+  let worstFromCI = 'S4';
+  let tuvoCI = false;
+
+  for (const ci of affected) {
+    const cand = normalizarCriticidad(
+      ci?.criticidad ?? ci?.criticality ?? ci?.severity ?? ci?.tier
+    );
+    if (cand) {
+      tuvoCI = true;
+      worstFromCI = peor(worstFromCI, cand);
+    }
+  }
+  if (tuvoCI) return { criticidad: worstFromCI, fuente: 'CI', detalles: { worstFromCI } };
+
+  const sev = normalizarCriticidad(problem?.severityLevel);
+  const imp = normalizarCriticidad(problem?.impactLevel);
+  if (problem?.severityLevel || problem?.impactLevel) {
+    return { criticidad: peor(sev, imp), fuente: 'SEVERITY/IMPACT', detalles: { sev, imp } };
+  }
+
+  return { criticidad: 'S4', fuente: 'DEFAULT', detalles: {} };
+}
+
+// Azúcar: si sólo quieres 'Sx'
+export function calcularCriticidad(problemOrAffected) {
+  if (Array.isArray(problemOrAffected)) {
+    return calcularCriticidadDetallada({ affectedCI: problemOrAffected }).criticidad;
+  }
+  return calcularCriticidadDetallada(problemOrAffected).criticidad;
+}
