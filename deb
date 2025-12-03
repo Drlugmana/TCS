@@ -4,34 +4,72 @@ import { fetchNoTcsProblemsDay, ONLY_DATE } from "../api/problems";
 import ProblemCard from "../components/ProblemCard";
 import UsernameInput from "../components/UsernameInput";
 
-/** Decide si un ambiente es Productivo */
-function isProdEnv(env) {
-  if (!env) return false;
-  const e = String(env).toLowerCase().trim();
+/* -----------------------------------------------
+   🔍 Función que determina el ambiente
+   Usa múltiples claves posibles: environment, icons, text, etc.
+----------------------------------------------- */
+function detectEnvironment(problem) {
+  if (!problem) return "";
+  // Tomar texto del ambiente o ícono si existe
+  const raw =
+    problem.environment ||
+    problem.environmentText ||
+    problem.environmentIcon ||
+    problem.entorno ||
+    problem.env ||
+    "";
+  return String(raw).toLowerCase().trim();
+}
 
-  // claves de no productivo (ganan prioridad)
+/* -----------------------------------------------
+   🧩 Clasificador robusto
+   Detecta si un problema es Productivo o No Productivo
+   - Usa palabras clave
+   - Detecta íconos tipo "PROD" o "EnP"
+----------------------------------------------- */
+function isProd(problem) {
+  const env = detectEnvironment(problem);
+
+  // Primero detectamos ambientes no productivos
   const nonProd = [
-    "enp", "qa", "q/a", "dev", "desa", "desarrollo",
-    "test", "stg", "stage", "staging",
-    "preprod", "pre-prod", "pre prod",
-    "no prod", "non prod", "non-prod", "np"
+    "enp",
+    "no prod",
+    "non-prod",
+    "non prod",
+    "np",
+    "qa",
+    "q/a",
+    "dev",
+    "desa",
+    "desarrollo",
+    "test",
+    "stg",
+    "stage",
+    "staging",
+    "uat",
+    "preprod",
+    "pre-prod",
+    "pre prod",
   ];
-  if (nonProd.some(k => e.includes(k))) return false;
+  if (nonProd.some((k) => env.includes(k))) return false;
 
-  // claves de productivo
-  const prod = ["prod", "productivo", "produccion", "producción"];
-  if (prod.some(k => e.includes(k))) return true;
+  // Luego ambientes productivos
+  const prod = ["prod", "productivo", "produccion", "producción", "production"];
+  if (prod.some((k) => env.includes(k))) return true;
 
-  // por defecto, lo tratamos como no productivo
+  // Si no reconoce nada, tratamos como No Productivo
   return false;
 }
 
+/* -----------------------------------------------
+   🌐 Componente principal
+----------------------------------------------- */
 export default function OtherProblems() {
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [username, setUsername] = useState("");
-  const [tab, setTab] = useState("prod"); // 'prod' | 'nonprod'
+  const [tab, setTab] = useState("prod");
 
   useEffect(() => {
     let mounted = true;
@@ -67,11 +105,12 @@ export default function OtherProblems() {
 
   if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
 
-  // Separación por ambiente
-  const prodList = problems.filter((p) => isProdEnv(p.environment));
-  const nonProdList = problems.filter((p) => !isProdEnv(p.environment));
+  /* 🔹 Clasificar por ambiente */
+  const prodList = problems.filter((p) => isProd(p));
+  const nonProdList = problems.filter((p) => !isProd(p));
   const selectedList = tab === "prod" ? prodList : nonProdList;
 
+  /* 🔹 Render */
   return (
     <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
       <h2>
@@ -80,14 +119,10 @@ export default function OtherProblems() {
 
       <UsernameInput value={username} onChange={setUsername} />
 
-      {loading && problems.length === 0 && (
-        <p>Cargando problemas de terceros…</p>
-      )}
-      {!loading && problems.length === 0 && (
-        <p>No hay problemas de terceros el {ONLY_DATE}.</p>
-      )}
+      {loading && problems.length === 0 && <p>Cargando problemas…</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas el {ONLY_DATE}.</p>}
 
-      {/* Tabs: Productivo / No Productivo */}
+      {/* Tabs de filtrado */}
       <div style={{ display: "flex", gap: ".5rem", margin: "1rem 0" }}>
         <button
           onClick={() => setTab("prod")}
@@ -96,11 +131,10 @@ export default function OtherProblems() {
             padding: ".4rem .8rem",
             borderRadius: "999px",
             border: "1px solid #cbd5e1",
+            background: tab === "prod" ? "#dbeafe" : "#f8fafc",
+            fontWeight: tab === "prod" ? "bold" : "normal",
             cursor: tab === "prod" ? "default" : "pointer",
-            background: tab === "prod" ? "#e0f2fe" : "#f8fafc",
-            fontWeight: tab === "prod" ? 700 : 500,
           }}
-          title="Mostrar problemas de ambiente Productivo"
         >
           Productivo ({prodList.length})
         </button>
@@ -112,17 +146,16 @@ export default function OtherProblems() {
             padding: ".4rem .8rem",
             borderRadius: "999px",
             border: "1px solid #cbd5e1",
-            cursor: tab === "nonprod" ? "default" : "pointer",
             background: tab === "nonprod" ? "#fef3c7" : "#f8fafc",
-            fontWeight: tab === "nonprod" ? 700 : 500,
+            fontWeight: tab === "nonprod" ? "bold" : "normal",
+            cursor: tab === "nonprod" ? "default" : "pointer",
           }}
-          title="Mostrar problemas de ambientes No Productivos (EnP/QA/DEV/etc.)"
         >
           No Productivo ({nonProdList.length})
         </button>
       </div>
 
-      {/* Lista según tab activo */}
+      {/* Lista de problemas según la pestaña activa */}
       {selectedList.map((p) => (
         <ProblemCard key={p.problemId || p.pid} problem={p} username={username} />
       ))}
