@@ -1,40 +1,325 @@
-import React, { useRef, useState } from 'react';
-import { useBiaCatalog } from '../context/BiaCatalogContext';
+// ========================= SLA =========================
+export function getSlaMinutes(criticidad) {
+  switch (criticidad) {
+    case 'S1': return 10;
+    case 'S2': return 30;
+    case 'S3': return 45;
+    default:   return 120; // S4
+  }
+}
 
-export default function BiaCatalogLoader() {
-  const { setFromFile, size, updatedAt, clear } = useBiaCatalog();
-  const [busy, setBusy] = useState(false);
-  const inputRef = useRef(null);
+export function getColorByPercent(percent) {
+  if (percent > 75) return '#ffffff';
+  if (percent > 50) return '#fff9c4';
+  if (percent > 25) return '#ffe082';
+  return '#ef9a9a';
+}
 
-  const onPick = async (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setBusy(true);
-    try {
-      const count = await setFromFile(f);
-      alert(`Catálogo cargado: ${count} CIs.`);
-    } catch (err) {
-      console.error(err);
-      alert('No pude leer el CSV. Asegúrate de columnas "Nombre" y "CI Business criticality".');
-    } finally {
-      setBusy(false);
-      if (inputRef.current) inputRef.current.value = '';
+export function getButtonColorByPercent(percent) {
+  if (percent > 75) return '#1565c0';
+  if (percent > 50) return '#fbc02d';
+  if (percent > 25) return '#fb8c00';
+  return '#d32f2f';
+}
+
+// ===================== CRITICIDAD (BIA) =====================
+const rank = { S1: 0, S2: 1, S3: 2, S4: 3 };
+const peor = (a, b) => (rank[a] < rank[b] ? a : b);
+
+/** Lee letra BIA A–E al inicio: "C - BIA Crítica" -> S3 (D/E -> S4) */
+function letraBIAaSx(str) {
+  if (!str) return null;
+  const v = String(str).trim().toUpperCase();
+  const m = v.match(/^\s*([A-E])(?:\s*[-) ]|$)/);
+  if (!m) return null;
+  const L = m[1];
+  if (L === 'A') return 'S1';
+  if (L === 'B') return 'S2';
+  if (L === 'C') return 'S3';
+  return 'S4'; // D y E
+}
+
+/** Mapea severidades estándar; evita confundir “BIA Crítica” con CRITICAL */
+function textoSeveridadASx(str) {
+  if (!str) return null;
+  const v = String(str).trim().toUpperCase();
+  if (/\bCRITICAL\b/.test(v)) return 'S1';
+  if (/\bHIGH\b|\bALTA\b/.test(v)) return 'S2';
+  if (/\bMEDIUM\b|\bMEDIA\b/.test(v)) return 'S3';
+  if (/\bLOW\b|\bBAJA\b/.test(v)) return 'S4';
+  return null;
+}
+
+/** Normaliza cualquier valor (S1..S4, A/B/C, “C - BIA …”, High/Media/Baja) a Sx */
+export function normalizarCriticidad(valor) {
+  if (valor == null) return 'S4';
+
+  // 1) Si viene con letra BIA al inicio, gana esa
+  const viaLetra = letraBIAaSx(valor);
+  if (viaLetra) return viaLetra;
+
+  const v = String(valor).trim().toUpperCase();
+
+  // 2) Directo S1..S4
+  if (/^S[1-4]$/.test(v)) return v;
+
+  // 3) Letras sueltas A/B/C
+  if (v === 'A') return 'S1';
+  if (v === 'B') return 'S2';
+  if (v === 'C') return 'S3';
+
+  // 4) Texto estándar (EN/ES)
+  const sev = textoSeveridadASx(v);
+  if (sev) return sev;
+
+  // 5) Fallback
+  return 'S4';
+}
+
+/** Detecta EnP / No Productivo (tolerante a variantes) */
+function esNoProductivo(env) {
+  if (!env) return false;
+  const e = String(env).toUpperCase();
+  return (
+    e.includes('ENP') ||
+    e.includes('NO PRODUCT') ||
+    e.includes('NON PROD') ||
+    e.includes('NON-PROD') ||
+    e.includes('NPRD') ||
+    (e.includes('NP') && !e.includes('PROD'))
+  );
+}
+
+/**
+ * Calcula criticidad con trazabilidad.
+ * Prioridad:
+ *  0) EnP/No Productivo  -> S4
+ *  1) Catálogo externo (si se provee) -> peor Sx por CI
+ *  2) Campos del CI en el objeto (criticality/businessCriticality/...) -> peor Sx
+ *  3) Peor de severityLevel vs impactLevel
+ *  4) S4
+ *
+ * opts.catalogLookup?: (ciName: string) => { sx: 'S1'|'S2'|'S3'|'S4', raw: string } | null
+ */
+export function calcularCriticidadDetallada(problem, opts = {}) {
+  const { catalogLookup } = opts;
+
+  // 0) Entorno No Productivo => S4
+  const env = problem?.environment || problem?.entorno;
+  if (esNoProductivo(env)) {
+    return { criticidad: 'S4', fuente: 'ENP', detalles: { environment: env } };
+  }
+
+  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+
+  // 1) Catálogo externo (CSV/Excel cargado) — primera fuente
+  if (catalogLookup && affected.length) {
+    let worst = 'S4', who = null, raw = null;
+    for (const ci of affected) {
+      const name = ci?.name || ci?.Nombre;
+      if (!name) continue;
+      const hit = catalogLookup(name); // -> { sx, raw } | null
+      if (hit && hit.sx && rank[hit.sx] < rank[worst]) {
+        worst = hit.sx;
+        who = name;
+        raw = hit.raw;
+      }
     }
+    if (who) {
+      return { criticidad: worst, fuente: 'CATALOGO', detalles: { ci: who, valor: raw } };
+    }
+  }
+
+  // 2) Campos de criticidad en las CIs afectadas (todas las variantes comunes)
+  let worstFromCI = 'S4', tuvoCI = false, campo = null, quien = null, valor = null;
+  for (const ci of affected) {
+    const candRaw =
+      ci?.criticidad ??
+      ci?.criticality ??
+      ci?.businessCriticality ??
+      ci?.businesscriticality ??
+      ci?.ciBusinessCriticality ??
+      ci?.ciBusinesscriticality ??
+      ci?.cibusinessCriticality ??
+      ci?.cibusinesscriticality ??
+      ci?.ci_business_criticality ??
+      ci?.ci_businessCriticality ??
+      ci?.ci_businesscriticality ??
+      ci?.severity ??
+      ci?.tier;
+
+    if (candRaw == null) continue;
+
+    const cand = normalizarCriticidad(candRaw);
+    tuvoCI = true;
+
+    if (rank[cand] < rank[worstFromCI]) {
+      worstFromCI = cand;
+      const posiblesCampos = [
+        'criticidad','criticality','businessCriticality','businesscriticality',
+        'ciBusinessCriticality','ciBusinesscriticality','cibusinessCriticality','cibusinesscriticality',
+        'ci_business_criticality','ci_businessCriticality','ci_businesscriticality','severity','tier'
+      ];
+      campo = posiblesCampos.find(k => k in ci) || 'desconocido';
+      quien = ci?.name || ci?.Nombre || ci?.id || '';
+      valor = candRaw;
+    }
+  }
+  if (tuvoCI) {
+    return { criticidad: worstFromCI, fuente: 'CI', detalles: { campo, ci: quien, valor } };
+  }
+
+  // 3) Peor entre severidad/impacto del problema
+  const sev = normalizarCriticidad(problem?.severityLevel);
+  const imp = normalizarCriticidad(problem?.impactLevel);
+  if (problem?.severityLevel || problem?.impactLevel) {
+    return {
+      criticidad: peor(sev, imp),
+      fuente: 'SEVERITY/IMPACT',
+      detalles: { severityLevel: problem?.severityLevel, impactLevel: problem?.impactLevel }
+    };
+  }
+
+  // 4) Fallback
+  return { criticidad: 'S4', fuente: 'DEFAULT', detalles: {} };
+}
+
+/** Azúcar: si sólo quieres 'Sx' */
+export function calcularCriticidad(p, opts) {
+  return calcularCriticidadDetallada(p, opts).criticidad;
+}
+
+----
+
+
+import React, { useEffect, useState } from 'react';
+import { useBiaCatalog } from '../context/BiaCatalogContext'; // <- si usas el catálogo CSV
+import {
+  calcularCriticidadDetallada,
+  getSlaMinutes,
+  getColorByPercent,
+  getButtonColorByPercent,
+} from '../utils/slaUtils';
+
+export default function ProblemCard({ problem, username }) {
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    environment,
+    affectedCI = [],
+    tenant,
+    problemId,
+  } = problem || {};
+
+  // --- Criticidad (usa catálogo si está cargado) ---
+  const { get: catalogGet } = useBiaCatalog?.() ?? { get: null };
+  const { criticidad, fuente, detalles } = calcularCriticidadDetallada(problem, {
+    catalogLookup: catalogGet ? (ciName) => catalogGet(ciName) : undefined,
+  });
+
+  // Iconos
+  const criticidadIcon = `/severidad${criticidad}.svg`;
+  const envStr = String(environment || '').toLowerCase();
+  const environmentIcon =
+    envStr.includes('prod') && !envStr.includes('no')
+      ? '/icon-productivo.svg'
+      : '/icon-noproductivo.svg';
+
+  // --- SLA + temporizador ---
+  const slaMinutes = getSlaMinutes(criticidad);
+  const start = new Date(startTime);
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+
+  const elapsedMs = Math.max(now - start.getTime(), 0);
+  const elapsedMinutes = elapsedMs / 60000;
+  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
+  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const total = Math.floor(minutes * 60);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
+  const uniqueNames = [...new Set(affectedCI.map(ci => ci?.name || ci?.Nombre).filter(Boolean))];
+  const equipos = uniqueNames.join(', ');
+
+  const isDisabled = !username;
+  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
+
   return (
-    <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center' }}>
-      <input
-        ref={inputRef}
-        type="file"
-        accept=".csv,text/csv"
-        onChange={onPick}
-        disabled={busy}
-      />
-      <button onClick={clear} disabled={busy || size===0}>Limpiar catálogo</button>
-      <small style={{ opacity:.7 }}>
-        {size} CIs cargados {updatedAt ? `· ${new Date(updatedAt).toLocaleString()}` : ''}
-      </small>
+    <div
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        borderRadius: '12px',
+        padding: '1rem 1.5rem',
+        marginBottom: '1rem',
+        backgroundColor: bgColor,
+        boxShadow: '0 4px 10px rgba(0,0,0,.1)',
+      }}
+    >
+      {/* Iconos */}
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '.5rem' }}>
+        <img src={criticidadIcon} alt={criticidad} width="40" height="40" title={`Criticidad ${criticidad}`} />
+        <img src={environmentIcon} alt={environment} width="36" height="36" title={environment} />
+      </div>
+
+      {/* Info */}
+      <div style={{ flex: 1, paddingLeft: '1rem' }}>
+        <h3 style={{ margin: '0 0 .5rem 0' }}>{title}</h3>
+        <p style={{ margin: 0 }}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+        <p style={{ margin: 0 }}><strong>Impacto:</strong> {impactLevel}</p>
+        <p style={{ margin: 0 }}><strong>Inicio:</strong> {new Date(startTime).toLocaleString()}</p>
+
+        {/* Badge de auditoría: ver de dónde salió la Sx */}
+        <p style={{ margin: 0 }}>
+          <strong>Criticidad (BIA):</strong> {criticidad}{' '}
+          <small style={{ opacity: .7 }}>
+            (Fuente: {fuente}
+            {detalles?.ci ? ` · CI: ${detalles.ci}` : ''}
+            {detalles?.valor ? ` · Valor: ${String(detalles.valor)}` : ''})
+          </small>
+        </p>
+
+        <p style={{ margin: 0 }}><strong>Equipos afectados:</strong> {equipos}</p>
+      </div>
+
+      {/* Temporizador + botón */}
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: '2rem', fontWeight: 'bold' }}>{formatTime(remainingMinutes)}</div>
+        <button
+          disabled={isDisabled}
+          onClick={() => window.open(dynatraceUrl, '_blank')}
+          style={{
+            marginTop: '.5rem',
+            padding: '.4rem 1rem',
+            fontSize: '.9rem',
+            fontWeight: 'bold',
+            color: '#fff',
+            backgroundColor: isDisabled ? '#b0b0b0' : buttonColor,
+            border: 'none',
+            borderRadius: '8px',
+            cursor: isDisabled ? 'not-allowed' : 'pointer',
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
     </div>
   );
 }
+
