@@ -4,57 +4,52 @@ import { fetchNoTcsProblemsDay, ONLY_DATE } from "../api/problems";
 import ProblemCard from "../components/ProblemCard";
 import UsernameInput from "../components/UsernameInput";
 
-/* ==========================================================
-   🔍 Detectar ambiente (basado en icono o texto del problema)
-   ========================================================== */
-function detectEnvironment(problem) {
-  if (!problem) return "";
-  return (
-    problem.environmentIcon ||
-    problem.environmentText ||
-    problem.environment ||
-    problem.entorno ||
-    problem.env ||
-    ""
-  ).toLowerCase().trim();
+/* ================== Detección de ambiente ================== */
+function detectEnvironmentRaw(problem) {
+  // Leemos de varias claves posibles (texto o icono)
+  const raw =
+    problem?.environmentIcon ||
+    problem?.environmentText ||
+    problem?.environment ||
+    problem?.entorno ||
+    problem?.env ||
+    "";
+  return String(raw).toLowerCase().trim();
 }
 
-/* ==========================================================
-   🧠 Clasificar entre Productivo / No Productivo
-   ========================================================== */
 function isProd(problem) {
-  const env = detectEnvironment(problem);
+  const env = detectEnvironmentRaw(problem);
 
-  // Primero detectamos ambientes NO productivos
-  const nonProdPatterns = [
-    "enp", "np", "no prod", "non prod", "non-prod", "no-prod",
-    "qa", "q/a", "dev", "desa", "desarrollo",
-    "test", "testing", "stg", "stage", "staging",
-    "uat", "preprod", "pre-prod", "pre prod", "preproduccion", "preproducción"
-  ];
+  // 1) Si viene el nombre del icono, priorizar eso.
+  if (env.includes("icon-noproductivo") || env.includes("no-productivo") || env.includes("noproductivo")) {
+    return false; // NO PRODUCTIVO
+  }
+  if (env.includes("icon-productivo")) {
+    return true; // PRODUCTIVO
+  }
 
-  if (nonProdPatterns.some((word) => env.includes(word))) return false;
+  // 2) Palabras/claves de NO productivo (con regex y variaciones)
+  const nonProdRegex =
+    /\b(enp|np|qa|q\/a|dev|desa|desarrollo|test|testing|stg|stage|staging|uat|preprod|pre-prod|pre\s*prod|preproducci[oó]n|no\s*prod|non[-\s]*prod)\b/;
+  if (nonProdRegex.test(env)) return false;
 
-  // Luego detectamos ambientes productivos
-  const prodPatterns = [
-    "prod", "productivo", "produccion", "producción", "production"
-  ];
+  // 3) Palabras/claves de productivo (asegurando NO confundir con "no productivo")
+  //   - productivo, producción, production
+  //   - 'prod' como palabra o prefijo, pero no dentro de 'noproductivo'
+  if (/\b(productivo|producci[oó]n|production)\b/.test(env)) return true;
+  if (/\bprod\b/.test(env) || /^prod[\w-]*/.test(env)) return true;
 
-  if (prodPatterns.some((word) => env.includes(word))) return true;
-
-  // Si no reconoce el ambiente, lo considera No Productivo por seguridad
+  // 4) Si no reconoce, por seguridad vamos a No Productivo
   return false;
 }
 
-/* ==========================================================
-   🧩 Componente principal
-   ========================================================== */
+/* ================== Página ================== */
 export default function OtherProblems() {
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [username, setUsername] = useState("");
-  const [tab, setTab] = useState("prod");
+  const [tab, setTab] = useState("prod"); // 'prod' | 'nonprod'
 
   useEffect(() => {
     let mounted = true;
@@ -90,7 +85,7 @@ export default function OtherProblems() {
 
   if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
 
-  // Clasificación por ambiente
+  // Clasificación final por ambiente
   const prodList = problems.filter((p) => isProd(p));
   const nonProdList = problems.filter((p) => !isProd(p));
   const selectedList = tab === "prod" ? prodList : nonProdList;
@@ -141,7 +136,7 @@ export default function OtherProblems() {
         </button>
       </div>
 
-      {/* Render de tarjetas */}
+      {/* Lista según tab activo */}
       {selectedList.map((p) => (
         <ProblemCard key={p.problemId || p.pid} problem={p} username={username} />
       ))}
