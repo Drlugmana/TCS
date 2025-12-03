@@ -1,37 +1,57 @@
-{/* ICONOS */}
+{/* ICONOS CENTRADOS Y HORIZONTALES */}
 <div
   style={{
     display: "flex",
     justifyContent: "center",
     alignItems: "center",
-    gap: "1rem",
-    marginBottom: ".5rem",
+    gap: "1.2rem",
+    margin: "1rem 0",
     flexWrap: "wrap",
   }}
 >
+  {/* Severidad */}
   <img
     src={`/severidad${criticidad}.svg`}
-    width="40"
-    height="40"
+    width="48"
+    height="48"
     title={`Criticidad ${criticidad}`}
+    style={{
+      borderRadius: "8px",
+      backgroundColor: "rgba(255,255,255,0.8)",
+      padding: "4px",
+    }}
   />
+
+  {/* Entorno (Productivo / No Productivo) */}
   <img
     src={
       environment === "Productivo"
         ? "/icon-productivo.svg"
         : "/icon-noproductivo.svg"
     }
-    width="40"
-    height="40"
+    width="48"
+    height="48"
     title={environment}
+    style={{
+      borderRadius: "8px",
+      backgroundColor: "rgba(255,255,255,0.8)",
+      padding: "4px",
+    }}
   />
+
+  {/* Torre (Wintel / Unix / Base de datos) */}
   {towerIcon && (
     <img
       src={towerIcon}
       alt="tower"
-      width="45"
-      height="45"
+      width="48"
+      height="48"
       title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+      style={{
+        borderRadius: "8px",
+        backgroundColor: "rgba(255,255,255,0.8)",
+        padding: "4px",
+      }}
     />
   )}
 </div>
