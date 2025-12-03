@@ -1,0 +1,37 @@
+{/* ICONOS */}
+<div
+  style={{
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: "1rem",
+    marginBottom: ".5rem",
+    flexWrap: "wrap",
+  }}
+>
+  <img
+    src={`/severidad${criticidad}.svg`}
+    width="40"
+    height="40"
+    title={`Criticidad ${criticidad}`}
+  />
+  <img
+    src={
+      environment === "Productivo"
+        ? "/icon-productivo.svg"
+        : "/icon-noproductivo.svg"
+    }
+    width="40"
+    height="40"
+    title={environment}
+  />
+  {towerIcon && (
+    <img
+      src={towerIcon}
+      alt="tower"
+      width="45"
+      height="45"
+      title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+    />
+  )}
+</div>
