@@ -1,57 +1,82 @@
-{/* ICONOS CENTRADOS Y HORIZONTALES */}
+{/* INFO A LA IZQUIERDA / ICONOS A LA DERECHA */}
 <div
   style={{
     display: "flex",
-    justifyContent: "center",
+    justifyContent: "space-between",
     alignItems: "center",
-    gap: "1.2rem",
-    margin: "1rem 0",
-    flexWrap: "wrap",
+    padding: "0 1rem",
+    marginTop: "0.5rem",
   }}
 >
-  {/* Severidad */}
-  <img
-    src={`/severidad${criticidad}.svg`}
-    width="48"
-    height="48"
-    title={`Criticidad ${criticidad}`}
-    style={{
-      borderRadius: "8px",
-      backgroundColor: "rgba(255,255,255,0.8)",
-      padding: "4px",
-    }}
-  />
+  {/* Columna izquierda: información del problema */}
+  <div style={{ flex: 1, paddingRight: "1rem" }}>
+    <h3 style={{ margin: 0, fontSize: "1.1rem" }}>{title}</h3>
+    <p><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+    <p><strong>Impacto:</strong> {impactLevel}</p>
+    <p><strong>Inicio:</strong> {start.toLocaleString()}</p>
+    <p><strong>Estado:</strong> {problem.status?.toUpperCase() || "OPEN"}</p>
+    <p><strong>Criticidad (BIA):</strong> {criticidad}</p>
+    <p><strong>Equipos afectados:</strong> <small>{equipos}</small></p>
+    {hitFromCatalog?.tower && (
+      <p><strong>Torre:</strong> {hitFromCatalog.towerRaw || hitFromCatalog.tower}</p>
+    )}
+  </div>
 
-  {/* Entorno (Productivo / No Productivo) */}
-  <img
-    src={
-      environment === "Productivo"
-        ? "/icon-productivo.svg"
-        : "/icon-noproductivo.svg"
-    }
-    width="48"
-    height="48"
-    title={environment}
+  {/* Columna derecha: íconos */}
+  <div
     style={{
-      borderRadius: "8px",
-      backgroundColor: "rgba(255,255,255,0.8)",
-      padding: "4px",
+      display: "flex",
+      flexDirection: "column",
+      alignItems: "center",
+      justifyContent: "center",
+      gap: "0.7rem",
+      minWidth: "150px",
     }}
-  />
-
-  {/* Torre (Wintel / Unix / Base de datos) */}
-  {towerIcon && (
+  >
+    {/* Severidad */}
     <img
-      src={towerIcon}
-      alt="tower"
-      width="48"
-      height="48"
-      title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+      src={`/severidad${criticidad}.svg`}
+      width="42"
+      height="42"
+      title={`Criticidad ${criticidad}`}
       style={{
         borderRadius: "8px",
         backgroundColor: "rgba(255,255,255,0.8)",
         padding: "4px",
       }}
     />
-  )}
+
+    {/* Entorno */}
+    <img
+      src={
+        environment === "Productivo"
+          ? "/icon-productivo.svg"
+          : "/icon-noproductivo.svg"
+      }
+      width="42"
+      height="42"
+      title={environment}
+      style={{
+        borderRadius: "8px",
+        backgroundColor: "rgba(255,255,255,0.8)",
+        padding: "4px",
+      }}
+    />
+
+    {/* Torre */}
+    {towerIcon && (
+      <img
+        src={towerIcon}
+        alt="tower"
+        width="42"
+        height="42"
+        title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+        style={{
+          borderRadius: "8px",
+          backgroundColor: "rgba(255,255,255,0.8)",
+          padding: "4px",
+        }}
+      />
+    )}
+  </div>
 </div>
