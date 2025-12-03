@@ -1,188 +1,155 @@
-// src/utils/slaUtils.js
+import React, { createContext, useContext, useMemo, useState, useEffect } from 'react';
 
-/** ========================= SLA ========================= **/
-export function getSlaMinutes(criticidad) {
-  switch (criticidad) {
-    case 'S1': return 10;
-    case 'S2': return 30;
-    case 'S3': return 45;
-    default:   return 120; // S4
-  }
+/* ================= Helpers ================= */
+
+function normalizeName(x) {
+  return String(x ?? '').trim().toLowerCase();
 }
 
-export function getColorByPercent(percent) {
-  if (percent > 75) return '#ffffff';
-  if (percent > 50) return '#fff9c4';
-  if (percent > 25) return '#ffe082';
-  return '#ef9a9a';
-}
-
-export function getButtonColorByPercent(percent) {
-  if (percent > 75) return '#1565c0';
-  if (percent > 50) return '#fbc02d';
-  if (percent > 25) return '#fb8c00';
-  return '#d32f2f';
-}
-
-/** ===================== CRITICIDAD (BIA) ===================== **/
-
-const rank = { S1: 0, S2: 1, S3: 2, S4: 3 };
-const peor = (a, b) => (rank[a] < rank[b] ? a : b);
-
-/** Lee letra BIA A–E de cadenas como "C - BIA Crítica" ⇒ S1..S4 */
-function letraBIAaSx(str) {
+// "A - ...", "B) ...", "C ..." -> S1..S4 (D/E -> S4)
+function letterBiaToSx(str) {
   if (!str) return null;
   const v = String(str).trim().toUpperCase();
-  // Al inicio: "A - ...", "B) ...", "C ..." etc.
   const m = v.match(/^\s*([A-E])(?:\s*[-) ]|$)/);
   if (!m) return null;
   const L = m[1];
   if (L === 'A') return 'S1';
   if (L === 'B') return 'S2';
   if (L === 'C') return 'S3';
-  // D y E son S4 según tu documento
   return 'S4';
 }
 
-/** Mapea severidades estándar (evita confundir "BIA CRÍTICA" con CRITICAL) */
-function textoSeveridadASx(str) {
-  if (!str) return null;
-  const v = String(str).trim().toUpperCase();
+// También acepta “Alta/Media/Baja”, “High/Medium/Low” o A/B/C sueltos
+function mapBiaTextToSx(val) {
+  if (!val) return 'S4';
+  const viaLetter = letterBiaToSx(val);
+  if (viaLetter) return viaLetter;
+
+  const v = String(val).trim().toUpperCase();
+  if (v === 'A') return 'S1';
+  if (v === 'B') return 'S2';
+  if (v === 'C') return 'S3';
   if (/\bCRITICAL\b/.test(v)) return 'S1';
   if (/\bHIGH\b|\bALTA\b/.test(v)) return 'S2';
   if (/\bMEDIUM\b|\bMEDIA\b/.test(v)) return 'S3';
   if (/\bLOW\b|\bBAJA\b/.test(v)) return 'S4';
-  return null;
-}
-
-/** Normaliza cualquier valor (S1..S4, A/B/C, "C - BIA Crítica", texto EN/ES) a Sx */
-export function normalizarCriticidad(valor) {
-  if (valor == null) return 'S4';
-
-  // 1) Si trae la letra BIA al inicio, úsala
-  const viaLetra = letraBIAaSx(valor);
-  if (viaLetra) return viaLetra;
-
-  const v = String(valor).trim().toUpperCase();
-
-  // 2) Directo S1..S4
-  if (/^S[1-4]$/.test(v)) return v;
-
-  // 3) Letras aisladas A/B/C
-  if (v === 'A') return 'S1';
-  if (v === 'B') return 'S2';
-  if (v === 'C') return 'S3';
-
-  // 4) Texto estándar
-  const sev = textoSeveridadASx(v);
-  if (sev) return sev;
-
-  // 5) Fallback
   return 'S4';
 }
 
-/** Detecta EnP / No Productivo (tolerante a variantes) */
-function esNoProductivo(env) {
-  if (!env) return false;
-  const e = String(env).toUpperCase();
-  return (
-    e.includes('ENP') ||
-    e.includes('NO PRODUCT') ||
-    e.includes('NON PROD') ||
-    e.includes('NON-PROD') ||
-    e.includes('NPRD') ||
-    (e.includes('NP') && !e.includes('PROD')) // "NP" sin "PROD"
-  );
-}
+// Parser CSV simple (maneja comillas, comas, ; y BOM)
+function parseCSV(text) {
+  // normaliza saltos de línea
+  let s = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
 
-/**
- * Calcula criticidad con trazabilidad.
- * Reglas:
- *  0) Si es EnP/No Productivo ⇒ S4.
- *  1) Si alguna CI trae criticidad/criticality/businessCriticality ⇒ peor (S1 peor).
- *  2) Si no, toma la peor entre severityLevel e impactLevel del problema.
- *  3) Si nada, S4.
- *
- * Devuelve: { criticidad: 'S1'|'S2'|'S3'|'S4', fuente: 'ENP'|'CI'|'SEVERITY/IMPACT'|'DEFAULT', detalles: {...} }
- */
-export function calcularCriticidadDetallada(problem) {
-  // Regla 0: EnP ⇒ S4
-  const env = problem?.environment || problem?.entorno;
-  if (esNoProductivo(env)) {
-    return { criticidad: 'S4', fuente: 'ENP', detalles: { environment: env } };
-  }
+  // Detecta separador por primera línea
+  const firstLine = s.split('\n', 1)[0] ?? '';
+  const sep = (firstLine.match(/;/g)?.length ?? 0) > (firstLine.match(/,/g)?.length ?? 0) ? ';' : ',';
 
-  // Regla 1: buscar en CIs afectadas (incluye todas las variantes de campo CMDB conocidas)
-  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-  let worstFromCI = 'S4';
-  let tuvoCI = false;
-  let fuenteCampo = null;
-  let ciElegida = null;
-  let valorOriginal = null;
+  const rows = [];
+  let i = 0, cur = '', inQuotes = false, row = [];
+  while (i < s.length) {
+    const ch = s[i];
 
-  for (const ci of affected) {
-    const candRaw =
-      ci?.criticidad ??
-      ci?.criticality ??
-      ci?.businessCriticality ??
-      ci?.businesscriticality ??
-      ci?.ciBusinessCriticality ??
-      ci?.ciBusinesscriticality ??
-      ci?.cibusinessCriticality ??
-      ci?.cibusinesscriticality ??
-      ci?.ci_business_criticality ??
-      ci?.ci_businessCriticality ??
-      ci?.ci_businesscriticality ??
-      ci?.severity ??  // por si alguna CI usa "severity"
-      ci?.tier;
-
-    if (candRaw == null) continue;
-
-    const cand = normalizarCriticidad(candRaw);
-    tuvoCI = true;
-
-    if (rank[cand] < rank[worstFromCI]) {
-      worstFromCI = cand;
-      // Guarda qué campo coincidió y con qué CI/valor
-      const posiblesCampos = [
-        'criticidad','criticality','businessCriticality','businesscriticality',
-        'ciBusinessCriticality','ciBusinesscriticality','cibusinessCriticality','cibusinesscriticality',
-        'ci_business_criticality','ci_businessCriticality','ci_businesscriticality',
-        'severity','tier'
-      ];
-      fuenteCampo = posiblesCampos.find(k => k in ci) || 'desconocido';
-      ciElegida = ci?.name || ci?.Nombre || ci?.id || '';
-      valorOriginal = candRaw;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (s[i + 1] === '"') { cur += '"'; i += 2; continue; }
+        inQuotes = false; i++; continue;
+      }
+      cur += ch; i++; continue;
     }
-  }
 
-  if (tuvoCI) {
-    return {
-      criticidad: worstFromCI,
-      fuente: 'CI',
-      detalles: { campo: fuenteCampo, ci: ciElegida, valor: valorOriginal }
-    };
-  }
+    if (ch === '"') { inQuotes = true; i++; continue; }
+    if (ch === sep) { row.push(cur); cur = ''; i++; continue; }
+    if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
 
-  // Regla 2: peor entre severidad/impacto del problema
-  const sev = normalizarCriticidad(problem?.severityLevel);
-  const imp = normalizarCriticidad(problem?.impactLevel);
-  if (problem?.severityLevel || problem?.impactLevel) {
-    return {
-      criticidad: peor(sev, imp),
-      fuente: 'SEVERITY/IMPACT',
-      detalles: { severityLevel: problem?.severityLevel, impactLevel: problem?.impactLevel }
-    };
+    cur += ch; i++;
   }
+  // push final
+  row.push(cur);
+  rows.push(row);
 
-  // Regla 3: fallback
-  return { criticidad: 'S4', fuente: 'DEFAULT', detalles: {} };
+  // encabezados
+  const headers = rows[0] ?? [];
+  const out = [];
+  for (let r = 1; r < rows.length; r++) {
+    const obj = {};
+    for (let c = 0; c < headers.length; c++) obj[headers[c]] = rows[r][c] ?? '';
+    // filas vacías -> saltar
+    if (Object.values(obj).some(v => String(v).trim() !== '')) out.push(obj);
+  }
+  return out;
 }
 
-/** Azúcar: si solo necesitas el string 'Sx' */
-export function calcularCriticidad(problemOrAffected) {
-  if (Array.isArray(problemOrAffected)) {
-    return calcularCriticidadDetallada({ affectedCI: problemOrAffected }).criticidad;
+/* ================= Context ================= */
+
+const Ctx = createContext(null);
+
+export function BiaCatalogProvider({ children }) {
+  const [store, setStore] = useState(() => {
+    try {
+      const raw = localStorage.getItem('biaCatalog.v1');
+      return raw ? JSON.parse(raw) : { map: {}, updatedAt: null };
+    } catch {
+      return { map: {}, updatedAt: null };
+    }
+  });
+
+  // Carga automática si pones /public/bia-catalog.csv
+  useEffect(() => {
+    fetch('/bia-catalog.csv', { cache: 'no-store' })
+      .then(r => (r.ok ? r.text() : Promise.reject()))
+      .then(text => setFromCSVText(text))
+      .catch(() => {});
+    // eslint-disable-next-line
+  }, []);
+
+  function setFromCSVText(text) {
+    const rows = parseCSV(text);
+    const nameKeys = ['Nombre','name','Name','CI','ci','Hostname','host','Equipo','equipo'];
+    const biaKeys  = ['CI Business criticality','businessCriticality','BIA','BIA Criticality','Criticidad BIA','criticidad'];
+
+    const map = {};
+    for (const row of rows) {
+      const keys = Object.keys(row);
+      const kName = keys.find(k => nameKeys.map(x=>x.toLowerCase()).includes(k.toLowerCase()));
+      const kBia  = keys.find(k => biaKeys.map(x=>x.toLowerCase()).includes(k.toLowerCase()));
+      if (!kName || !kBia) continue;
+
+      const name = normalizeName(row[kName]);
+      const raw = String(row[kBia] ?? '').trim();
+      if (!name || !raw) continue;
+
+      const sx = mapBiaTextToSx(raw);
+      map[name] = { raw, sx };
+    }
+    const next = { map, updatedAt: new Date().toISOString() };
+    setStore(next);
+    localStorage.setItem('biaCatalog.v1', JSON.stringify(next));
+    return Object.keys(map).length;
   }
-  return calcularCriticidadDetallada(problemOrAffected).criticidad;
+
+  async function setFromFile(file) {
+    const text = await file.text();
+    return setFromCSVText(text);
+  }
+
+  const api = useMemo(() => ({
+    get: (ciName) => store.map[normalizeName(ciName)] ?? null,
+    size: Object.keys(store.map).length,
+    updatedAt: store.updatedAt,
+    setFromFile,
+    clear: () => {
+      const next = { map: {}, updatedAt: null };
+      setStore(next);
+      localStorage.setItem('biaCatalog.v1', JSON.stringify(next));
+    }
+  }), [store]);
+
+  return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
+}
+
+export function useBiaCatalog() {
+  const ctx = useContext(Ctx);
+  if (!ctx) throw new Error('useBiaCatalog debe usarse dentro de <BiaCatalogProvider>');
+  return ctx;
 }
