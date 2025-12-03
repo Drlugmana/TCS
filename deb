@@ -1,0 +1,174 @@
+// src/components/ProblemCard.jsx
+import React, { useEffect, useState } from "react";
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  getButtonColorByPercent,
+  calcularCriticidad,
+} from "../utils/slaUtils"; // ajusta la ruta si la tenías como "./utils/slaUtils"
+
+export default function ProblemCard({ problem, username }) {
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    endTime,
+    environment,          // puede venir aquí
+    environmentText,      // o aquí
+    environmentIcon,      // o como icono (ruta)
+    affectedCI = [],
+    tenant,
+    problemId,
+  } = problem;
+
+  /* ---------- Estado OPEN / CLOSED ---------- */
+  function normalizeStatus(p) {
+    // lee de varias claves posibles
+    const raw =
+      p?.status ??
+      p?.Status ??
+      p?.problemStatus ??
+      "";
+
+    let s = String(raw).trim().toUpperCase();
+
+    if (!s) {
+      // fallback por tiempo: si tiene endTime => CLOSED
+      if (p?.endTime) return "CLOSED";
+      return "OPEN";
+    }
+    if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+    if (s.includes("OPEN")) return "OPEN";
+    // si es cualquier otro texto, por seguridad asumimos OPEN
+    return "OPEN";
+  }
+  const status = normalizeStatus(problem);
+
+  const statusStyle = status === "CLOSED"
+    ? { background: "#16a34a", color: "#fff" }   // verde
+    : { background: "#dc2626", color: "#fff" };  // rojo
+
+  const statusBadgeBase = {
+    padding: "0.15rem .55rem",
+    borderRadius: "999px",
+    fontSize: ".8rem",
+    fontWeight: 700,
+    lineHeight: 1.4,
+    display: "inline-block",
+  };
+
+  /* ---------- Criticidad (S1–S4) ---------- */
+  const criticidad = calcularCriticidad(affectedCI); // tu lógica actual
+  const criticidadIcon = `/severidad${criticidad}.svg`;
+
+  /* ---------- Ambiente (texto o icono) ---------- */
+  const envText =
+    environmentText ||
+    environment ||
+    "";
+  const envIcon =
+    environmentIcon ||
+    (String(envText).toLowerCase().includes("prod")
+      ? "/icon-productivo.svg"
+      : "/icon-noproductivo.svg");
+
+  /* ---------- SLA timer / colores ---------- */
+  const slaMinutes = getSlaMinutes(criticidad);
+  const start = new Date(startTime);
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const elapsedMs = now - start;
+  const elapsedMinutes = elapsedMs / 60000;
+  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
+  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const totalSeconds = Math.floor(minutes * 60);
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  /* ---------- CI únicos ---------- */
+  const uniqueNames = [...new Set(affectedCI.map((ci) => ci?.name).filter(Boolean))];
+  const equipos = uniqueNames.join(", ");
+
+  const isDisabled = !username;
+  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        borderRadius: "12px",
+        padding: "1rem 1.5rem",
+        marginBottom: "1rem",
+        backgroundColor: bgColor,
+        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+      }}
+    >
+      {/* Izquierda: Iconos y texto */}
+      <div style={{ display: "flex", gap: "0.75rem", alignItems: "flex-start" }}>
+        {/* Iconos */}
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "0.5rem" }}>
+          <img src={criticidadIcon} alt={`criticidad ${criticidad}`} width="40" height="40" title={`Criticidad ${criticidad}`} />
+          <img src={envIcon} alt={envText || "environment"} width="36" height="36" title={envText || ""} />
+        </div>
+
+        {/* Texto */}
+        <div style={{ flex: 1, paddingLeft: "0.25rem" }}>
+          {/* Título + Badge de estado */}
+          <div style={{ display: "flex", alignItems: "center", gap: ".5rem", flexWrap: "wrap" }}>
+            <h3 style={{ margin: 0, padding: 0 }}>{title}</h3>
+            <span style={{ ...statusBadgeBase, ...statusStyle }}>{status}</span>
+          </div>
+
+          <p style={{ margin: 0 }}><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
+          <p style={{ margin: 0 }}><strong>Impacto:</strong> {impactLevel}</p>
+          <p style={{ margin: 0 }}><strong>Inicio:</strong> {new Date(startTime).toLocaleString()}</p>
+          {/* Línea explícita de estado por si necesitas verlo también en el cuerpo */}
+          <p style={{ margin: 0 }}><strong>Estado:</strong> {status}</p>
+          <p style={{ margin: 0 }}><strong>Criticidad (BIA):</strong> {criticidad}</p>
+          <p style={{ margin: 0 }}><strong>Equipos afectados:</strong> {equipos}</p>
+        </div>
+      </div>
+
+      {/* Derecha: temporizador + botón */}
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
+          {formatTime(remainingMinutes)}
+        </div>
+
+        <button
+          disabled={isDisabled}
+          onClick={() => window.open(dynatraceUrl, "_blank")}
+          style={{
+            marginTop: "0.5rem",
+            padding: "0.4rem 1rem",
+            fontSize: "0.9rem",
+            fontWeight: "bold",
+            color: "#fff",
+            backgroundColor: isDisabled ? "#b0b0b0" : buttonColor,
+            border: "none",
+            borderRadius: "8px",
+            cursor: isDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
