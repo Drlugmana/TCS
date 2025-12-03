@@ -1,155 +1,40 @@
-import React, { createContext, useContext, useMemo, useState, useEffect } from 'react';
+import React, { useRef, useState } from 'react';
+import { useBiaCatalog } from '../context/BiaCatalogContext';
 
-/* ================= Helpers ================= */
+export default function BiaCatalogLoader() {
+  const { setFromFile, size, updatedAt, clear } = useBiaCatalog();
+  const [busy, setBusy] = useState(false);
+  const inputRef = useRef(null);
 
-function normalizeName(x) {
-  return String(x ?? '').trim().toLowerCase();
-}
-
-// "A - ...", "B) ...", "C ..." -> S1..S4 (D/E -> S4)
-function letterBiaToSx(str) {
-  if (!str) return null;
-  const v = String(str).trim().toUpperCase();
-  const m = v.match(/^\s*([A-E])(?:\s*[-) ]|$)/);
-  if (!m) return null;
-  const L = m[1];
-  if (L === 'A') return 'S1';
-  if (L === 'B') return 'S2';
-  if (L === 'C') return 'S3';
-  return 'S4';
-}
-
-// También acepta “Alta/Media/Baja”, “High/Medium/Low” o A/B/C sueltos
-function mapBiaTextToSx(val) {
-  if (!val) return 'S4';
-  const viaLetter = letterBiaToSx(val);
-  if (viaLetter) return viaLetter;
-
-  const v = String(val).trim().toUpperCase();
-  if (v === 'A') return 'S1';
-  if (v === 'B') return 'S2';
-  if (v === 'C') return 'S3';
-  if (/\bCRITICAL\b/.test(v)) return 'S1';
-  if (/\bHIGH\b|\bALTA\b/.test(v)) return 'S2';
-  if (/\bMEDIUM\b|\bMEDIA\b/.test(v)) return 'S3';
-  if (/\bLOW\b|\bBAJA\b/.test(v)) return 'S4';
-  return 'S4';
-}
-
-// Parser CSV simple (maneja comillas, comas, ; y BOM)
-function parseCSV(text) {
-  // normaliza saltos de línea
-  let s = text.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-
-  // Detecta separador por primera línea
-  const firstLine = s.split('\n', 1)[0] ?? '';
-  const sep = (firstLine.match(/;/g)?.length ?? 0) > (firstLine.match(/,/g)?.length ?? 0) ? ';' : ',';
-
-  const rows = [];
-  let i = 0, cur = '', inQuotes = false, row = [];
-  while (i < s.length) {
-    const ch = s[i];
-
-    if (inQuotes) {
-      if (ch === '"') {
-        if (s[i + 1] === '"') { cur += '"'; i += 2; continue; }
-        inQuotes = false; i++; continue;
-      }
-      cur += ch; i++; continue;
-    }
-
-    if (ch === '"') { inQuotes = true; i++; continue; }
-    if (ch === sep) { row.push(cur); cur = ''; i++; continue; }
-    if (ch === '\n') { row.push(cur); rows.push(row); row = []; cur = ''; i++; continue; }
-
-    cur += ch; i++;
-  }
-  // push final
-  row.push(cur);
-  rows.push(row);
-
-  // encabezados
-  const headers = rows[0] ?? [];
-  const out = [];
-  for (let r = 1; r < rows.length; r++) {
-    const obj = {};
-    for (let c = 0; c < headers.length; c++) obj[headers[c]] = rows[r][c] ?? '';
-    // filas vacías -> saltar
-    if (Object.values(obj).some(v => String(v).trim() !== '')) out.push(obj);
-  }
-  return out;
-}
-
-/* ================= Context ================= */
-
-const Ctx = createContext(null);
-
-export function BiaCatalogProvider({ children }) {
-  const [store, setStore] = useState(() => {
+  const onPick = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setBusy(true);
     try {
-      const raw = localStorage.getItem('biaCatalog.v1');
-      return raw ? JSON.parse(raw) : { map: {}, updatedAt: null };
-    } catch {
-      return { map: {}, updatedAt: null };
+      const count = await setFromFile(f);
+      alert(`Catálogo cargado: ${count} CIs.`);
+    } catch (err) {
+      console.error(err);
+      alert('No pude leer el CSV. Asegúrate de columnas "Nombre" y "CI Business criticality".');
+    } finally {
+      setBusy(false);
+      if (inputRef.current) inputRef.current.value = '';
     }
-  });
+  };
 
-  // Carga automática si pones /public/bia-catalog.csv
-  useEffect(() => {
-    fetch('/bia-catalog.csv', { cache: 'no-store' })
-      .then(r => (r.ok ? r.text() : Promise.reject()))
-      .then(text => setFromCSVText(text))
-      .catch(() => {});
-    // eslint-disable-next-line
-  }, []);
-
-  function setFromCSVText(text) {
-    const rows = parseCSV(text);
-    const nameKeys = ['Nombre','name','Name','CI','ci','Hostname','host','Equipo','equipo'];
-    const biaKeys  = ['CI Business criticality','businessCriticality','BIA','BIA Criticality','Criticidad BIA','criticidad'];
-
-    const map = {};
-    for (const row of rows) {
-      const keys = Object.keys(row);
-      const kName = keys.find(k => nameKeys.map(x=>x.toLowerCase()).includes(k.toLowerCase()));
-      const kBia  = keys.find(k => biaKeys.map(x=>x.toLowerCase()).includes(k.toLowerCase()));
-      if (!kName || !kBia) continue;
-
-      const name = normalizeName(row[kName]);
-      const raw = String(row[kBia] ?? '').trim();
-      if (!name || !raw) continue;
-
-      const sx = mapBiaTextToSx(raw);
-      map[name] = { raw, sx };
-    }
-    const next = { map, updatedAt: new Date().toISOString() };
-    setStore(next);
-    localStorage.setItem('biaCatalog.v1', JSON.stringify(next));
-    return Object.keys(map).length;
-  }
-
-  async function setFromFile(file) {
-    const text = await file.text();
-    return setFromCSVText(text);
-  }
-
-  const api = useMemo(() => ({
-    get: (ciName) => store.map[normalizeName(ciName)] ?? null,
-    size: Object.keys(store.map).length,
-    updatedAt: store.updatedAt,
-    setFromFile,
-    clear: () => {
-      const next = { map: {}, updatedAt: null };
-      setStore(next);
-      localStorage.setItem('biaCatalog.v1', JSON.stringify(next));
-    }
-  }), [store]);
-
-  return <Ctx.Provider value={api}>{children}</Ctx.Provider>;
-}
-
-export function useBiaCatalog() {
-  const ctx = useContext(Ctx);
-  if (!ctx) throw new Error('useBiaCatalog debe usarse dentro de <BiaCatalogProvider>');
-  return ctx;
+  return (
+    <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center' }}>
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".csv,text/csv"
+        onChange={onPick}
+        disabled={busy}
+      />
+      <button onClick={clear} disabled={busy || size===0}>Limpiar catálogo</button>
+      <small style={{ opacity:.7 }}>
+        {size} CIs cargados {updatedAt ? `· ${new Date(updatedAt).toLocaleString()}` : ''}
+      </small>
+    </div>
+  );
 }
