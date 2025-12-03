@@ -4,12 +4,26 @@ import { fetchNoTcsProblemsDay, ONLY_DATE } from "../api/problems";
 import ProblemCard from "../components/ProblemCard";
 import UsernameInput from "../components/UsernameInput";
 
-// Helper: decide si un ambiente es Productivo
+/** Decide si un ambiente es Productivo */
 function isProdEnv(env) {
   if (!env) return false;
-  const e = String(env).toLowerCase();
-  // considera 'prod' como productivo y evita falsos positivos con 'no prod'
-  return (e.includes("prod") && !e.includes("no prod")) || e.includes("productivo");
+  const e = String(env).toLowerCase().trim();
+
+  // claves de no productivo (ganan prioridad)
+  const nonProd = [
+    "enp", "qa", "q/a", "dev", "desa", "desarrollo",
+    "test", "stg", "stage", "staging",
+    "preprod", "pre-prod", "pre prod",
+    "no prod", "non prod", "non-prod", "np"
+  ];
+  if (nonProd.some(k => e.includes(k))) return false;
+
+  // claves de productivo
+  const prod = ["prod", "productivo", "produccion", "producción"];
+  if (prod.some(k => e.includes(k))) return true;
+
+  // por defecto, lo tratamos como no productivo
+  return false;
 }
 
 export default function OtherProblems() {
@@ -39,7 +53,7 @@ export default function OtherProblems() {
           },
         });
       } catch (e) {
-        setError(e.message);
+        setError(e.message || String(e));
       } finally {
         if (mounted) setLoading(false);
       }
@@ -53,10 +67,9 @@ export default function OtherProblems() {
 
   if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
 
-  // Separaciones por ambiente
+  // Separación por ambiente
   const prodList = problems.filter((p) => isProdEnv(p.environment));
   const nonProdList = problems.filter((p) => !isProdEnv(p.environment));
-
   const selectedList = tab === "prod" ? prodList : nonProdList;
 
   return (
@@ -74,18 +87,18 @@ export default function OtherProblems() {
         <p>No hay problemas de terceros el {ONLY_DATE}.</p>
       )}
 
-      {/* Tabs Productivo / No Productivo */}
+      {/* Tabs: Productivo / No Productivo */}
       <div style={{ display: "flex", gap: ".5rem", margin: "1rem 0" }}>
         <button
           onClick={() => setTab("prod")}
           disabled={tab === "prod"}
           style={{
             padding: ".4rem .8rem",
-            borderRadius: "8px",
+            borderRadius: "999px",
             border: "1px solid #cbd5e1",
             cursor: tab === "prod" ? "default" : "pointer",
-            background: tab === "prod" ? "#e0f2fe" : "#ffffff",
-            fontWeight: tab === "prod" ? "700" : "500",
+            background: tab === "prod" ? "#e0f2fe" : "#f8fafc",
+            fontWeight: tab === "prod" ? 700 : 500,
           }}
           title="Mostrar problemas de ambiente Productivo"
         >
@@ -97,11 +110,11 @@ export default function OtherProblems() {
           disabled={tab === "nonprod"}
           style={{
             padding: ".4rem .8rem",
-            borderRadius: "8px",
+            borderRadius: "999px",
             border: "1px solid #cbd5e1",
             cursor: tab === "nonprod" ? "default" : "pointer",
-            background: tab === "nonprod" ? "#fef3c7" : "#ffffff",
-            fontWeight: tab === "nonprod" ? "700" : "500",
+            background: tab === "nonprod" ? "#fef3c7" : "#f8fafc",
+            fontWeight: tab === "nonprod" ? 700 : 500,
           }}
           title="Mostrar problemas de ambientes No Productivos (EnP/QA/DEV/etc.)"
         >
