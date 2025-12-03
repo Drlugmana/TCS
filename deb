@@ -1,4 +1,4 @@
-{/* CONTENEDOR PRINCIPAL: INFO + ICONOS + TEMPORIZADOR */}
+{/* CONTENEDOR PRINCIPAL */}
 <div
   style={{
     display: "flex",
@@ -8,9 +8,9 @@
     gap: "1rem",
   }}
 >
-  {/* IZQUIERDA: INFORMACIÓN DEL PROBLEMA */}
-  <div style={{ flex: 1 }}>
-    <h3 style={{ margin: 0, fontSize: "1.1rem", fontWeight: "bold" }}>{title}</h3>
+  {/* COLUMNA IZQUIERDA: INFORMACIÓN */}
+  <div style={{ flex: 1, paddingRight: "1rem" }}>
+    <h3 style={{ margin: 0, fontSize: "1.1rem" }}>{title}</h3>
     <p><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
     <p><strong>Impacto:</strong> {impactLevel}</p>
     <p><strong>Inicio:</strong> {start.toLocaleString()}</p>
@@ -22,7 +22,7 @@
     )}
   </div>
 
-  {/* CENTRO: ICONOS */}
+  {/* COLUMNA CENTRAL: ICONOS */}
   <div
     style={{
       display: "flex",
@@ -30,12 +30,12 @@
       alignItems: "center",
       gap: "1rem",
       flexShrink: 0,
-      minWidth: "180px",
+      minWidth: "200px",
     }}
   >
-    {/* Tamaño de íconos */}
+    {/* Tamaño íconos (ajusta aquí) */}
     {(() => {
-      const size = 50; // 🔧 AJUSTA EL TAMAÑO AQUÍ (px)
+      const size = 60;
       return (
         <>
           <img
@@ -83,11 +83,11 @@
     })()}
   </div>
 
-  {/* DERECHA: TEMPORIZADOR Y BOTÓN */}
+  {/* COLUMNA DERECHA: TEMPORIZADOR Y BOTÓN */}
   <div
     style={{
       textAlign: "center",
-      minWidth: "120px",
+      minWidth: "140px",
     }}
   >
     <div
