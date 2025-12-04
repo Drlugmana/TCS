@@ -1,119 +1,219 @@
-{/* CONTENEDOR PRINCIPAL */}
-<div
-  style={{
-    display: "flex",
-    justifyContent: "space-between",
-    alignItems: "center",
-    padding: "1rem",
-    gap: "1rem",
-  }}
->
-  {/* COLUMNA IZQUIERDA: INFORMACIÓN */}
-  <div style={{ flex: 1, paddingRight: "1rem" }}>
-    <h3 style={{ margin: 0, fontSize: "1.1rem" }}>{title}</h3>
-    <p><strong>Severidad Dynatrace:</strong> {severityLevel}</p>
-    <p><strong>Impacto:</strong> {impactLevel}</p>
-    <p><strong>Inicio:</strong> {start.toLocaleString()}</p>
-    <p><strong>Estado:</strong> {problem.status?.toUpperCase() || "OPEN"}</p>
-    <p><strong>Criticidad (BIA):</strong> {criticidad}</p>
-    <p><strong>Equipos afectados:</strong> <small>{equipos}</small></p>
-    {hitFromCatalog?.tower && (
-      <p><strong>Torre:</strong> {hitFromCatalog.towerRaw || hitFromCatalog.tower}</p>
-    )}
-  </div>
+// src/api/problems.js
 
-  {/* COLUMNA CENTRAL: ICONOS */}
-  <div
-    style={{
-      display: "flex",
-      justifyContent: "center",
-      alignItems: "center",
-      gap: "1rem",
-      flexShrink: 0,
-      minWidth: "200px",
-    }}
-  >
-    {/* Tamaño íconos (ajusta aquí) */}
-    {(() => {
-      const size = 60;
-      return (
-        <>
-          <img
-            src={`/severidad${criticidad}.svg`}
-            width={size}
-            height={size}
-            title={`Criticidad ${criticidad}`}
-            style={{
-              borderRadius: "8px",
-              backgroundColor: "rgba(255,255,255,0.9)",
-              padding: "4px",
-            }}
-          />
-          <img
-            src={
-              environment === "Productivo"
-                ? "/icon-productivo.svg"
-                : "/icon-noproductivo.svg"
-            }
-            width={size}
-            height={size}
-            title={environment}
-            style={{
-              borderRadius: "8px",
-              backgroundColor: "rgba(255,255,255,0.9)",
-              padding: "4px",
-            }}
-          />
-          {towerIcon && (
-            <img
-              src={towerIcon}
-              alt="tower"
-              width={size}
-              height={size}
-              title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-              style={{
-                borderRadius: "8px",
-                backgroundColor: "rgba(255,255,255,0.9)",
-                padding: "4px",
-              }}
-            />
-          )}
-        </>
-      );
-    })()}
-  </div>
+// =========================
+// 0) CONFIG OPCIONAL FECHA
+// =========================
+// Si quieres forzar un día puntual (modo demo), pon una fecha "YYYY-MM-DD".
+// Si NO quieres limitar por fecha (histórico completo), déjalo en null.
+export const ONLY_DATE = null; // <-- antes "2025-11-25"; ahora sin límite por defecto
 
-  {/* COLUMNA DERECHA: TEMPORIZADOR Y BOTÓN */}
-  <div
-    style={{
-      textAlign: "center",
-      minWidth: "140px",
-    }}
-  >
-    <div
-      style={{
-        fontSize: "1.5rem",
-        fontWeight: "bold",
-        marginBottom: "0.5rem",
-      }}
-    >
-      {formatTime(remainingMinutes)}
-    </div>
+// =========================
+// 1) BASE DE LA API (de .env)
+// =========================
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
 
-    <button
-      disabled={isDisabled}
-      onClick={() => window.open(dynatraceUrl, "_blank")}
-      style={{
-        padding: "0.5rem 1rem",
-        border: "none",
-        borderRadius: "8px",
-        fontWeight: "bold",
-        cursor: isDisabled ? "not-allowed" : "pointer",
-        backgroundColor: isDisabled ? "#bebebe" : buttonColor,
-        color: "white",
-      }}
-    >
-      Revisar problema
-    </button>
-  </div>
-</div>
+// endpoint final
+const API = `${BASE}/api/Problems`;
+
+// =========================
+// 2) Normalizador robusto
+// =========================
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // start/end (acepta diferentes nombres que puede mandar tu API)
+    const startRaw =
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      null;
+
+    const endRaw =
+      p.endTime ??
+      p.endTimeUtc ??
+      p.EndTime ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      null;
+
+    // jurisdicción (varios posibles campos)
+    const jurisRaw =
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction?.Jurisdiction ??
+      p.Jurisdiccion ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
+
+    const juris =
+      typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+
+    const isTcs =
+      p.jurisdiction?.isTcs ??
+      (typeof juris === "string" ? (juris === "TCS" ? true : false) : false);
+
+    // ids/títulos
+    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
+    const title = p.title ?? p.shortDescription ?? "(sin título)";
+
+    // otros campos que usa ProblemCard
+    const severityLevel = p.severityLevel ?? p.severity ?? "";
+    const impactLevel = p.impactLevel ?? p.impact ?? "";
+    const environment = p.environment ?? p.environmentName ?? "";
+    const affectedCI =
+      p.affectedCI ??
+      p.affectedEntities ??
+      p.affectedEntitiesList ??
+      [];
+
+    const status = p.status ?? p.state ?? "";       // "OPEN" | "CLOSED"
+    const tenant = p.tenant ?? p.domain ?? "";
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+    };
+  });
+}
+
+// =====================================
+// 3) Fetch de UNA página con query-params
+// =====================================
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+
+  const res = await fetch(url, {
+    headers: { accept: "application/json" },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  // Puede venir array directo o envuelto
+  const json = await res.json();
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// =====================================
+// 4) Rango para un solo día local (opcional)
+// =====================================
+function getDayRange(dateStr /* YYYY-MM-DD */) {
+  // 00:00:00 a 23:59:59 LOCAL convertidos a ISO
+  const start = new Date(`${dateStr}T00:00:00`);
+  const end = new Date(`${dateStr}T23:59:59`);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+// =====================================================
+// 5) Fetch histórico con paginado + onBatch (streaming)
+// =====================================================
+export async function fetchAllProblems({
+  onlyDate = ONLY_DATE,   // si viene null => NO limita por fecha (trae todo)
+  pageSize = 500,
+  maxPages = 40,
+  onBatch,                // function (items) { ... } (opcional)
+  tcsFilter,              // true -> solo TCS, false -> solo NO TCS, undefined -> todos
+  startIso,               // si quieres forzar desde fecha/hora ISO
+  endIso,                 // si quieres forzar hasta fecha/hora ISO
+  recentDays,            // si quieres SOLO lo reciente (ej: 7 días)
+} = {}) {
+  // Si piden recentDays, override de rango:
+  let range = { startIso, endIso };
+  if (typeof recentDays === "number" && recentDays > 0) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - recentDays);
+    range = { startIso: start.toISOString(), endIso: end.toISOString() };
+  }
+
+  // Si no pasan recentDays y sí pasan onlyDate, usar ese día puntual:
+  if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
+    range = getDayRange(onlyDate);
+  }
+
+  // Nota: si range sigue vacío => NO ponemos start/end => el API devuelve TODO el historial
+
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({
+      pageNumber: page,
+      pageSize,
+      startIso: range.startIso,
+      endIso: range.endIso,
+    });
+
+    if (!batch.length) break;
+
+    // filtrar por TCS/NO TCS si lo piden
+    const filtered =
+      typeof tcsFilter === "boolean" ? batch.filter((x) => x.isTcs === tcsFilter) : batch;
+
+    if (onBatch) onBatch(filtered);
+    all = all.concat(filtered);
+
+    if (batch.length < pageSize) break; // última página
+  }
+
+  // Ordenar: más recientes primero (por startTime)
+  all.sort((a, b) => {
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+    return db - da;
+  });
+
+  return all;
+}
+
+// ===================
+// 6) Conveniencias
+// ===================
+
+// Día puntual de TCS (si no pasas dateStr y ONLY_DATE es null, igual trae TODO)
+export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
+
+// Día puntual de NO TCS
+export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
+
+// Todo el historial TCS (sin fecha)
+export const fetchTcsAllHistory = (opts = {}) =>
+  fetchAllProblems({ onlyDate: null, tcsFilter: true, ...opts });
+
+// Todo el historial NO TCS (sin fecha)
+export const fetchNoTcsAllHistory = (opts = {}) =>
+  fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
+
+// Solo lo reciente (ej: últimos 7 días) — TCS/NO TCS o todos
+export const fetchRecentProblems = (recentDays = 7, opts = {}) =>
+  fetchAllProblems({ onlyDate: null, recentDays, ...opts });
