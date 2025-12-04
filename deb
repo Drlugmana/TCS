@@ -1,29 +1,25 @@
 // src/api/problems.js
 
 // ==============================
-// 0) CONFIG OPCIONAL FECHA
+// CONFIG OPCIONAL FECHA
 // ==============================
-// Si quieres forzar un día puntual (modo demo), pon una fecha "YYYY-MM-DD".
-// Si NO quieres limitar por fecha (histórico completo), déjalo en null.
-export const ONLY_DATE = null; // <-- antes “2025-11-25”; ahora sin límite por defecto
+export const ONLY_DATE = null;
 
 // ==============================
-// 1) BASE DE LA API (de .env)
+// BASE DE LA API (de .env)
 // ==============================
 const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
 
-// endpoint final
 const API = `${BASE}/api/Problems`;
 
 // ==============================
-// 2) Normalizador robusto
+// Normalizador robusto
 // ==============================
 function normalize(list) {
   if (!Array.isArray(list)) return [];
 
   return list.map((p) => {
-    // start/end (acepta diferentes nombres que puede mandar tu API)
     const startRaw =
       p.startTime ??
       p.startTimeUtc ??
@@ -40,7 +36,6 @@ function normalize(list) {
       p.end_date ??
       null;
 
-    // jurisdicción (varios posibles campos)
     const jurisRaw =
       p.jurisdiction?.label ??
       p.jurisdiction?.name ??
@@ -52,26 +47,16 @@ function normalize(list) {
       "";
 
     const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+    const isTcs = juris === "TCS";
 
-    const isTcs =
-      p.jurisdiction?.isTcs ??
-      (typeof juris === "string" ? (juris === "TCS" ? true : false) : false);
-
-    // ids/títulos
     const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
     const title = p.title ?? p.shortDescription ?? "(sin título)";
-
-    // otros campos que usa ProblemCard
     const severityLevel = p.severityLevel ?? p.severity ?? "";
     const impactLevel = p.impactLevel ?? p.impact ?? "";
     const environment = p.environment ?? p.environmentName ?? "";
     const affectedCI =
-      p.affectedCI ??
-      p.affectedEntities ??
-      p.affectedEntitiesList ??
-      [];
+      p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
 
-    // "OPEN" | "CLOSED"
     const status = p.status ?? p.state ?? "";
     const tenant = p.tenant ?? p.domain ?? "";
 
@@ -94,7 +79,7 @@ function normalize(list) {
 }
 
 // ==============================
-// 3) Fetch de UNA página con query-params
+// Fetch de una página
 // ==============================
 async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   const params = new URLSearchParams();
@@ -104,17 +89,13 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   if (endIso) params.set("end", endIso);
 
   const url = `${API}?${params.toString()}`;
-
-  const res = await fetch(url, {
-    headers: { accept: "application/json" },
-  });
+  const res = await fetch(url, { headers: { accept: "application/json" } });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
   }
 
-  // Puede venir array directo o envuelto
   const json = await res.json();
   const items = Array.isArray(json)
     ? json
@@ -124,43 +105,19 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
 }
 
 // ==============================
-// 4) Rango para un solo día local (opcional)
-// ==============================
-function getDayRange(dateStr /* YYYY-MM-DD */) {
-  // 00:00:00 a 23:59:59 LOCAL convertidos a ISO
-  const start = new Date(`${dateStr}T00:00:00`);
-  const end = new Date(`${dateStr}T23:59:59`);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
-}
-
-// ==============================
-// 5) Fetch histórico con paginado + onBatch (streaming)
+// Función base con paginado
 // ==============================
 export async function fetchAllProblems({
-  onlyDate = ONLY_DATE, // si viene null => NO limita por fecha (trae todo)
   pageSize = 500,
   maxPages = 40,
-  onBatch,             // function (items) { ... } (opcional)
-  tcsFilter,           // true -> solo TCS, false -> solo NO TCS, undefined -> todos
-  startIso,            // si quieres forzar desde fecha/hora ISO
-  endIso,              // si quieres forzar hasta fecha/hora ISO
-  recentDays,          // si quieres SOLO lo reciente (ej: 7 días)
+  recentDays = 7,
+  tcsFilter,
 } = {}) {
-  // Si piden recentDays, override de rango:
-  let range = { startIso, endIso };
-  if (typeof recentDays === "number" && recentDays > 0) {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(end.getDate() - recentDays);
-    range = { startIso: start.toISOString(), endIso: end.toISOString() };
-  }
+  const end = new Date();
+  const start = new Date();
+  start.setDate(end.getDate() - recentDays);
 
-  // Si no pasan recentDays y sí pasan onlyDate, usar ese día puntual:
-  if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
-    range = getDayRange(onlyDate);
-  }
-
-  // Nota: si range sigue vacío => NO ponemos start/end => el API devuelve TODO el historial
+  const range = { startIso: start.toISOString(), endIso: end.toISOString() };
 
   let all = [];
   for (let page = 1; page <= maxPages; page++) {
@@ -173,17 +130,13 @@ export async function fetchAllProblems({
 
     if (!batch.length) break;
 
-    // filtrar por TCS/NO TCS si lo piden
     const filtered =
       typeof tcsFilter === "boolean" ? batch.filter((x) => x.isTcs === tcsFilter) : batch;
 
-    if (onBatch) onBatch(filtered);
     all = all.concat(filtered);
-
-    if (batch.length < pageSize) break; // última página
+    if (batch.length < pageSize) break;
   }
 
-  // Ordenar: más recientes primero (por startTime)
   all.sort((a, b) => {
     const da = a.startTime ? new Date(a.startTime).getTime() : 0;
     const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -194,25 +147,109 @@ export async function fetchAllProblems({
 }
 
 // ==============================
-// 6) Conveniencias
+// Helpers
 // ==============================
+export const fetchOpenRecentProblems = async ({
+  recentDays = 7,
+  tcsFilter,
+  limit = 500,
+} = {}) => {
+  const all = await fetchAllProblems({ recentDays, tcsFilter });
+  const abiertas = all.filter((x) => (x.status || "").toUpperCase() === "OPEN");
+  return abiertas.slice(0, limit);
+};
 
-// Día puntual de TCS (si no pasas dateStr y ONLY_DATE es null, igual trae TODO)
-export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
-  fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
+export const fetchOpenRecentTcsProblems = (opts = {}) =>
+  fetchOpenRecentProblems({ ...opts, tcsFilter: true });
 
-// Día puntual de NO TCS
-export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
-  fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
+export const fetchOpenRecentNoTcsProblems = (opts = {}) =>
+  fetchOpenRecentProblems({ ...opts, tcsFilter: false });
 
-// Todo el historial TCS (sin fecha)
-export const fetchTcsAllHistory = (opts = {}) =>
-  fetchAllProblems({ onlyDate: null, tcsFilter: true, ...opts });
+-----
 
-// Todo el historial NO TCS (sin fecha)
-export const fetchNoTcsAllHistory = (opts = {}) =>
-  fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
+import { useEffect, useState } from "react";
+import { fetchOpenRecentTcsProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-// Solo lo reciente (ej: últimos 7 días) – TCS/NO TCS o todos
-export const fetchRecentProblems = (recentDays = 7, opts = {}) =>
-  fetchAllProblems({ onlyDate: null, recentDays, ...opts });
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    async function load() {
+      try {
+        setLoading(true);
+        const items = await fetchOpenRecentTcsProblems({ recentDays: 7 });
+        if (mounted) setProblems(items);
+      } catch (err) {
+        if (mounted) setError(err.message);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+    load();
+    return () => (mounted = false);
+  }, []);
+
+  if (error) return <p style={{ color: "red" }}>Error: {error}</p>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas TCS Abiertos Recientes</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {loading && <p>Cargando...</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas abiertos.</p>}
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+------
+import { useEffect, useState } from "react";
+import { fetchOpenRecentNoTcsProblems } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
+
+export default function NoTCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    async function load() {
+      try {
+        setLoading(true);
+        const items = await fetchOpenRecentNoTcsProblems({ recentDays: 7 });
+        if (mounted) setProblems(items);
+      } catch (err) {
+        if (mounted) setError(err.message);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+    load();
+    return () => (mounted = false);
+  }, []);
+
+  if (error) return <p style={{ color: "red" }}>Error: {error}</p>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>Problemas NO TCS Abiertos Recientes</h2>
+      <UsernameInput value={username} onChange={setUsername} />
+      {loading && <p>Cargando...</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas abiertos.</p>}
+      {problems.map((p) => (
+        <ProblemCard key={p.problemId} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
