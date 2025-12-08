@@ -1,14 +1,18 @@
 // src/components/ProblemCard.jsx
 import React, { useEffect, useState } from "react";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
 import {
   getSlaMinutes,
   getColorByPercent,
   getButtonColorByPercent,
   calcularCriticidadDetallada,
 } from "../utils/slaUtils";
-import { useBiaCatalog } from "../context/BiaCatalogContext";
 
-// ==== Normaliza estado OPEN/CLOSED (con fallback por endTime) ====
+/* ===========================
+   Helpers
+   =========================== */
+
+// Normaliza estado OPEN/CLOSED (con fallback por endTime)
 function normalizeStatus(p) {
   const raw =
     p?.status ??
@@ -18,54 +22,73 @@ function normalizeStatus(p) {
 
   const s = String(raw).trim().toUpperCase();
 
-  // Si no vino status pero sí hay endTime => se cerró
   if (!s) {
+    // Si no vino status pero sí hay endTime => se cerró
     if (p?.endTime) return "CLOSED";
     return "OPEN";
   }
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
   if (s.includes("OPEN")) return "OPEN";
-  return p?.endTime ? "CLOSED" : "OPEN";
+  return "OPEN";
 }
 
-// ==== Traduce towerKey -> ícono (ajusta rutas a tus SVG/PNG) ====
+// Traduce towerKey a ruta de icono
 function towerToIconPath(towerKey) {
   if (!towerKey) return null;
   const key = String(towerKey).toLowerCase();
 
+  // Wintel
   if (key.includes("wintel") || key.includes("windows")) {
     return "/icons/towers/wintel.svg";
   }
+  // Base de datos
   if (
     key.includes("bdd") ||
     key.includes("base de datos") ||
     key.includes("database") ||
     key.includes("bd")
   ) {
-    return "/icons/towers/base.svg";
+    return "/icons/towers/Base.svg";
   }
+  // Unix / Linux / AIX
   if (key.includes("unix") || key.includes("aix") || key.includes("linux")) {
     return "/icons/towers/unix.svg";
   }
   return null;
 }
 
+// Formatea HH:MM:SS
+function fmtHMS(minutes) {
+  const totalSeconds = Math.floor(minutes * 60);
+  const hrs = Math.floor(totalSeconds / 3600);
+  const mins = Math.floor((totalSeconds % 3600) / 60);
+  const secs = totalSeconds % 60;
+  return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(
+    2,
+    "0"
+  )}:${String(secs).padStart(2, "0")}`;
+}
+
+/* ===========================
+   Componente principal
+   =========================== */
 export default function ProblemCard({ problem, username }) {
   const {
     title,
-    severityLevel = "",
-    impactLevel = "",
+    severityLevel,
+    impactLevel,
     startTime,
     endTime,
-    environment = "",
+    environment,
     affectedCI = [],
     tenant,
     problemId,
   } = problem;
 
+  // Catálogo (para obtener tower a partir del CI)
   const { get: catalogGet } = useBiaCatalog();
 
-  // Buscar coincidencia con catálogo
+  // Buscar coincidencia simple por nombre
   const hitFromCatalog = (() => {
     for (const ci of affectedCI || []) {
       const name = ci?.name || ci?.Nombre;
@@ -75,17 +98,70 @@ export default function ProblemCard({ problem, username }) {
     return null;
   })();
 
+  // Icono de torre (transparentes .svg)
   const towerIcon = towerToIconPath(hitFromCatalog?.tower);
-  const criticidad = calcularCriticidadDetallada(problem, {
+
+  // --- Criticidad normalizada a STRING ---
+  const criticidadRaw = calcularCriticidadDetallada(problem, {
     catalogLookup: (ciName) => catalogGet(ciName),
   });
 
-  // === ESTADO OPEN/CLOSED ===
+  const criticidadStr =
+    typeof criticidadRaw === "object" && criticidadRaw !== null
+      ? criticidadRaw.criticidad ??
+        criticidadRaw.level ??
+        criticidadRaw.value ??
+        (typeof criticidadRaw.toString === "function"
+          ? criticidadRaw.toString()
+          : "")
+      : criticidadRaw ?? "";
+
+  // Estado y colores
   const status = normalizeStatus(problem);
-  const statusStyle =
-    status === "CLOSED"
-      ? { background: "#16a34a", color: "#fff" } // Verde
-      : { background: "#dc2626", color: "#fff" }; // Rojo
+  const isOpen = status === "OPEN";
+
+  const slaMinutes = getSlaMinutes(criticidadStr);
+  const start = startTime ? new Date(startTime) : new Date();
+
+  const [now, setNow] = useState(new Date());
+
+  // El temporizador SOLO corre cuando está OPEN
+  useEffect(() => {
+    if (!isOpen) return; // no correr
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, [isOpen]);
+
+  // Cálculo de tiempo/restantes y colores
+  const elapsedMinutes = isOpen ? Math.max((now - start) / 60000, 0) : 0;
+  const remainingMinutes = isOpen
+    ? Math.max(slaMinutes - elapsedMinutes, 0)
+    : 0;
+  const percentRemaining = slaMinutes
+    ? Math.max((remainingMinutes / slaMinutes) * 100, 0)
+    : 0;
+
+  const bgColor = isOpen
+    ? getColorByPercent(percentRemaining)
+    : "#f2f2f2";
+  const buttonColor = isOpen
+    ? getButtonColorByPercent(percentRemaining)
+    : "#9aa0a6";
+
+  // Nombres únicos de equipos
+  const uniqueNames = [...new Set((affectedCI || []).map((ci) => ci?.name).filter(Boolean))];
+  const equipos = uniqueNames.join(", ");
+
+  // URL Dynatrace segura
+  const dynatraceUrl =
+    tenant && problemId
+      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+      : null;
+
+  // Badge de estado
+  const statusStyle = status === "CLOSED"
+    ? { background: "#16a34a", color: "#fff" } // verde
+    : { background: "#dc2626", color: "#fff" }; // rojo
 
   const statusBadgeBase = {
     padding: "0.15rem .55rem",
@@ -95,58 +171,6 @@ export default function ProblemCard({ problem, username }) {
     lineHeight: 1.4,
     display: "inline-block",
   };
-
-  // === SLA / colores ===
-  const slaMinutes = getSlaMinutes(criticidad);
-  const start = new Date(startTime);
-  const end = endTime ? new Date(endTime) : null;
-
-  // Estado para el reloj (solo si está OPEN)
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    if (status !== "OPEN") return; // 🔒 no crear intervalo si está cerrado
-    const id = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(id);
-  }, [status]);
-
-  // Si está OPEN, el tiempo progresa con 'now'.
-  // Si está CLOSED, se “congela” usando 'end' (o 0 si no hay end aún).
-  const elapsedMinutes =
-    status === "OPEN"
-      ? Math.max((now - start) / 60000, 0)
-      : Math.max(((end ?? start) - start) / 60000, 0);
-
-  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
-  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
-
-  const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor =
-    status === "OPEN"
-      ? getButtonColorByPercent(percentRemaining)
-      : "#b0b0b0";
-
-  // Formateo hh:mm:ss
-  const formatTime = (minutes) => {
-    const totalSeconds = Math.floor(minutes * 60);
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(
-      2,
-      "0"
-    )}:${String(secs).padStart(2, "0")}`;
-  };
-
-  // ⏱ En OPEN mostramos cuenta regresiva; en CLOSED mostramos la duración total del incidente.
-  const timeText =
-    status === "OPEN"
-      ? formatTime(remainingMinutes)
-      : formatTime(elapsedMinutes);
-
-  const uniqueNames = [...new Set((affectedCI || []).map((ci) => ci?.name).filter(Boolean))];
-  const equipos = uniqueNames.join(", ");
-  const isDisabled = status !== "OPEN";
-  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
 
   return (
     <div
@@ -159,64 +183,72 @@ export default function ProblemCard({ problem, username }) {
         marginBottom: "1rem",
         backgroundColor: bgColor,
         boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-        opacity: status === "CLOSED" ? 0.9 : 1, // opcional: atenuar cerrados
+        opacity: status === "CLOSED" ? 0.9 : 1,
       }}
     >
-      {/* ===== INFO IZQUIERDA ===== */}
+      {/* ====== Info izquierda ====== */}
       <div style={{ flex: 1, paddingRight: "1rem" }}>
         <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
-          {title}
+          {title || "(sin título)"}{" "}
+          <span style={{ ...statusBadgeBase, ...statusStyle, marginLeft: ".6rem" }}>
+            {status}
+          </span>
         </h3>
 
-        <p style={{ fontSize: "1.2rem" }}>
+        <p style={{ fontSize: "1.2rem", marginTop: ".35rem" }}>
           <strong>Severidad Dynatrace:</strong> {severityLevel}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
           <strong>Impacto:</strong> {impactLevel}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Inicio:</strong> {start.toLocaleString()}
+          <strong>Inicio:</strong>{" "}
+          {start.toLocaleString()}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
           <strong>Estado:</strong>{" "}
-          <span style={{ ...statusBadgeBase, ...statusStyle }}>{status}</span>
+          {problem?.status?.toUpperCase?.() || "OPEN"}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Criticidad (BIA):</strong> {criticidad}
+          <strong>Criticidad (BIA):</strong> {criticidadStr}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Equipos afectados:</strong> <small>{equipos}</small>
+          <strong>Equipos afectados:</strong>{" "}
+          <small>{equipos}</small>
         </p>
       </div>
 
-      {/* ===== ICONOS CENTRO/DERECHA ===== */}
+      {/* ====== Íconos centro ====== */}
       <div
         style={{
           display: "flex",
+          justifyContent: "center",
           alignItems: "center",
           gap: "0.8rem",
-          minWidth: "160px",
-          justifyContent: "center",
-          marginRight: "1rem",
+          minWidth: "180px",
         }}
       >
         {/* Severidad */}
-        <img
-          src={`/severidad${criticidad}.svg`}
-          width={60}
-          height={60}
-          title={`Criticidad ${criticidad}`}
-          alt={`Criticidad ${criticidad}`}
-        />
+        {!!criticidadStr && (
+          <img
+            src={`/severidad${criticidadStr}.svg`}
+            width={60}
+            height={60}
+            alt={`Criticidad ${criticidadStr}`}
+            title={`Criticidad ${criticidadStr}`}
+          />
+        )}
+
         {/* Entorno */}
         <img
           src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
           width={60}
           height={60}
-          title={environment}
-          alt={environment}
+          alt={environment || "Entorno"}
+          title={environment || "Entorno"}
         />
-        {/* Torre (Wintel/Unix/DB) */}
+
+        {/* Torre */}
         {towerIcon && (
           <img
             src={towerIcon}
@@ -228,12 +260,21 @@ export default function ProblemCard({ problem, username }) {
         )}
       </div>
 
-      {/* ===== CRONÓMETRO + BOTÓN ===== */}
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: "1.8rem", fontWeight: "bold" }}>{timeText}</div>
+      {/* ====== Temporizador / Botón derecha ====== */}
+      <div style={{ textAlign: "center", minWidth: "170px" }}>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
+          {isOpen ? fmtHMS(remainingMinutes) : "00:00:00"}
+        </div>
+
         <button
-          disabled={isDisabled}
-          onClick={() => window.open(dynatraceUrl, "_blank")}
+          disabled={!dynatraceUrl}
+          onClick={() => {
+            if (!dynatraceUrl) {
+              alert("Falta tenant o problemId para abrir Dynatrace.");
+              return;
+            }
+            window.open(dynatraceUrl, "_blank");
+          }}
           style={{
             marginTop: ".5rem",
             padding: ".3rem 1rem",
@@ -243,7 +284,7 @@ export default function ProblemCard({ problem, username }) {
             backgroundColor: buttonColor,
             border: "none",
             borderRadius: "8px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
+            cursor: dynatraceUrl ? "pointer" : "not-allowed",
           }}
         >
           Revisar problema
