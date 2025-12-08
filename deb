@@ -1,20 +1,47 @@
+
+
 <svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
   <polygon fill="#2D2D2D" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
   <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="28" font-family="Arial" font-weight="bold">UNIX</text>
 </svg>
 
 
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
-  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
-  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
-</svg>
+// === Helper para normalizar estado OPEN / CLOSED ===
+function normalizeStatus(p = {}) {
+  const raw =
+    p.status ??
+    p.Status ??
+    p.state ??
+    p.State ??
+    p.problemStatus ??
+    p.problem_status ??
+    p.StatusName ??
+    "";
 
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
-  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
-  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
-</svg>
+  const s = String(raw ?? "").trim().toUpperCase();
 
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
-  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
-  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
-</svg>
+  // ¿tenemos algún fin/cierre?
+  const hasEnd =
+    !!(
+      p.endTime ||
+      p.endTimeUtc ||
+      p.EndTime ||
+      p.EndTimeUtc ||
+      p.end_date ||
+      p.closeTime ||
+      p.CloseTime
+    );
+
+  if (!s) return hasEnd ? "CLOSED" : "OPEN";
+
+  // keywords de cerrado
+  if (["CLOSED", "RESOLVED", "SOLVED", "TERMINATED", "FINALIZED"].some(k => s.includes(k)))
+    return "CLOSED";
+
+  // keywords de abierto
+  if (["OPEN", "ACTIVE", "IN PROGRESS", "IN_PROGRESS", "RUNNING"].some(k => s.includes(k)))
+    return "OPEN";
+
+  // fallback por fechas
+  return hasEnd ? "CLOSED" : "OPEN";
+}
