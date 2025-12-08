@@ -1,10 +1,3 @@
-
-
-<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
-  <polygon fill="#2D2D2D" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
-  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="28" font-family="Arial" font-weight="bold">UNIX</text>
-</svg>
-
 // src/components/ProblemCard.jsx
 import React, { useEffect, useState } from "react";
 import {
@@ -15,7 +8,7 @@ import {
 } from "../utils/slaUtils";
 import { useBiaCatalog } from "../context/BiaCatalogContext";
 
-// === Normaliza estado OPEN/CLOSED (con fallback por endTime) ===
+// ==== Normaliza estado OPEN/CLOSED (con fallback por endTime) ====
 function normalizeStatus(p) {
   const raw =
     p?.status ??
@@ -24,17 +17,18 @@ function normalizeStatus(p) {
     "";
 
   const s = String(raw).trim().toUpperCase();
+
+  // Si no vino status pero sí hay endTime => se cerró
   if (!s) {
-    // Si no vino status pero SÍ hay endTime => se cerró
     if (p?.endTime) return "CLOSED";
     return "OPEN";
   }
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
   if (s.includes("OPEN")) return "OPEN";
-  return "OPEN";
+  return p?.endTime ? "CLOSED" : "OPEN";
 }
 
-// === Mapea towerKey a ícono (los tuyos en /public/icons/towers/) ===
+// ==== Traduce towerKey -> ícono (ajusta rutas a tus SVG/PNG) ====
 function towerToIconPath(towerKey) {
   if (!towerKey) return null;
   const key = String(towerKey).toLowerCase();
@@ -48,7 +42,7 @@ function towerToIconPath(towerKey) {
     key.includes("database") ||
     key.includes("bd")
   ) {
-    return "/icons/towers/Base.svg";
+    return "/icons/towers/base.svg";
   }
   if (key.includes("unix") || key.includes("aix") || key.includes("linux")) {
     return "/icons/towers/unix.svg";
@@ -59,11 +53,11 @@ function towerToIconPath(towerKey) {
 export default function ProblemCard({ problem, username }) {
   const {
     title,
-    severityLevel,
-    impactLevel,
+    severityLevel = "",
+    impactLevel = "",
     startTime,
     endTime,
-    environment,
+    environment = "",
     affectedCI = [],
     tenant,
     problemId,
@@ -71,10 +65,10 @@ export default function ProblemCard({ problem, username }) {
 
   const { get: catalogGet } = useBiaCatalog();
 
-  // Busca coincidencia en tu catálogo para tower e info extra
+  // Buscar coincidencia con catálogo
   const hitFromCatalog = (() => {
-    for (const ci of affectedCI ?? []) {
-      const name = ci?.name ?? ci?.Nombre;
+    for (const ci of affectedCI || []) {
+      const name = ci?.name || ci?.Nombre;
       const hit = name ? catalogGet(name) : null;
       if (hit) return hit;
     }
@@ -86,12 +80,12 @@ export default function ProblemCard({ problem, username }) {
     catalogLookup: (ciName) => catalogGet(ciName),
   });
 
-  // === Estado OPEN/CLOSED ===
+  // === ESTADO OPEN/CLOSED ===
   const status = normalizeStatus(problem);
   const statusStyle =
     status === "CLOSED"
-      ? { background: "#16a34a", color: "#fff" } // verde
-      : { background: "#dc2626", color: "#fff" }; // rojo
+      ? { background: "#16a34a", color: "#fff" } // Verde
+      : { background: "#dc2626", color: "#fff" }; // Rojo
 
   const statusBadgeBase = {
     padding: "0.15rem .55rem",
@@ -105,30 +99,33 @@ export default function ProblemCard({ problem, username }) {
   // === SLA / colores ===
   const slaMinutes = getSlaMinutes(criticidad);
   const start = new Date(startTime);
+  const end = endTime ? new Date(endTime) : null;
 
-  // ⏱️ El reloj solo corre si está OPEN
-  const [now, setNow] = useState(() => {
-    // Si está CLOSED congelamos “ahora” en endTime (o en start si faltara)
-    return status === "CLOSED"
-      ? new Date(endTime ?? startTime)
-      : new Date();
-  });
-
+  // Estado para el reloj (solo si está OPEN)
+  const [now, setNow] = useState(new Date());
   useEffect(() => {
-    if (status !== "OPEN") return; // NO interval si está cerrado
-    const interval = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(interval);
+    if (status !== "OPEN") return; // 🔒 no crear intervalo si está cerrado
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
   }, [status]);
 
-  // Para colores de la tarjeta: usamos porcentaje restante (solo sentido si OPEN)
-  const elapsedMinutes = Math.max((now - start) / 60000, 0);
+  // Si está OPEN, el tiempo progresa con 'now'.
+  // Si está CLOSED, se “congela” usando 'end' (o 0 si no hay end aún).
+  const elapsedMinutes =
+    status === "OPEN"
+      ? Math.max((now - start) / 60000, 0)
+      : Math.max(((end ?? start) - start) / 60000, 0);
+
   const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
-  const percentRemaining =
-    slaMinutes > 0 ? Math.max((remainingMinutes / slaMinutes) * 100, 0) : 0;
+  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
 
   const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor = getButtonColorByPercent(percentRemaining);
+  const buttonColor =
+    status === "OPEN"
+      ? getButtonColorByPercent(percentRemaining)
+      : "#b0b0b0";
 
+  // Formateo hh:mm:ss
   const formatTime = (minutes) => {
     const totalSeconds = Math.floor(minutes * 60);
     const hrs = Math.floor(totalSeconds / 3600);
@@ -140,13 +137,15 @@ export default function ProblemCard({ problem, username }) {
     )}:${String(secs).padStart(2, "0")}`;
   };
 
-  // Texto fijo si está CLOSED
+  // ⏱ En OPEN mostramos cuenta regresiva; en CLOSED mostramos la duración total del incidente.
   const timeText =
-    status === "CLOSED" ? "00:00:00" : formatTime(remainingMinutes);
+    status === "OPEN"
+      ? formatTime(remainingMinutes)
+      : formatTime(elapsedMinutes);
 
-  const uniqueNames = [...new Set((affectedCI ?? []).map((ci) => ci?.name).filter(Boolean))];
+  const uniqueNames = [...new Set((affectedCI || []).map((ci) => ci?.name).filter(Boolean))];
   const equipos = uniqueNames.join(", ");
-  const isDisabled = !!username;
+  const isDisabled = status !== "OPEN";
   const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
 
   return (
@@ -160,10 +159,10 @@ export default function ProblemCard({ problem, username }) {
         marginBottom: "1rem",
         backgroundColor: bgColor,
         boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-        opacity: status === "CLOSED" ? 0.9 : 1, // atenuar cuando está cerrado
+        opacity: status === "CLOSED" ? 0.9 : 1, // opcional: atenuar cerrados
       }}
     >
-      {/* INFO IZQUIERDA */}
+      {/* ===== INFO IZQUIERDA ===== */}
       <div style={{ flex: 1, paddingRight: "1rem" }}>
         <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
           {title}
@@ -190,69 +189,65 @@ export default function ProblemCard({ problem, username }) {
         </p>
       </div>
 
-      {/* ICONOS + RELOJ DERECHA */}
+      {/* ===== ICONOS CENTRO/DERECHA ===== */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
           gap: "0.8rem",
-          minWidth: "260px",
-          justifyContent: "flex-end",
+          minWidth: "160px",
+          justifyContent: "center",
+          marginRight: "1rem",
         }}
       >
-        {/* Severidad (S1..S4) */}
+        {/* Severidad */}
         <img
           src={`/severidad${criticidad}.svg`}
-          width="60"
-          height="60"
+          width={60}
+          height={60}
           title={`Criticidad ${criticidad}`}
-          alt="severity"
+          alt={`Criticidad ${criticidad}`}
         />
-
-        {/* Entorno (PROD / No PROD) */}
+        {/* Entorno */}
         <img
           src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-          width="60"
-          height="60"
+          width={60}
+          height={60}
           title={environment}
-          alt="environment"
+          alt={environment}
         />
-
-        {/* Torre (Unix/Wintel/BD …) */}
+        {/* Torre (Wintel/Unix/DB) */}
         {towerIcon && (
           <img
             src={towerIcon}
-            width="60"
-            height="60"
+            width={60}
+            height={60}
             alt="tower"
             title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-            style={{ objectFit: "contain" }}
           />
         )}
+      </div>
 
-        {/* Tiempo / Botón */}
-        <div style={{ textAlign: "right", minWidth: "140px" }}>
-          <div style={{ fontSize: "2rem", fontWeight: "bold" }}>{timeText}</div>
-          <button
-            disabled={isDisabled || status === "CLOSED"}
-            onClick={() => window.open(dynatraceUrl, "_blank")}
-            style={{
-              marginTop: ".5rem",
-              padding: ".3rem 1rem",
-              fontSize: ".9rem",
-              fontWeight: "bold",
-              color: "#fff",
-              backgroundColor:
-                status === "CLOSED" ? "#b0b0b0" : buttonColor,
-              border: "none",
-              borderRadius: "8px",
-              cursor:
-                isDisabled || status === "CLOSED" ? "not-allowed" : "pointer",
-            }}
-          >
-            Revisar problema
-          </button>
-        </div>
+      {/* ===== CRONÓMETRO + BOTÓN ===== */}
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: "1.8rem", fontWeight: "bold" }}>{timeText}</div>
+        <button
+          disabled={isDisabled}
+          onClick={() => window.open(dynatraceUrl, "_blank")}
+          style={{
+            marginTop: ".5rem",
+            padding: ".3rem 1rem",
+            fontSize: ".9rem",
+            fontWeight: "bold",
+            color: "#fff",
+            backgroundColor: buttonColor,
+            border: "none",
+            borderRadius: "8px",
+            cursor: isDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          Revisar problema
+        </button>
       </div>
     </div>
   );
