@@ -2,3 +2,19 @@
   <polygon fill="#2D2D2D" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
   <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="28" font-family="Arial" font-weight="bold">UNIX</text>
 </svg>
+
+
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
+  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
+  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
+</svg>
+
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
+  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
+  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
+</svg>
+
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 100 100">
+  <polygon fill="#1A5FFF" stroke="#000" stroke-width="2" points="50,2 98,25 98,75 50,98 2,75 2,25"/>
+  <text x="50%" y="56%" text-anchor="middle" fill="white" font-size="24" font-family="Arial" font-weight="bold">WINTEL</text>
+</svg>
