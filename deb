@@ -1,28 +1,23 @@
+// ===============================
 // src/api/problems.js
+// ===============================
 
-// ==============================
-// 0) CONFIG OPCIONAL DE FECHA
-// - ONLY_DATE: si pones "YYYY-MM-DD" filtra SOLO ese día local
-// - Déjalo en null para NO limitar por fecha (trae histórico)
-// ==============================
+// 0) CONFIG OPCIONAL FECHA
+// Si pones una fecha "YYYY-MM-DD" fuerza modo día puntual.
+// Si lo dejas en null => SIN límite por fecha (histórico completo).
 export const ONLY_DATE = null;
 
-// ==============================
-// 1) BASE DE LA API (de .env)
-// ==============================
+// 1) BASE DE LA API (desde .env)
 const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
-
 const API = `${BASE}/api/Problems`;
 
-// ==============================
 // 2) Normalizador robusto
-// ==============================
 function normalize(list) {
   if (!Array.isArray(list)) return [];
 
   return list.map((p) => {
-    // start/end (acepta diferentes nombres que puede mandar tu API)
+    // start / end (acepta nombres diversos)
     const startRaw =
       p.startTime ??
       p.startTimeUtc ??
@@ -60,18 +55,18 @@ function normalize(list) {
     const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
     const title = p.title ?? p.shortDescription ?? "(sin título)";
 
-    // campos que usa el ProblemCard
+    // otros campos usados por la UI
     const severityLevel = p.severityLevel ?? p.severity ?? "";
     const impactLevel = p.impactLevel ?? p.impact ?? "";
-    const environment = p.environment ?? p.environmentName ?? p.Environment ?? "";
+    const environment = p.environment ?? p.environmentName ?? "";
+
     const affectedCI =
       p.affectedCI ??
       p.affectedEntities ??
       p.affectedEntitiesList ??
       [];
 
-    // status / tenant
-    const status = p.status ?? p.state ?? ""; // "OPEN" | "CLOSED"
+    const status = p.status ?? p.state ?? "";          // "OPEN" | "CLOSED"
     const tenant = p.tenant ?? p.domain ?? "";
 
     return {
@@ -92,9 +87,7 @@ function normalize(list) {
   });
 }
 
-// ==============================
 // 3) Fetch de UNA página con query-params
-// ==============================
 async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
@@ -119,34 +112,34 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   return normalize(items);
 }
 
-// ==============================
-// 4) Rango para un solo día local (opcional)
-// ==============================
+// 4) Utilidad: rango para un solo día local
 function getDayRange(dateStr /* YYYY-MM-DD */) {
   const start = new Date(`${dateStr}T00:00:00`);
   const end = new Date(`${dateStr}T23:59:59`);
   return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
-// ==============================
-// 5) Fetch histórico con paginado + onBatch (streaming)
-//    NUEVO: filtros opcionales statusFilter y environmentFilter
-//    - recentDays: si lo pasas (ej: 7) ignora ONLY_DATE y trae sólo lo reciente
-// ==============================
+// 4.b) Utilidad: convierte YYYY-MM-DD a límites de día en ISO
+export function toLocalDayIsoRange(dateStr) {
+  return getDayRange(dateStr);
+}
+
+// 5) Fetch histórico con paginado + filtros opcionales
 export async function fetchAllProblems({
-  onlyDate = ONLY_DATE,
+  onlyDate = ONLY_DATE,                 // si viene string => fuerza ese día; si null => sin límite
   pageSize = 500,
   maxPages = 40,
-  onBatch,                 // (items) => {}  (opcional)
-  tcsFilter,               // true -> solo TCS, false -> solo NO TCS, undefined -> todos
-  startIso,
-  endIso,
-  recentDays,              // número de días recientes (p.ej. 7)
-  statusFilter,            // "OPEN" | "CLOSED" (ignora mayúsculas/minúsculas)
-  environmentFilter,       // "Productivo" | "NoProductivo" (ignora espacios y mayúsculas)
+  onBatch,                              // (items) => void
+  tcsFilter,                            // true | false | undefined
+  statusFilter,                         // "OPEN" | "CLOSED" | undefined
+  environmentFilter,                    // "Productivo" | "NoProductivo" | undefined (o parte del texto)
+  startIso,                             // forzar ISO inicio
+  endIso,                               // forzar ISO fin
+  recentDays,                           // si quieres SOLO lo reciente (ej: 7)
 } = {}) {
-  // Si piden recentDays, override de rango:
+  // 1) Definir rango
   let range = { startIso, endIso };
+
   if (typeof recentDays === "number" && recentDays > 0) {
     const end = new Date();
     const start = new Date();
@@ -154,13 +147,13 @@ export async function fetchAllProblems({
     range = { startIso: start.toISOString(), endIso: end.toISOString() };
   }
 
-  // Si no pasan recentDays y sí pasan onlyDate, usar ese día puntual:
   if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
     range = getDayRange(onlyDate);
   }
 
-  // Nota: si range sigue vacío => NO ponemos start/end => el API devuelve TODO el historial
+  // Si range sigue vacío => NO ponemos start/end => el API devuelve TODO
   let all = [];
+
   for (let page = 1; page <= maxPages; page++) {
     const batch = await fetchPage({
       pageNumber: page,
@@ -168,9 +161,10 @@ export async function fetchAllProblems({
       startIso: range.startIso,
       endIso: range.endIso,
     });
+
     if (!batch.length) break;
 
-    // === Filtros ===
+    // 2) Filtros opcionales en cliente
     let filtered = batch;
 
     if (typeof tcsFilter === "boolean") {
@@ -178,17 +172,13 @@ export async function fetchAllProblems({
     }
 
     if (statusFilter) {
-      const v = String(statusFilter).toUpperCase();
-      filtered = filtered.filter(
-        (x) => String(x.status || "").toUpperCase() === v
-      );
+      const want = String(statusFilter).toUpperCase();
+      filtered = filtered.filter((x) => (x.status || "").toUpperCase() === want);
     }
 
     if (environmentFilter) {
-      const wanted = String(environmentFilter).replace(/\s+/g, "").toUpperCase();
-      filtered = filtered.filter((x) =>
-        String(x.environment || "").replace(/\s+/g, "").toUpperCase() === wanted
-      );
+      const want = String(environmentFilter).toUpperCase();
+      filtered = filtered.filter((x) => (x.environment || "").toUpperCase().includes(want));
     }
 
     if (onBatch) onBatch(filtered);
@@ -207,45 +197,328 @@ export async function fetchAllProblems({
   return all;
 }
 
-// ==============================
-// 6) Conveniencias
-// ==============================
+// 6) Fetch por rango de fechas (YYYY-MM-DD)
+export async function fetchByDateRange({
+  fromDate,         // "YYYY-MM-DD"
+  toDate,           // "YYYY-MM-DD"
+  tcsFilter,        // true | false | undefined
+  statusFilter,     // "OPEN" | "CLOSED" | undefined
+  environmentFilter // "Productivo" | "NoProductivo" | undefined
+} = {}) {
+  let startIso, endIso;
 
-// Día puntual de TCS (si no pasas dateStr y ONLY_DATE es null, igual trae TODO)
+  if (fromDate && toDate) {
+    const a = toLocalDayIsoRange(fromDate);
+    const b = toLocalDayIsoRange(toDate);
+    startIso = a.startIso;
+    endIso = b.endIso;
+  } else if (fromDate) {
+    startIso = toLocalDayIsoRange(fromDate).startIso;
+  } else if (toDate) {
+    endIso = toLocalDayIsoRange(toDate).endIso;
+  }
+
+  return fetchAllProblems({
+    onlyDate: null,
+    startIso,
+    endIso,
+    tcsFilter,
+    statusFilter,
+    environmentFilter,
+  });
+}
+
+// 7) Conveniencias
 export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
   fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
 
-// Día puntual de NO TCS
 export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
   fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
 
-// Todo el histórico TCS (sin fecha)
 export const fetchTcsAllHistory = (opts = {}) =>
   fetchAllProblems({ onlyDate: null, tcsFilter: true, ...opts });
 
-// Todo el histórico NO TCS (sin fecha)
 export const fetchNoTcsAllHistory = (opts = {}) =>
   fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
 
-// Solo lo reciente (ej: últimos N días) — TCS/NO TCS o todos
 export const fetchRecentProblems = (recentDays = 7, opts = {}) =>
   fetchAllProblems({ onlyDate: null, recentDays, ...opts });
 
-// Helpers específicos que necesitas:
-// - TCS, OPEN, recientes
-export const fetchRecentOpenTcs = (recentDays = 7, environment) =>
-  fetchAllProblems({
-    recentDays,
-    tcsFilter: true,
-    statusFilter: "OPEN",
-    environmentFilter: environment, // "Productivo" | "NoProductivo" (opcional)
-  });
+------
 
-// - NO TCS, OPEN, recientes
-export const fetchRecentOpenNoTcs = (recentDays = 7, environment) =>
-  fetchAllProblems({
-    recentDays,
-    tcsFilter: false,
-    statusFilter: "OPEN",
-    environmentFilter: environment,
-  });
+// ===============================
+// src/components/DateRangeBar.jsx
+// ===============================
+import React, { useState } from "react";
+
+export default function DateRangeBar({ onSearch, defaultFrom = "", defaultTo = "" }) {
+  const [from, setFrom] = useState(defaultFrom);
+  const [to, setTo] = useState(defaultTo);
+
+  const fmt = (d) => {
+    const m = `${d.getMonth() + 1}`.padStart(2, "0");
+    const day = `${d.getDate()}`.padStart(2, "0");
+    return `${d.getFullYear()}-${m}-${day}`;
+  };
+
+  const todayStr = () => fmt(new Date());
+
+  const lastNDays = (n) => {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - (n - 1));
+    setFrom(fmt(start));
+    setTo(fmt(end));
+  };
+
+  const run = () => onSearch?.({ from, to });
+
+  return (
+    <div style={{ display: "flex", gap: ".5rem", alignItems: "center", marginBottom: "1rem" }}>
+      <label>Desde:</label>
+      <input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
+      <label>Hasta:</label>
+      <input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+      <button onClick={run}>Buscar</button>
+
+      <div style={{ marginLeft: "1rem", display: "flex", gap: ".5rem" }}>
+        <button type="button" onClick={() => { const t = todayStr(); setFrom(t); setTo(t); }}>
+          Hoy
+        </button>
+        <button type="button" onClick={() => lastNDays(7)}>Últimos 7</button>
+        <button type="button" onClick={() => lastNDays(30)}>Últimos 30</button>
+      </div>
+    </div>
+  );
+}
+
+----
+
+// ===============================
+// src/pages/TCSProblems.jsx
+// ===============================
+import React, { useEffect, useState, useMemo } from "react";
+import DateRangeBar from "../components/DateRangeBar";
+import { fetchByDateRange } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+
+const DEFAULT_STATUS = "OPEN"; // Solo abiertas por defecto
+
+export default function TCSProblems() {
+  const [items, setItems] = useState([]);
+  const [range, setRange] = useState({ from: "", to: "" });
+  const [envChip, setEnvChip] = useState("ALL"); // "ALL" | "Productivo" | "NoProductivo"
+  const [statusChip, setStatusChip] = useState(DEFAULT_STATUS); // "OPEN" | "CLOSED"
+
+  // primera carga: últimos 7 días TCS + OPEN
+  useEffect(() => {
+    const boot = async () => {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(end.getDate() - 6);
+      const fmt = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+          d.getDate()
+        ).padStart(2, "0")}`;
+      const from = fmt(start);
+      const to = fmt(end);
+      setRange({ from, to });
+
+      const data = await fetchByDateRange({
+        fromDate: from,
+        toDate: to,
+        tcsFilter: true,
+        statusFilter: DEFAULT_STATUS,
+      });
+      setItems(data);
+    };
+    boot();
+  }, []);
+
+  const handleSearch = async ({ from, to }) => {
+    setRange({ from, to });
+    const data = await fetchByDateRange({
+      fromDate: from || undefined,
+      toDate: to || undefined,
+      tcsFilter: true,
+      statusFilter: statusChip, // respeta chip
+      environmentFilter: envChip === "ALL" ? undefined : envChip,
+    });
+    setItems(data);
+  };
+
+  // Cambios de chips => re-consultar con el rango actual
+  useEffect(() => {
+    if (!range.from && !range.to) return;
+    handleSearch(range);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [envChip, statusChip]);
+
+  const counters = useMemo(() => {
+    const prod = items.filter((x) => (x.environment || "").toUpperCase().includes("PRODUCTIVO")).length;
+    const nprod = items.length - prod;
+    const opens = items.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = items.length - opens;
+    return { prod, nprod, opens, closed };
+  }, [items]);
+
+  return (
+    <div>
+      <h2>Problemas TCS ({items.length})</h2>
+
+      <DateRangeBar onSearch={handleSearch} defaultFrom={range.from} defaultTo={range.to} />
+
+      {/* Chips simples */}
+      <div style={{ display: "flex", gap: ".5rem", marginBottom: "1rem" }}>
+        <button
+          onClick={() => setEnvChip("Productivo")}
+          style={{ background: envChip === "Productivo" ? "#d1e7dd" : "" }}
+        >
+          Productivo ({counters.prod})
+        </button>
+        <button
+          onClick={() => setEnvChip("NoProductivo")}
+          style={{ background: envChip === "NoProductivo" ? "#fff3cd" : "" }}
+        >
+          No Productivo ({counters.nprod})
+        </button>
+        <button onClick={() => setEnvChip("ALL")} style={{ background: envChip === "ALL" ? "#e2e3e5" : "" }}>
+          Todos
+        </button>
+
+        <span style={{ width: "2rem" }} />
+
+        <button
+          onClick={() => setStatusChip("OPEN")}
+          style={{ background: statusChip === "OPEN" ? "#f8d7da" : "" }}
+        >
+          Abiertas ({counters.opens})
+        </button>
+        <button
+          onClick={() => setStatusChip("CLOSED")}
+          style={{ background: statusChip === "CLOSED" ? "#d1e7dd" : "" }}
+        >
+          Cerradas ({counters.closed})
+        </button>
+      </div>
+
+      {items.map((p) => (
+        <ProblemCard key={p.problemId || `${p.title}-${p.startTime}`} problem={p} username={""} />
+      ))}
+    </div>
+  );
+}
+
+-----
+
+// ===============================
+// src/pages/OtherProblems.jsx
+// ===============================
+import React, { useEffect, useMemo, useState } from "react";
+import DateRangeBar from "../components/DateRangeBar";
+import { fetchByDateRange } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+
+const DEFAULT_STATUS = "OPEN";
+
+export default function OtherProblems() {
+  const [items, setItems] = useState([]);
+  const [range, setRange] = useState({ from: "", to: "" });
+  const [envChip, setEnvChip] = useState("ALL");
+  const [statusChip, setStatusChip] = useState(DEFAULT_STATUS);
+
+  useEffect(() => {
+    const boot = async () => {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(end.getDate() - 6);
+      const fmt = (d) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+          d.getDate()
+        ).padStart(2, "0")}`;
+      const from = fmt(start);
+      const to = fmt(end);
+      setRange({ from, to });
+
+      const data = await fetchByDateRange({
+        fromDate: from,
+        toDate: to,
+        tcsFilter: false,
+        statusFilter: DEFAULT_STATUS,
+      });
+      setItems(data);
+    };
+    boot();
+  }, []);
+
+  const handleSearch = async ({ from, to }) => {
+    setRange({ from, to });
+    const data = await fetchByDateRange({
+      fromDate: from || undefined,
+      toDate: to || undefined,
+      tcsFilter: false,
+      statusFilter: statusChip,
+      environmentFilter: envChip === "ALL" ? undefined : envChip,
+    });
+    setItems(data);
+  };
+
+  useEffect(() => {
+    if (!range.from && !range.to) return;
+    handleSearch(range);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [envChip, statusChip]);
+
+  const counters = useMemo(() => {
+    const prod = items.filter((x) => (x.environment || "").toUpperCase().includes("PRODUCTIVO")).length;
+    const nprod = items.length - prod;
+    const opens = items.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = items.length - opens;
+    return { prod, nprod, opens, closed };
+  }, [items]);
+
+  return (
+    <div>
+      <h2>Problemas Otros ({items.length})</h2>
+
+      <DateRangeBar onSearch={handleSearch} defaultFrom={range.from} defaultTo={range.to} />
+
+      <div style={{ display: "flex", gap: ".5rem", marginBottom: "1rem" }}>
+        <button
+          onClick={() => setEnvChip("Productivo")}
+          style={{ background: envChip === "Productivo" ? "#d1e7dd" : "" }}
+        >
+          Productivo ({counters.prod})
+        </button>
+        <button
+          onClick={() => setEnvChip("NoProductivo")}
+          style={{ background: envChip === "NoProductivo" ? "#fff3cd" : "" }}
+        >
+          No Productivo ({counters.nprod})
+        </button>
+        <button onClick={() => setEnvChip("ALL")} style={{ background: envChip === "ALL" ? "#e2e3e5" : "" }}>
+          Todos
+        </button>
+
+        <span style={{ width: "2rem" }} />
+
+        <button
+          onClick={() => setStatusChip("OPEN")}
+          style={{ background: statusChip === "OPEN" ? "#f8d7da" : "" }}
+        >
+          Abiertas ({counters.opens})
+        </button>
+        <button
+          onClick={() => setStatusChip("CLOSED")}
+          style={{ background: statusChip === "CLOSED" ? "#d1e7dd" : "" }}
+        >
+          Cerradas ({counters.closed})
+        </button>
+      </div>
+
+      {items.map((p) => (
+        <ProblemCard key={p.problemId || `${p.title}-${p.startTime}`} problem={p} username={""} />
+      ))}
+    </div>
+  );
+}
