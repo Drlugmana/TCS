@@ -1,1 +1,4 @@
+
+dotnet tool install --global Microsoft.DevTunnels.Cli
+
 devtunnel host Api_Dynatarce -p 5173 --protocol http
