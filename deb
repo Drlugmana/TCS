@@ -1,3 +1,6 @@
+dotnet nuget list source
+
+
 dotnet tool install --global Microsoft.DevTunnels.Cli
 
 dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org
