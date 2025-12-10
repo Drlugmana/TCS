@@ -1,4 +1,19 @@
 
+
+{
+  "$schema": "http://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "RestAPIDynatraceReportes": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "applicationUrl": "http://0.0.0.0:5088",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
 dotnet tool install --global Microsoft.DevTunnels.Cli
 
 devtunnel host Api_Dynatarce -p 5173 --protocol http
