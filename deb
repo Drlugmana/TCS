@@ -1,75 +1,27 @@
-{
-  "$schema": "http://json.schemastore.org/launchsettings.json",
-  "profiles": {
-    "Kestrel-HTTP": {
-      "commandName": "Project",
-      "dotnetRunMessages": true,
-      "launchBrowser": true,
-      "launchUrl": "swagger",
-      "applicationUrl": "http://0.0.0.0:5088",
-      "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      }
-    },
-    "Kestrel-HTTPS": {
-      "commandName": "Project",
-      "dotnetRunMessages": true,
-      "launchBrowser": true,
-      "launchUrl": "swagger",
-      "applicationUrl": "https://0.0.0.0:7104",
-      "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      }
-    },
-    "IIS Express": {
-      "commandName": "IISExpress",
-      "launchBrowser": true,
-      "launchUrl": "swagger",
-      "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development"
-      }
-    }
-  },
-  "iisSettings": {
-    "windowsAuthentication": false,
-    "anonymousAuthentication": true,
-    "iisExpress": {
-      "applicationUrl": "http://localhost:36517",
-      "sslPort": 44334
-    }
-  }
-}
-
-----
-
-var builder = WebApplication.CreateBuilder(args);
-
-// CORS
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowIIS", policy =>
-        policy.WithOrigins(
-            "http://TU_SERVIDOR_IIS:8080", // URL del frontend en IIS (http)
-            "https://TU_SERVIDOR_IIS"      // si lo sirves en https (opcional)
-        )
-        .AllowAnyHeader()
-        .AllowAnyMethod()
-        .AllowCredentials()
+    options.AddPolicy("AllowFrontend", policy =>
+        policy
+            // 👇 agrega aquí la/s URL/s reales de tu frontend en IIS
+            .WithOrigins(
+                "http://10.70.72.120:8080",  // <-- CAMBIA por tu binding real en IIS (http/https y puerto)
+                "http://localhost:5173",
+                "https://localhost:5173"
+            )
+            // Permitir también devtunnels (cualquiera *.use.devtunnels.ms)
+            .SetIsOriginAllowed(origin =>
+            {
+                try
+                {
+                    var host = new Uri(origin).Host;
+                    return host.EndsWith(".use.devtunnels.ms", StringComparison.OrdinalIgnoreCase)
+                           || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                           || host.Equals("10.70.72.120"); // opcional si acceden por IP directa
+                }
+                catch { return false; }
+            })
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            // .AllowCredentials()  // habilítalo SOLO si realmente usas cookies/autenticación; si lo activas, NO puedes usar AllowAnyOrigin
     );
 });
-
-builder.Services.AddControllers();
-builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen();
-
-var app = builder.Build();
-
-app.UseSwagger();
-app.UseSwaggerUI();
-
-app.UseCors("AllowIIS");
-
-app.UseAuthorization();
-app.MapControllers();
-
-app.Run();
