@@ -1,34 +1,43 @@
-= Table.TransformColumns(
-    Source,
-    {
-        {"CPU_Used_Porcentaje",
-            each
-                let
-                    txt = Text.Replace(Text.From(_), ".", ","),
-                    val = try Number.FromText(txt, "es-EC") otherwise null
-                in
-                    if val = null then null else Number.Round(val, 2),
-            type number}
+D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\
+
+
+
+cd "D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes"
+dir *.exe
+.\RestAPIDynatraceReportes.exe
+
+setx ASPNETCORE_ENVIRONMENT "Production" /M
+setx ASPNETCORE_URLS "http://0.0.0.0:5000" /M
+
+
+$svc = "RestAPIDynatraceReportes"
+$exe = "D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\RestAPIDynatraceReportes.exe"
+
+sc.exe create $svc binPath= "$exe" start= auto
+sc.exe description $svc "API Dynatrace Reportes - Kestrel self-contained"
+sc.exe start $svc
+sc.exe query $svc
+
+
+sc.exe failure $svc reset= 86400 actions= restart/60000/restart/60000/restart/60000
+sc.exe failureflag $svc 1
+
+netsh advfirewall firewall add rule name="API Dynatrace Reportes 5000" dir=in action=allow protocol=TCP localport=5000
+
+http://10.70.72.120:5000/swagger
+
+
+$svc = "RestAPIDynatraceReportes"
+sc stop  $svc
+# Copia/pega los nuevos archivos sobre: D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\
+sc start $svc
+
+{
+  "EnableSwagger": true,
+  "Kestrel": {
+    "Endpoints": {
+      "Http": { "Url": "http://0.0.0.0:5000" }
     }
-)
-
-
---------
-
-= Table.TransformColumns(
-    Source,
-    {
-        {"Aux_Disk_Provisiones_VAL",
-            each
-                let
-                    t = Text.From(_),
-                    // intenta parsear tal cual (soporta 1.86E+01)
-                    n = try Number.FromText(t, "en-US") 
-                        otherwise try Number.FromText(t, "es-EC") 
-                        otherwise null
-                in
-                    if n=null then null else Number.Round(n, 2),
-            type number}
-    }
-)
-
+  },
+  "AllowedHosts": "*"
+}
