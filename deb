@@ -1,3 +1,19 @@
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy
+            .WithOrigins(
+                "http://10.70.144.250:8080",   // ⬅️ tu frontend real
+                "https://localhost:5173",      // ⬅️ si pruebas local
+                "https://localhost:5174"       // ⬅️ opcional otro puerto de Vite/React
+            )
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+            //.AllowCredentials();             // ⬅️ activa solo si usas login/cookies
+    });
+});
+
 // Program.cs  (.NET 7)
 
 using Microsoft.EntityFrameworkCore;
