@@ -1,27 +1,36 @@
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("AllowFrontend", policy =>
-        policy
-            // 👇 agrega aquí la/s URL/s reales de tu frontend en IIS
-            .WithOrigins(
-                "http://10.70.72.120:8080",  // <-- CAMBIA por tu binding real en IIS (http/https y puerto)
-                "http://localhost:5173",
-                "https://localhost:5173"
-            )
-            // Permitir también devtunnels (cualquiera *.use.devtunnels.ms)
-            .SetIsOriginAllowed(origin =>
-            {
-                try
-                {
-                    var host = new Uri(origin).Host;
-                    return host.EndsWith(".use.devtunnels.ms", StringComparison.OrdinalIgnoreCase)
-                           || host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
-                           || host.Equals("10.70.72.120"); // opcional si acceden por IP directa
-                }
-                catch { return false; }
-            })
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            // .AllowCredentials()  // habilítalo SOLO si realmente usas cookies/autenticación; si lo activas, NO puedes usar AllowAnyOrigin
-    );
-});
+<Project Sdk="Microsoft.NET.Sdk.Web">
+  <PropertyGroup>
+    <TargetFramework>net7.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- EF Core para .NET 7 -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="7.0.17" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="7.0.17" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Tools" Version="7.0.17">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+
+    <!-- EPPlus es compatible; deja la 7.x -->
+    <PackageReference Include="EPPlus" Version="7.5.1" />
+
+    <!-- OpenAPI / Swagger para .NET 7 -->
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="7.0.20" />
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+
+    <!-- Scaffolding para .NET 7 -->
+    <PackageReference Include="Microsoft.VisualStudio.Web.CodeGeneration.Design" Version="7.0.11" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Update="ML\Models\jurisdiction_model.zip">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+    <None Update="ML\Models\ShortDescriptionModel.zip">
+      <CopyToOutputDirectory>Never</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+</Project>
