@@ -1,23 +1,84 @@
-Limpieza que lo arregla casi siempre
-	1.	Cierra Visual Studio y detén IIS Express:
-	•	Abre Administrador de tareas y finaliza devenv.exe, iisexpress.exe, MSBuild.exe y ServiceHub.*.exe (si aparecen).
-	2.	Borra cachés:
-	•	Carpeta de la solución: elimina .vs, bin y obj.
-	•	Caché de VS (17.x)
-Copia y pega estas rutas en el Explorador (borra si existen):
-	•	%LOCALAPPDATA%\Microsoft\VisualStudio\17.0_*\ComponentModelCache
-	•	%LOCALAPPDATA%\Microsoft\VisualStudio\17.0_*\MEFCache
-	•	%LOCALAPPDATA%\Microsoft\VSCommon\7.0\Cache
-	•	%TEMP% (borra lo que puedas)
-	3.	Vuelve a abrir tu .sln y prueba:
-	•	Build → Rebuild Solution
-	•	F5 para ejecutar.
+// Program.cs  (.NET 7)
 
-Si todavía se queda “inicializando…”
-	4.	Arranca VS en modo seguro (sin extensiones):
-	•	Windows Win+R → escribe: devenv /safemode
-	•	Abre la solución, Build.
-	•	Si aquí funciona, el culpable es una extensión (desactiva IntelliCode, Live Share, Copilot, etc. desde Extensions → Manage Extensions).
-	5.	Reseteos (último recurso, no borra tu código):
-	•	devenv /ResetSettings  (restaura ajustes del IDE)
-	•	devenv /ResetUserData  (más profundo; te pedirá reconfigurar el IDE)
+using Microsoft.EntityFrameworkCore;
+using Microsoft.OpenApi.Models;
+using RestAPIDynatrace.Context;          // ⬅️ tu namespace donde está el DbContext
+// using RestAPIDynatrace;               // si usas otros namespaces propios
+
+var builder = WebApplication.CreateBuilder(args);
+
+// -------------------------------
+// 1) C O R S
+// -------------------------------
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy
+            .WithOrigins(
+                "https://localhost:5173",                 // ⬅️ Vite/React local
+                "https://TU-FRONT-END.empresa.com",       // ⬅️ URL real en IIS (https y puerto exacto)
+                "https://*.devtunnels.ms"                 // ⬅️ si usas DevTunnels (comodín)
+            )
+            .SetIsOriginAllowed(h =>                      // permite subdominios si usas túneles
+                h.EndsWith(".devtunnels.ms", StringComparison.OrdinalIgnoreCase)
+                || h.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                || h.Contains("TU-FRONT-END.empresa.com", StringComparison.OrdinalIgnoreCase))
+            .AllowAnyHeader()
+            .AllowAnyMethod();
+        // .AllowCredentials();                           // ⬅️ solo si usas cookies/autenticación
+    });
+});
+
+// -------------------------------
+// 2) K e s t r e l  (opcional)
+// -------------------------------
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    // tiempos y tamaños de cuerpo
+    serverOptions.Limits.MaxRequestBodySize = 104857600;                 // 100 MB
+    serverOptions.Limits.KeepAliveTimeout   = TimeSpan.FromMinutes(3);
+    serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(1);
+});
+
+// -------------------------------
+// 3) Servicios app
+// -------------------------------
+builder.Services.AddControllers();
+
+// Swagger/OpenAPI
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen(c =>
+{
+    c.SwaggerDoc("v1", new OpenApiInfo { Title = "RestAPIDynatraceReportes", Version = "v1" });
+});
+
+// DbContext a SQL Server
+var connString = builder.Configuration.GetConnectionString("Connection");  // ⬅️ appsettings.json
+builder.Services.AddDbContext<AppDbContext>(options =>                      // ⬅️ tu DbContext real
+    options.UseSqlServer(connString));
+
+// (si usas ML, DI, etc. regístralos aquí)
+
+// -------------------------------
+// 4) Pipeline HTTP
+// -------------------------------
+var app = builder.Build();
+
+app.UseCors("AllowFrontend");
+
+// Swagger (déjalo activo si quieres verlo en Prod también)
+app.UseSwagger();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "RestAPIDynatraceReportes v1");
+    c.RoutePrefix = "swagger";
+});
+
+app.UseHttpsRedirection();
+
+app.UseAuthorization();
+
+app.MapControllers();
+
+app.Run();
