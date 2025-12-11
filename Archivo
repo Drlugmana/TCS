@@ -1,3 +1,28 @@
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Permitir que se ejecute como servicio en Windows
+builder.Host.UseWindowsService();
+
+// Configurar servicios
+builder.Services.AddControllers();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+
+var app = builder.Build();
+
+// ✅ Siempre habilitar Swagger
+app.UseSwagger();
+app.UseSwaggerUI();
+
+// ⚠️ Evitar redirección a HTTPS si no usas certificado
+// app.UseHttpsRedirection();  // <--- comenta o elimina esta línea
+
+app.UseAuthorization();
+app.MapControllers();
+app.MapGet("/", () => Results.Ok("API RestAPIDynatraceReportes funcionando correctamente"));
+app.Run();
+
 D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\
 
 
