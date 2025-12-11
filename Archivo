@@ -1,68 +1,56 @@
+using Microsoft.EntityFrameworkCore;
+using RestAPIDynatrace.Context;
+using Microsoft.Extensions.Hosting.WindowsServices;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Permitir que se ejecute como servicio en Windows
+// 🔹 Permitir que se ejecute como servicio de Windows
 builder.Host.UseWindowsService();
 
-// Configurar servicios
+// 🔹 Configurar Kestrel (puerto, tamaño y tiempo de espera)
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.Limits.MaxRequestBodySize = 104857600; // 100 MB
+    serverOptions.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
+    serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(10);
+});
+
+// 🔹 CORS para permitir acceso desde tu Frontend (React)
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+// 🔹 Configurar servicios base
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
+// 🔹 Configurar conexión a base de datos
+var connectionString = builder.Configuration.GetConnectionString("Conexion");
+builder.Services.AddDbContext<AppDBContext>(options => options.UseSqlServer(connectionString));
+
 var app = builder.Build();
 
-// ✅ Siempre habilitar Swagger
+// 🔹 Usar CORS
+app.UseCors("AllowFrontend");
+
+// 🔹 Habilitar Swagger siempre (también en Producción)
 app.UseSwagger();
 app.UseSwaggerUI();
 
-// ⚠️ Evitar redirección a HTTPS si no usas certificado
-// app.UseHttpsRedirection();  // <--- comenta o elimina esta línea
+// 🔹 Evitar redirección HTTPS si no hay certificado
+// app.UseHttpsRedirection();  // ❌ deshabilitado
 
 app.UseAuthorization();
 app.MapControllers();
-app.MapGet("/", () => Results.Ok("API RestAPIDynatraceReportes funcionando correctamente"));
+
+// 🔹 Endpoint simple de verificación
+app.MapGet("/", () => Results.Ok("✅ API RestAPIDynatraceReportes funcionando correctamente en el servidor"));
+
 app.Run();
-
-D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\
-
-
-
-cd "D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes"
-dir *.exe
-.\RestAPIDynatraceReportes.exe
-
-setx ASPNETCORE_ENVIRONMENT "Production" /M
-setx ASPNETCORE_URLS "http://0.0.0.0:5000" /M
-
-
-$svc = "RestAPIDynatraceReportes"
-$exe = "D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\RestAPIDynatraceReportes.exe"
-
-sc.exe create $svc binPath= "$exe" start= auto
-sc.exe description $svc "API Dynatrace Reportes - Kestrel self-contained"
-sc.exe start $svc
-sc.exe query $svc
-
-
-sc.exe failure $svc reset= 86400 actions= restart/60000/restart/60000/restart/60000
-sc.exe failureflag $svc 1
-
-netsh advfirewall firewall add rule name="API Dynatrace Reportes 5000" dir=in action=allow protocol=TCP localport=5000
-
-http://10.70.72.120:5000/swagger
-
-
-$svc = "RestAPIDynatraceReportes"
-sc stop  $svc
-# Copia/pega los nuevos archivos sobre: D:\software\RestAPIDynatraceReportes\RestAPIDynatraceReportes\
-sc start $svc
-
-{
-  "EnableSwagger": true,
-  "Kestrel": {
-    "Endpoints": {
-      "Http": { "Url": "http://0.0.0.0:5000" }
-    }
-  },
-  "AllowedHosts": "*"
-}
