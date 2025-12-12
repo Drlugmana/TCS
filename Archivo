@@ -1,4 +1,7 @@
 
+# Permite el puerto HTTP 8080
+New-NetFirewallRule -DisplayName "IIS HTTP 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
+
 setx ASPNETCORE_URLS "http://0.0.0.0:5000" /M
 
 netstat -ano | findstr :5000
