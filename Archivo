@@ -1,21 +1,28 @@
 using Microsoft.EntityFrameworkCore;
 using RestAPIDynatrace.Context;
 using Microsoft.Extensions.Hosting.WindowsServices;
+using System;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// 🔹 Permitir que se ejecute como servicio de Windows
+// ---------------------------------------------------
+// Permitir que se ejecute como servicio en Windows
+// ---------------------------------------------------
 builder.Host.UseWindowsService();
 
-// 🔹 Configurar Kestrel (puerto, tamaño y tiempo de espera)
+// ---------------------------------------------------
+// Configurar Kestrel (puerto, tamaño y tiempo de espera)
+// ---------------------------------------------------
 builder.WebHost.ConfigureKestrel(serverOptions =>
 {
     serverOptions.Limits.MaxRequestBodySize = 104857600; // 100 MB
-    serverOptions.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10);
-    serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(10);
+    serverOptions.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10); // Tiempo de espera Keep-Alive
+    serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(10); // Tiempo de espera de cabeceras
 });
 
-// 🔹 CORS para permitir acceso desde tu Frontend (React)
+// ---------------------------------------------------
+// CORS: permitir acceso desde el Frontend (React)
+// ---------------------------------------------------
 builder.Services.AddCors(options =>
 {
     options.AddPolicy("AllowFrontend", policy =>
@@ -26,31 +33,41 @@ builder.Services.AddCors(options =>
     });
 });
 
-// 🔹 Configurar servicios base
+// ---------------------------------------------------
+// Configurar servicios base
+// ---------------------------------------------------
 builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
-// 🔹 Configurar conexión a base de datos
+// ---------------------------------------------------
+// Configurar conexión a base de datos
+// ---------------------------------------------------
 var connectionString = builder.Configuration.GetConnectionString("Conexion");
-builder.Services.AddDbContext<AppDBContext>(options => options.UseSqlServer(connectionString));
+builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlServer(connectionString));
 
 var app = builder.Build();
 
-// 🔹 Usar CORS
+// ---------------------------------------------------
+// Middleware: CORS + Swagger
+// ---------------------------------------------------
 app.UseCors("AllowFrontend");
 
-// 🔹 Habilitar Swagger siempre (también en Producción)
+// ✅ Habilitar Swagger siempre (también en Producción)
 app.UseSwagger();
-app.UseSwaggerUI();
+app.UseSwaggerUI(c =>
+{
+    c.SwaggerEndpoint("/swagger/v1/swagger.json", "RestAPIDynatraceReportes v1");
+    c.RoutePrefix = "swagger"; // Disponible en /swagger
+});
 
-// 🔹 Evitar redirección HTTPS si no hay certificado
-// app.UseHttpsRedirection();  // ❌ deshabilitado
+// ❌ Evitar redirección a HTTPS (si no tienes certificado)
+// app.UseHttpsRedirection();
 
 app.UseAuthorization();
 app.MapControllers();
 
-// 🔹 Endpoint simple de verificación
+// Endpoint simple de verificación
 app.MapGet("/", () => Results.Ok("✅ API RestAPIDynatraceReportes funcionando correctamente en el servidor"));
 
 app.Run();
