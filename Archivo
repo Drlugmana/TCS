@@ -1,1 +1,12 @@
-ñ
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "ConnectionStrings": {
+    "Connection": "Server=PRECWAP006,1433;Database=BitacoraBD_Pruebas;User Id=sic;Password=Pichincha1;Encrypt=False;TrustServerCertificate=True;"
+  }
+}
