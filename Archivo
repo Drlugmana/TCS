@@ -1,15 +1,1 @@
-
-netsh advfirewall firewall add rule name="Backend5000" dir=in action=allow protocol=TCP localport=5000
-
-{
-  "Logging": {
-    "LogLevel": {
-      "Default": "Information",
-      "Microsoft.AspNetCore": "Warning"
-    }
-  },
-  "AllowedHosts": "*",
-  "ConnectionStrings": {
-    "Connection": "Server=PRECWAP006,1433;Database=BitacoraBD_Pruebas;User Id=sic;Password=Pichincha1;Encrypt=False;TrustServerCertificate=True;"
-  }
-}
+New-NetFirewallRule -DisplayName "Frontend AlertDyna 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
