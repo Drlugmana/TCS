@@ -1,8 +1,1 @@
-
-Get-NetFirewallRule | findstr 8080
-
-New-NetFirewallRule -DisplayName "IIS HTTP 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
-
-New-NetFirewallRule -DisplayName "API Dynatrace 5000" -Direction Inbound -LocalPort 5000 -Protocol TCP -Action Allow
-
-#  LISTENING
+netstat -ano | findstr :500
