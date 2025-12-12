@@ -1,13 +1,8 @@
 
+Get-NetFirewallRule | findstr 8080
+
 New-NetFirewallRule -DisplayName "IIS HTTP 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
 
 New-NetFirewallRule -DisplayName "API Dynatrace 5000" -Direction Inbound -LocalPort 5000 -Protocol TCP -Action Allow
 
-# Permite el puerto HTTP 8080
-New-NetFirewallRule -DisplayName "IIS HTTP 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
-
-setx ASPNETCORE_URLS "http://0.0.0.0:5000" /M
-
-netstat -ano | findstr :5000
-
-TCP    0.0.0.0:5000    0.0.0.0:0    LISTENING
+#  LISTENING
