@@ -1,1 +1,19 @@
-New-NetFirewallRule -DisplayName "Frontend AlertDyna 8080" -Direction Inbound -LocalPort 8080 -Protocol TCP -Action Allow
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "Kestrel": {
+    "Endpoints": {
+      "Http": {
+        "Url": "http://0.0.0.0:5000"
+      }
+    }
+  },
+  "ConnectionStrings": {
+    "Connection": "Server=PRECWAP006,1433;Database=BitacoraBODD_Pruebas;User ID=...;Password=...;Encrypt=False;TrustServerCertificate=True;"
+  }
+}
