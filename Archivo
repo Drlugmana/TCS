@@ -1,1 +1,3 @@
+setx ASPNETCORE_URLS "http://0.0.0.0:5000" /M
+
 Get-ChildItem Env:ASPNETCORE_URLS
