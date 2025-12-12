@@ -1,1 +1,3 @@
+http://10.70.144.250:5000/swagger
+
 netstat -ano | findstr :500
