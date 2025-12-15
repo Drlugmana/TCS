@@ -1,10 +1,1 @@
-http://10.70.144.250:5000/swagger
-
-Get-NetFirewallRule | findstr 5000
-
-New-NetFirewallRule -DisplayName "API Dynatrace 5000" -Direction Inbound -LocalPort 5000 -Protocol TCP -Action Allow
-
-
-http://10.70.144.250:5000/swagger
-
-netstat -ano | findstr :500
+http://precwap021:8080/api/Problems?pageNumber=1&pageSize=1
