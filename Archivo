@@ -1,1 +1,33 @@
+
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <system.webServer>
+    <staticContent>
+      <!-- Para servir JSON como estático si hace falta -->
+      <remove fileExtension=".json" />
+      <mimeMap fileExtension=".json" mimeType="application/json" />
+    </staticContent>
+
+    <rewrite>
+      <rules>
+        <!-- 1) Proxy de /api al backend -->
+        <rule name="ProxyApi" stopProcessing="true">
+          <match url="^api/(.*)" ignoreCase="true" />
+          <action type="Rewrite" url="http://10.70.144.250:5000/api/{R:1}" logRewrittenUrl="true" />
+        </rule>
+
+        <!-- 2) SPA fallback: todo lo que no sea archivo o carpeta -> index.html -->
+        <rule name="ReactSpa" stopProcessing="true">
+          <match url=".*" />
+          <conditions logicalGrouping="MatchAll">
+            <add input="{REQUEST_FILENAME}" matchType="IsFile" negate="true" />
+            <add input="{REQUEST_FILENAME}" matchType="IsDirectory" negate="true" />
+          </conditions>
+          <action type="Rewrite" url="/index.html" />
+        </rule>
+      </rules>
+    </rewrite>
+  </system.webServer>
+</configuration>
+
 http://precwap021:8080/api/Problems?pageNumber=1&pageSize=1
