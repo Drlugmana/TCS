@@ -1,529 +1,96 @@
-// src/api/problems.js
-// ===========================
-// CONFIG FECHA (opcional)
-// Si pones "YYYY-MM-DD" fuerza modo día puntual.
-// Si lo dejas en null => sin límite por fecha (histórico completo).
-export const ONLY_DATE = null;
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchAllProblems } from "../api/problems";
 
-// ===========================
-// BASE DE LA API (desde .env)
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+export default function OtrosPage() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
 
-const API = `${BASE}/api/Problems`;
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusChip, setStatusChip] = useState(null);
 
-// ===========================
-// Helpers robustos
-function cleanNull(v) {
-  if (v === undefined || v === null) return null;
-  if (typeof v === "string") {
-    const t = v.trim();
-    if (!t) return null;
-    const low = t.toLowerCase();
-    if (low === "null" || low === "undefined") return null;
-    return t;
-  }
-  return v;
-}
+  const [all, setAll] = useState([]);
 
-function parseDateToISO(v) {
-  v = cleanNull(v);
-  if (!v) return null;
-
-  // Date
-  if (v instanceof Date) {
-    const ms = v.getTime();
-    return Number.isFinite(ms) ? v.toISOString() : null;
+  async function load() {
+    setLoading(true);
+    try {
+      // ✅ último día + NO TCS
+      const data = await fetchAllProblems({
+        tcsFilter: false,
+        recentDays: 1,
+        pageSize: 500,
+        maxPages: 40,
+      });
+      setAll(data);
+    } finally {
+      setLoading(false);
+    }
   }
 
-  // epoch
-  if (typeof v === "number") {
-    const d = new Date(v);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 30000);
+    return () => clearInterval(t);
+  }, []);
 
-  // string
-  if (typeof v === "string") {
-    let s = v.trim();
+  const stats = useMemo(() => {
+    const prod = all.filter((x) => String(x.environment).toUpperCase().includes("PRODUCTIVO"));
+    const nprod = all.filter((x) => String(x.environment).toUpperCase().includes("NO PRODUCTIVO") || String(x.environment).toUpperCase().includes("NOPRODUCTIVO"));
 
-    // "YYYY-MM-DD HH:mm:ss.fffffff" => "YYYY-MM-DDT..."
-    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
-
-    const d = new Date(s);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
-
-  return null;
-}
-
-function normalizeStatusValue(rawStatus, endTimeISO) {
-  const s = cleanNull(rawStatus);
-  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
-
-  // casos típicos
-  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
-  if (up.includes("OPEN")) return "OPEN";
-
-  // si no vino status, deduce por endTime
-  // (si endTime no es null => cerrado)
-  return endTimeISO ? "CLOSED" : "OPEN";
-}
-
-// ===========================
-// Normalizador robusto
-function normalize(list) {
-  if (!Array.isArray(list)) return [];
-
-  return list.map((p) => {
-    // start / end (acepta nombres diversos)
-    const startRaw =
-      p?.startTime ??
-      p?.startTimeUtc ??
-      p?.StartTime ??
-      p?.StartTimeUtc ??
-      p?.start_date ??
-      p?.Start ??
-      null;
-
-    const endRaw =
-      p?.endTime ??
-      p?.endTimeUtc ??
-      p?.EndTime ??
-      p?.EndTimeUtc ??
-      p?.end_date ??
-      p?.End ??
-      null;
-
-    const startTime = parseDateToISO(startRaw);
-    const endTime = parseDateToISO(endRaw);
-
-    // jurisdicción (TCS/NO TCS)
-    const jurisRaw =
-      p?.jurisdiction?.label ??
-      p?.jurisdiction?.name ??
-      p?.jurisdiction?.Jurisdiction ??
-      p?.Jurisdiction ??
-      p?.jurisdiction ??
-      p?.label ??
-      "";
-
-    const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
-    const isTcs =
-      p?.jurisdiction?.isTcs ??
-      (juris === "TCS" ? true : false);
-
-    // ids/títulos
-    const problemId = p?.problemId ?? p?.displayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.shortDescription ?? "(sin título)";
-
-    // otros campos usados por la UI
-    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
-    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
-    const environment = p?.environment ?? p?.environmentName ?? p?.Environment ?? "";
-
-    const affectedCI =
-      p?.affectedCI ??
-      p?.AffectedCI ??
-      p?.affectedEntities ??
-      p?.affectedEntitiesList ??
-      [];
-
-    // status final SIEMPRE "OPEN" / "CLOSED"
-    const status = normalizeStatusValue(
-      p?.status ?? p?.state ?? p?.Status ?? p?.problemStatus,
-      endTime
-    );
+    const open = all.filter((x) => x.status === "OPEN");
+    const closed = all.filter((x) => x.status === "CLOSED");
 
     return {
-      ...p,
-      problemId,
-      title,
-      severityLevel,
-      impactLevel,
-      environment,
-      affectedCI,
-      status, // "OPEN" | "CLOSED" ✅
-      tenant: p?.tenant ?? p?.domain ?? "",
-      label: isTcs ? "TCS" : "NO TCS",
-      isTcs,
-      startTime,
-      endTime,
+      prodCount: prod.length,
+      nprodCount: nprod.length,
+      openCount: open.length,
+      closedCount: closed.length,
     };
-  });
-}
+  }, [all]);
 
-// ===========================
-// Fetch de UNA página con query-params
-async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize", String(pageSize));
+  const visible = useMemo(() => {
+    let arr = [...all];
 
-  // Si tu backend los soporta, se mandan. Si no, los ignora.
-  if (startIso) params.set("start", startIso);
-  if (endIso) params.set("end", endIso);
-
-  const url = `${API}?${params.toString()}`;
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
-  }
-
-  const json = await res.json();
-
-  // Puede venir array directo o envuelto
-  const items = Array.isArray(json)
-    ? json
-    : json?.results || json?.items || json?.data || json?.value || [];
-
-  return normalize(items);
-}
-
-// ===========================
-// Utilidad: rango para un solo día local (YYYY-MM-DD)
-function getDayRange(dateStr /* YYYY-MM-DD */) {
-  const start = new Date(`${dateStr}T00:00:00`);
-  const end = new Date(`${dateStr}T23:59:59.999`);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
-}
-
-export function toLocalDayIsoRange(dateStr) {
-  return getDayRange(dateStr);
-}
-
-// ===========================
-// Fetch histórico con paginado + filtros opcionales
-export async function fetchAllProblems({
-  onlyDate = ONLY_DATE, // si string => fuerza ese día; si null => sin límite
-  pageSize = 500,
-  maxPages = 40,
-  onBatch,
-
-  tcsFilter, // true | false | undefined
-  statusFilter, // "OPEN" | "CLOSED" | undefined
-  environmentFilter, // "Productivo" | "NoProductivo" | undefined (o parte del texto)
-  startIso,
-  endIso,
-  recentDays = 1, // ✅ por defecto 1 día (24h) para que cargue rápido
-} = {}) {
-  // 1) Definir rango
-  let range = { startIso, endIso };
-
-  // ✅ reciente (últimas 24h por defecto)
-  if (typeof recentDays === "number" && recentDays > 0) {
-    const end = new Date();
-    const start = new Date(end);
-    start.setDate(end.getDate() - recentDays);
-    range = { startIso: start.toISOString(), endIso: end.toISOString() };
-  }
-
-  // si fuerza día puntual
-  if ((!range.startIso || !range.endIso) && typeof onlyDate === "string") {
-    range = getDayRange(onlyDate);
-  }
-
-  // 2) paginar
-  let all = [];
-
-  for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({
-      pageNumber: page,
-      pageSize,
-      startIso: range.startIso,
-      endIso: range.endIso,
-    });
-
-    if (!batch.length) break;
-
-    // 3) Filtros en cliente (robustos)
-    let filtered = batch;
-
-    if (typeof tcsFilter === "boolean") {
-      filtered = filtered.filter((x) => x.isTcs === tcsFilter);
+    if (envFilter) {
+      const want = envFilter.toUpperCase();
+      arr = arr.filter((x) => String(x.environment || "").toUpperCase().includes(want));
     }
 
-    if (statusFilter) {
-      const want = String(statusFilter).toUpperCase();
-      // ✅ OPEN = status OPEN (y por normalizador, OPEN se mantiene aunque venga raro)
-      filtered = filtered.filter((x) => String(x.status || "").toUpperCase() === want);
+    if (statusChip) {
+      arr = arr.filter((x) => String(x.status || "").toUpperCase() === statusChip);
     }
 
-    if (environmentFilter) {
-      const want = String(environmentFilter).toUpperCase();
-      filtered = filtered.filter((x) => String(x.environment || "").toUpperCase().includes(want));
-    }
-
-    if (onBatch) onBatch(filtered);
-    all = all.concat(filtered);
-
-    // si el backend devuelve menos que pageSize, asumimos última página
-    if (batch.length < pageSize) break;
-  }
-
-  // 4) Orden: más recientes primero (por startTime)
-  all.sort((a, b) => {
-    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-    return db - da;
-  });
-
-  return all;
-}
-
-// ===========================
-// Conveniencias (TCS / NO TCS)
-export const fetchTcsOpenRecent = (opts = {}) =>
-  fetchAllProblems({ tcsFilter: true, statusFilter: "OPEN", recentDays: 1, ...opts });
-
-export const fetchNotTcsOpenRecent = (opts = {}) =>
-  fetchAllProblems({ tcsFilter: false, statusFilter: "OPEN", recentDays: 1, ...opts });
-
-export const fetchTcsClosedRecent = (opts = {}) =>
-  fetchAllProblems({ tcsFilter: true, statusFilter: "CLOSED", recentDays: 1, ...opts });
-
-export const fetchNotTcsClosedRecent = (opts = {}) =>
-  fetchAllProblems({ tcsFilter: false, statusFilter: "CLOSED", recentDays: 1, ...opts });
-
-
-1112211--------
-
-import React, { useEffect, useState } from "react";
-import { useBiaCatalog } from "../context/BiaCatalogContext";
-import {
-  getSlaMinutes,
-  getColorByPercent,
-  calcularCriticidadDetallada,
-  getButtonColorByPercent,
-} from "../utils/slaUtils";
-
-// ==== Normaliza estado OPEN/CLOSED (con fallback por endTime) ====
-function normalizeStatus(p) {
-  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? "";
-  const s = String(raw).trim().toUpperCase();
-
-  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
-  if (s.includes("OPEN")) return "OPEN";
-
-  // fallback
-  return p?.endTime ? "CLOSED" : "OPEN";
-}
-
-// === Traduce towerKey a icono correspondiente ===
-function towerToIconPath(towerKey) {
-  if (!towerKey) return null;
-  const key = String(towerKey).toLowerCase();
-
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
-  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
-    return "/icons/towers/Base.svg";
-  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
-
-  return null;
-}
-
-// === Componente principal ===
-export default function ProblemCard({ problem, username }) {
-  const {
-    title,
-    severityLevel,
-    impactLevel,
-    startTime,
-    endTime,
-    environment,
-    affectedCI = [],
-    tenant,
-    problemId,
-  } = problem;
-
-  const { get: catalogGet } = useBiaCatalog();
-
-  // Buscar coincidencia con catálogo
-  const hitFromCatalog = (() => {
-    for (const ci of affectedCI || []) {
-      const name = ci?.name || ci?.Nombre;
-      const hit = name ? catalogGet(name) : null;
-      if (hit) return hit;
-    }
-    return null;
-  })();
-
-  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
-
-  const { criticidad } = calcularCriticidadDetallada(problem, {
-    catalogLookup: (ciName) => catalogGet(ciName),
-  });
-
-  // === ESTADO OPEN/CLOSED ===
-  const status = normalizeStatus(problem);
-  const isClosed = status === "CLOSED";
-
-  // === SLA / colores ===
-  const slaMinutes = getSlaMinutes(criticidad);
-
-  const start = new Date(startTime);
-  const end = endTime ? new Date(endTime) : null;
-
-  const [now, setNow] = useState(new Date());
-
-  // ✅ SOLO CORRE EL TIMER SI ESTÁ OPEN
-  useEffect(() => {
-    if (isClosed) return;
-    const interval = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(interval);
-  }, [isClosed]);
-
-  // ✅ elapsed depende de CLOSED (usa endTime si existe)
-  const elapsedMinutes = isClosed
-    ? end
-      ? (end - start) / 60000
-      : 0
-    : (now - start) / 60000;
-
-  const remainingMinutes = Math.max(slaMinutes - elapsedMinutes, 0);
-  const percentRemaining = Math.max((remainingMinutes / slaMinutes) * 100, 0);
-
-  const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor = getButtonColorByPercent(percentRemaining);
-
-  const formatTime = (minutes) => {
-    const totalSeconds = Math.max(Math.floor(minutes * 60), 0);
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  };
-
-  const uniqueNames = [...new Set((affectedCI || []).map((ci) => ci?.name).filter(Boolean))];
-  const equipos = uniqueNames.join(", ");
-  const isDisabled = !username;
-  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
+    arr.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
+    return arr;
+  }, [all, envFilter, statusChip]);
 
   return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem 1.5rem",
-        marginBottom: "1rem",
-        backgroundColor: bgColor,
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-      }}
-    >
-      {/* INFO A LA IZQUIERDA / ICONOS A LA DERECHA */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          padding: "1rem",
-          gap: "1rem",
-          flex: 1,
-        }}
-      >
-        {/* COLUMNA IZQUIERDA: INFORMACIÓN */}
-        <div style={{ flex: 1, paddingRight: "1rem" }}>
-          <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{title}</h3>
+    <div>
+      <h2 style={{ textAlign: "center" }}>Problemas Otros ({all.length})</h2>
 
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Severidad Dynatrace:</strong> {severityLevel}
-          </p>
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Impacto:</strong> {impactLevel}
-          </p>
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Inicio:</strong> {start.toLocaleString()}
-          </p>
-
-          {/* ✅ ESTADO NORMALIZADO */}
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Estado:</strong> {status}
-          </p>
-
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Criticidad (BIA):</strong> {criticidad}
-          </p>
-
-          <p style={{ fontSize: "1.2rem" }}>
-            <strong>Equipos afectados:</strong> <small>{equipos}</small>
-          </p>
-        </div>
-
-        {/* COLUMNA CENTRAL: ICONOS */}
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "center",
-            gap: "1rem",
-            flexShrink: 0,
-            minWidth: "200px",
-          }}
-        >
-          {(() => {
-            const size = 110;
-            return (
-              <>
-                <img
-                  src={`/severidad${criticidad}.svg`}
-                  width={size}
-                  height={size}
-                  title={`Criticidad ${criticidad}`}
-                />
-                <img
-                  src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-                  width={size}
-                  height={size}
-                  title={environment}
-                />
-                {towerIcon && (
-                  <img
-                    src={towerIcon}
-                    alt="tower"
-                    width={size}
-                    height={size}
-                    title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-                  />
-                )}
-              </>
-            );
-          })()}
-        </div>
+      <div style={{ textAlign: "center", marginBottom: "10px" }}>
+        Usuario:{" "}
+        <input value={username} onChange={(e) => setUsername(e.target.value)} />
       </div>
 
-      {/* TEMPORIZADOR Y BOTÓN */}
-      <div style={{ textAlign: "center" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
-          {/* ✅ CLOSED = 00:00:00 */}
-          {isClosed ? "00:00:00" : formatTime(remainingMinutes)}
-        </div>
-
-        <button
-          disabled={isDisabled}
-          onClick={() => window.open(dynatraceUrl, "_blank")}
-          style={{
-            marginTop: ".5rem",
-            padding: ".4rem 1rem",
-            fontSize: ".9rem",
-            fontWeight: "bold",
-            color: "#fff",
-            backgroundColor: isDisabled ? "#b0b0b0" : isClosed ? "#6b7280" : buttonColor,
-            border: "none",
-            borderRadius: "8px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
-          }}
-        >
-          Revisar problema
-        </button>
+      <div style={{ display: "flex", gap: "10px", justifyContent: "center", marginBottom: "10px", flexWrap: "wrap" }}>
+        <button onClick={() => setEnvFilter("Productivo")}>Productivo ({stats.prodCount})</button>
+        <button onClick={() => setEnvFilter("No Productivo")}>No Productivo ({stats.nprodCount})</button>
+        <button onClick={() => setStatusChip("OPEN")}>Abiertas ({stats.openCount})</button>
+        <button onClick={() => setStatusChip("CLOSED")}>Cerradas ({stats.closedCount})</button>
+        <button onClick={() => { setEnvFilter(null); setStatusChip(null); }}>Todos</button>
       </div>
+
+      {loading && <div style={{ textAlign: "center" }}>Cargando problemas...</div>}
+
+      {visible.map((p) => (
+        <ProblemCard key={p.problemId || p.displayId || p.id} problem={p} username={username} />
+      ))}
     </div>
   );
 }
 
------
+----
 
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
@@ -621,28 +188,28 @@ export default function TcsPage() {
   );
 }
 
-
 -----
 
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { fetchAllProblems } from "../api/problems";
 
-export default function OtrosPage() {
+export default function TcsPage() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
 
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusChip, setStatusChip] = useState(null);
+  // filtros de chips
+  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
+  const [statusChip, setStatusChip] = useState(null); // "OPEN" | "CLOSED" | null
 
   const [all, setAll] = useState([]);
 
   async function load() {
     setLoading(true);
     try {
-      // ✅ último día + NO TCS
+      // ✅ último día + TCS
       const data = await fetchAllProblems({
-        tcsFilter: false,
+        tcsFilter: true,
         recentDays: 1,
         pageSize: 500,
         maxPages: 40,
@@ -655,6 +222,7 @@ export default function OtrosPage() {
 
   useEffect(() => {
     load();
+    // refresco “tiempo real” (cada 30s) para que aparezcan nuevas OPEN
     const t = setInterval(load, 30000);
     return () => clearInterval(t);
   }, []);
@@ -663,7 +231,7 @@ export default function OtrosPage() {
     const prod = all.filter((x) => String(x.environment).toUpperCase().includes("PRODUCTIVO"));
     const nprod = all.filter((x) => String(x.environment).toUpperCase().includes("NO PRODUCTIVO") || String(x.environment).toUpperCase().includes("NOPRODUCTIVO"));
 
-    const open = all.filter((x) => x.status === "OPEN");
+    const open = all.filter((x) => x.status === "OPEN");   // ✅
     const closed = all.filter((x) => x.status === "CLOSED");
 
     return {
@@ -686,19 +254,21 @@ export default function OtrosPage() {
       arr = arr.filter((x) => String(x.status || "").toUpperCase() === statusChip);
     }
 
+    // siempre recientes primero
     arr.sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
     return arr;
   }, [all, envFilter, statusChip]);
 
   return (
     <div>
-      <h2 style={{ textAlign: "center" }}>Problemas Otros ({all.length})</h2>
+      <h2 style={{ textAlign: "center" }}>Problemas TCS ({all.length})</h2>
 
       <div style={{ textAlign: "center", marginBottom: "10px" }}>
         Usuario:{" "}
         <input value={username} onChange={(e) => setUsername(e.target.value)} />
       </div>
 
+      {/* CHIPS (MISMA IDEA QUE TU UI) */}
       <div style={{ display: "flex", gap: "10px", justifyContent: "center", marginBottom: "10px", flexWrap: "wrap" }}>
         <button onClick={() => setEnvFilter("Productivo")}>Productivo ({stats.prodCount})</button>
         <button onClick={() => setEnvFilter("No Productivo")}>No Productivo ({stats.nprodCount})</button>
