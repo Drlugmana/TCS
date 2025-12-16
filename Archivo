@@ -1,6 +1,6 @@
-// ==============================
+// ===============================
 // src/api/problems.js
-// ==============================
+// ===============================
 
 // 0) CONFIG OPCIONAL FECHA
 // Si pones una fecha "YYYY-MM-DD" fuerza modo día puntual.
@@ -9,10 +9,48 @@ export const ONLY_DATE = null;
 
 // 1) BASE DE LA API (desde .env)
 const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+if (!BASE) throw new Error('Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)');
 const API = `${BASE}/api/Problems`;
 
+// -------------------------------
+// Helpers
+// -------------------------------
+const toUpperTrim = (v) => (v == null ? "" : String(v).trim().toUpperCase());
+
+function safeIso(d) {
+  try {
+    const dt = d instanceof Date ? d : new Date(d);
+    if (Number.isNaN(dt.getTime())) return null;
+    return dt.toISOString();
+  } catch {
+    return null;
+  }
+}
+
+// Rango local completo de un día (00:00:00 a 23:59:59)
+function getDayRange(dateStr /* YYYY-MM-DD */) {
+  const start = new Date(`${dateStr}T00:00:00`);
+  const end = new Date(`${dateStr}T23:59:59`);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+// Convierte YYYY-MM-DD a límites de día en ISO (local)
+export function toLocalDayIsoRange(dateStr) {
+  return getDayRange(dateStr);
+}
+
+// Rango “diario”: desde AYER 00:00 hasta AHORA (tiempo real)
+export function getYesterdayToNowRange() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return { startIso: start.toISOString(), endIso: now.toISOString() };
+}
+
+// -------------------------------
 // 2) Normalizador robusto
+// -------------------------------
 function normalize(list) {
   if (!Array.isArray(list)) return [];
 
@@ -24,6 +62,8 @@ function normalize(list) {
       p.StartTime ??
       p.StartTimeUtc ??
       p.start_date ??
+      p.start ??
+      p.Start ??
       null;
 
     const endRaw =
@@ -32,6 +72,8 @@ function normalize(list) {
       p.EndTime ??
       p.EndTimeUtc ??
       p.end_date ??
+      p.end ??
+      p.End ??
       null;
 
     // Jurisdicción
@@ -48,23 +90,34 @@ function normalize(list) {
     const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
     const isTcs =
       p.jurisdiction?.isTcs ??
-      (typeof juris === "string" ? (juris === "TCS" ? true : false) : false) ??
+      p.isTcs ??
+      (juris === "TCS" ? true : false) ??
       false;
 
     // ids/títulos
-    const problemId = p.problemId ?? p.displayId ?? p.id ?? "";
-    const title = p.title ?? p.shortDescription ?? "(sin título)";
+    const problemId = p.problemId ?? p.ProblemId ?? p.displayId ?? p.DisplayId ?? p.id ?? p.Id ?? "";
+    const title = p.title ?? p.Title ?? p.shortDescription ?? p.ShortDescription ?? "(sin título)";
 
     // otros campos usados por la UI
-    const severityLevel = p.severityLevel ?? p.severity ?? "";
-    const impactLevel = p.impactLevel ?? p.impact ?? "";
-    const environment = p.environment ?? p.environmentName ?? "";
+    const severityLevel = p.severityLevel ?? p.SeverityLevel ?? p.severity ?? p.Severity ?? "";
+    const impactLevel = p.impactLevel ?? p.ImpactLevel ?? p.impact ?? p.Impact ?? "";
+    const environment = p.environment ?? p.Environment ?? p.environmentName ?? p.EnvironmentName ?? "";
 
     const affectedCI =
-      p.affectedCI ?? p.affectedEntities ?? p.affectedEntitiesList ?? [];
+      p.affectedCI ??
+      p.AffectedCI ??
+      p.affectedEntities ??
+      p.AffectedEntities ??
+      p.affectedEntitiesList ??
+      p.AffectedEntitiesList ??
+      [];
 
-    const status = p.status ?? p.state ?? ""; // "OPEN" | "CLOSED"
-    const tenant = p.tenant ?? p.domain ?? "";
+    // ✅ STATUS: aquí estaba el problema típico (OPEN no aparecía)
+    // Acepta status/Status/state/State y normaliza a OPEN/CLOSED
+    const statusRaw = p.status ?? p.Status ?? p.state ?? p.State ?? "";
+    const status = toUpperTrim(statusRaw); // "OPEN" | "CLOSED"
+
+    const tenant = p.tenant ?? p.Tenant ?? p.domain ?? p.Domain ?? "";
 
     return {
       ...p,
@@ -78,13 +131,15 @@ function normalize(list) {
       tenant,
       label: isTcs ? "TCS" : "NO TCS",
       isTcs,
-      startTime: startRaw ? new Date(startRaw).toISOString() : null,
-      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+      startTime: safeIso(startRaw),
+      endTime: safeIso(endRaw),
     };
   });
 }
 
+// -------------------------------
 // 3) Fetch de UNA página con query-params
+// -------------------------------
 async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
@@ -109,78 +164,39 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   return normalize(items);
 }
 
-// 4) Utilidad: rango para un solo día local
-function getDayRange(dateStr /* YYYY-MM-DD */) {
-  const start = new Date(`${dateStr}T00:00:00`);
-  const end = new Date(`${dateStr}T23:59:59`);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
-}
-
-// 4.b) Utilidad: convierte YYYY-MM-DD a límites de día en ISO
-export function toLocalDayIsoRange(dateStr) {
-  return getDayRange(dateStr);
-}
-
-// 4.c) Utilidad: rango desde AYER 00:00 hasta AHORA (local)
-function getYesterdayToNowRange() {
-  const now = new Date();
-  const start = new Date();
-  // ayer 00:00
-  start.setDate(now.getDate() - 1);
-  start.setHours(0, 0, 0, 0);
-  return { startIso: start.toISOString(), endIso: now.toISOString() };
-}
-
-// 5) Fetch histórico con paginado + filtros opcionales
+// -------------------------------
+// 4) Fetch histórico con paginado + filtros opcionales
+// -------------------------------
 export async function fetchAllProblems({
-  onlyDate = ONLY_DATE, // si viene string => fuerza ese día; si null => sin límite
+  onlyDate = ONLY_DATE, // string "YYYY-MM-DD" o null
   pageSize = 500,
   maxPages = 40,
   onBatch, // (items) => void
   tcsFilter, // true | false | undefined
   statusFilter, // "OPEN" | "CLOSED" | undefined
   environmentFilter, // "Productivo" | "NoProductivo" | undefined (o parte del texto)
-  startIso, // forzar ISO inicio
-  endIso, // forzar ISO fin
-  recentDays, // si quieres SOLO lo reciente (ej: 7)
-  openLookbackDays = 1, // NUEVO: por defecto OPEN = ayer+hoy si no mandas rango
+  startIso,
+  endIso,
+  recentDays, // si quieres SOLO lo reciente (ej: 1 => desde ayer 00:00 hasta ahora)
 } = {}) {
   // 1) Definir rango
   let range = { startIso, endIso };
 
-  // A) Si pasas recentDays, aplica rango reciente (siempre)
+  // ✅ Modo "reciente" diario: desde (hoy - recentDays) 00:00 hasta ahora
   if (typeof recentDays === "number" && recentDays > 0) {
-    const end = new Date();
-    const start = new Date(end);
-    start.setDate(end.getDate() - recentDays);
-    range = { startIso: start.toISOString(), endIso: end.toISOString() };
+    const now = new Date();
+    const start = new Date(now);
+    start.setDate(now.getDate() - recentDays);
+    start.setHours(0, 0, 0, 0);
+    range = { startIso: start.toISOString(), endIso: now.toISOString() };
   }
 
-  // B) Si no hay rango y onlyDate es string => rango de ese día
-  if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
+  // Si no hay start/end y hay onlyDate => rango de ese día
+  if ((!range.startIso || !range.endIso) && typeof onlyDate === "string") {
     range = getDayRange(onlyDate);
   }
 
-  // C) ✅ CAMBIO CLAVE:
-  // Si pides OPEN y NO envías rango/onlyDate/recentDays,
-  // entonces trae SOLO las OPEN desde AYER 00:00 hasta ahora (tiempo real).
-  const wantStatus = statusFilter ? String(statusFilter).toUpperCase() : "";
-  const noExplicitRange = !range.startIso && !range.endIso;
-  const noExplicitDateMode = typeof onlyDate !== "string";
-  const noRecentDays = !(typeof recentDays === "number" && recentDays > 0);
-
-  if (
-    wantStatus === "OPEN" &&
-    noExplicitRange &&
-    noExplicitDateMode &&
-    noRecentDays
-  ) {
-    // si openLookbackDays != 1 y quieres expandir, puedes hacerlo aquí:
-    // por ahora el requerimiento es "ayer + hoy" => 1
-    range = getYesterdayToNowRange();
-  }
-
-  // Si range sigue vacío => NO ponemos start/end => el API devuelve TODO (como antes)
+  // 2) Paginación
   let all = [];
 
   for (let page = 1; page <= maxPages; page++) {
@@ -193,7 +209,7 @@ export async function fetchAllProblems({
 
     if (!batch.length) break;
 
-    // 2) Filtros opcionales en cliente
+    // 3) Filtros opcionales en cliente
     let filtered = batch;
 
     if (typeof tcsFilter === "boolean") {
@@ -201,15 +217,13 @@ export async function fetchAllProblems({
     }
 
     if (statusFilter) {
-      const want = String(statusFilter).toUpperCase();
-      filtered = filtered.filter((x) => (x.status || "").toUpperCase() === want);
+      const want = toUpperTrim(statusFilter);
+      filtered = filtered.filter((x) => toUpperTrim(x.status) === want);
     }
 
     if (environmentFilter) {
-      const want = String(environmentFilter).toUpperCase();
-      filtered = filtered.filter((x) =>
-        String(x.environment || "").toUpperCase().includes(want)
-      );
+      const want = toUpperTrim(environmentFilter);
+      filtered = filtered.filter((x) => toUpperTrim(x.environment).includes(want));
     }
 
     if (onBatch) onBatch(filtered);
@@ -218,7 +232,7 @@ export async function fetchAllProblems({
     if (batch.length < pageSize) break; // última página
   }
 
-  // Ordenar: más recientes primero (por startTime)
+  // 4) Ordenar: más recientes primero (por startTime)
   all.sort((a, b) => {
     const da = a.startTime ? new Date(a.startTime).getTime() : 0;
     const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -228,7 +242,9 @@ export async function fetchAllProblems({
   return all;
 }
 
-// 6) Fetch por rango de fechas (YYYY-MM-DD)
+// -------------------------------
+// 5) Fetch por rango de fechas (YYYY-MM-DD)
+// -------------------------------
 export async function fetchByDateRange({
   fromDate, // "YYYY-MM-DD"
   toDate, // "YYYY-MM-DD"
@@ -259,7 +275,35 @@ export async function fetchByDateRange({
   });
 }
 
-// 7) Conveniencias
+// -------------------------------
+// 6) ✅ NUEVO: “DIARIO EN TIEMPO REAL”
+// Trae: desde AYER 00:00 hasta AHORA (ayer + hoy)
+// Ideal para ver OPEN del día anterior + hoy, y también CLOSED de ese rango.
+// -------------------------------
+export async function fetchDailyProblems({
+  tcsFilter, // true | false | undefined
+  statusFilter, // "OPEN" | "CLOSED" | undefined  (si lo dejas undefined => trae ambos)
+  environmentFilter,
+  pageSize = 500,
+  maxPages = 40,
+} = {}) {
+  const { startIso, endIso } = getYesterdayToNowRange();
+
+  return fetchAllProblems({
+    onlyDate: null,
+    startIso,
+    endIso,
+    tcsFilter,
+    statusFilter,
+    environmentFilter,
+    pageSize,
+    maxPages,
+  });
+}
+
+// -------------------------------
+// 7) Conveniencias (como las tenías) + diario
+// -------------------------------
 export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
   fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
 
@@ -272,6 +316,18 @@ export const fetchTcsAllHistory = (opts = {}) =>
 export const fetchNoTcsAllHistory = (opts = {}) =>
   fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
 
-// ✅ Esto ahora sirve perfecto para “diario en tiempo real” si le pasas statusFilter:"OPEN"
-export const fetchRecentProblems = (recentDays = 7, opts = {}) =>
+// ✅ “Reciente” ahora por defecto es DIARIO (ayer 00:00 -> ahora)
+export const fetchRecentProblems = ({ recentDays = 1, opts = {} } = {}) =>
   fetchAllProblems({ onlyDate: null, recentDays, ...opts });
+
+// ✅ Atajos diarios para tu caso:
+export const fetchTcsDaily = (opts = {}) => fetchDailyProblems({ tcsFilter: true, ...opts });
+export const fetchNoTcsDaily = (opts = {}) => fetchDailyProblems({ tcsFilter: false, ...opts });
+
+// Si quieres SOLO OPEN diario (ayer+hoy):
+export const fetchTcsDailyOpen = (opts = {}) =>
+  fetchDailyProblems({ tcsFilter: true, statusFilter: "OPEN", ...opts });
+
+// Si quieres SOLO CLOSED diario (ayer+hoy):
+export const fetchTcsDailyClosed = (opts = {}) =>
+  fetchDailyProblems({ tcsFilter: true, statusFilter: "CLOSED", ...opts });
