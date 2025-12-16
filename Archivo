@@ -1,334 +1,260 @@
-// ==============================
-// src/api/problems.js
-// ==============================
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { fetchTcsAllHistory, fetchTcsOpenRecent } from "../api/problems";
+import ProblemCard from "../components/ProblemCard";
+import UsernameInput from "../components/UsernameInput";
 
-// 0) CONFIG OPCIONAL FECHA
-// Si pones una fecha "YYYY-MM-DD" fuerza modo día puntual.
-// Si lo dejas en null => SIN límite por fecha (histórico completo).
-export const ONLY_DATE = null;
+/* ===== Detección de ambiente (idéntico) ===== */
+function detectEnvironmentRaw(problem) {
+  const raw =
+    problem?.environmentIcon ||
+    problem?.environmentText ||
+    problem?.environment ||
+    problem?.Environment ||
+    problem?.entorno ||
+    problem?.env ||
+    "";
+  return String(raw).toLowerCase().trim();
+}
 
-// 1) BASE DE LA API (desde .env)
-// VITE_API_URL ejemplo:
-// - http://localhost:5000
-// - http://TU_SERVIDOR:PUERTO
-// - https://xxxxx.brs.devtunnels.ms
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!BASE) throw new Error('Falta VITE_API_URL en .env (ej: "http://servidor:puerto")');
+function isProd(problem) {
+  const env = detectEnvironmentRaw(problem);
 
-const API = `${BASE}/api/Problems`;
+  // casos explícitos
+  if (
+    env.includes("icon-noproductivo") ||
+    env.includes("no-productivo") ||
+    env.includes("noproductivo")
+  ) {
+    return false;
+  }
+  if (env.includes("icon-productivo")) return true;
 
-// 2) Normalizador robusto (soporta nombres distintos)
-// OJO: aquí es clave mapear bien Environment/Status/StartTime del backend.
-function normalize(list) {
-  if (!Array.isArray(list)) return [];
+  // heurística por texto
+  const nonProdRegex =
+    /\b(enp|np|qa|q\/a|dev|desa|desarrollo|test|testing|stg|stage|staging|uat|preprod|pre-prod|pre\s*prod)\b/i;
+  if (nonProdRegex.test(env)) return false;
 
-  return list.map((p) => {
-    // start / end (acepta nombres diversos)
-    const startRaw =
-      p.startTime ??
-      p.startTimeUtc ??
-      p.StartTime ??
-      p.StartTimeUtc ??
-      p.start_date ??
-      p.StartDate ??
-      null;
+  if (/\b(productivo|producci[oó]n|production)\b/i.test(env)) return true;
+  if (/\bprod\b/i.test(env) || /prod[\w-]*/i.test(env)) return true;
 
-    const endRaw =
-      p.endTime ??
-      p.EndTime ??
-      p.endTimeUtc ??
-      p.EndTimeUtc ??
-      p.end_date ??
-      p.EndDate ??
-      null;
+  return false;
+}
 
-    // Ambiente (acepta nombres diversos)
-    const environment =
-      p.environment ??
-      p.Environment ??
-      p.environmentName ??
-      p.EnvironmentName ??
-      p.env ??
-      p.Env ??
-      p.entorno ??
-      p.Entorno ??
-      "";
+/* ===== Normalización de estado OPEN/CLOSED ===== */
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.ProblemStatus ?? "";
+  const s = String(raw).trim().toUpperCase();
 
-    // Estado (acepta nombres diversos)
-    const status =
-      p.status ??
-      p.Status ??
-      p.state ??
-      p.State ??
-      p.problemStatus ??
-      p.ProblemStatus ??
-      "";
+  // Si no viene status, inferimos por endTime
+  if (!s) return p?.endTime ? "CLOSED" : "OPEN";
 
-    // Jurisdicción / label (por si llega anidado)
-    const jurisRaw =
-      p.jurisdiction?.label ??
-      p.jurisdiction?.name ??
-      p.jurisdiction?.Jurisdiction ??
-      p.Jurisdiction ??
-      p.jurisdiction ??
-      p.label ??
-      p.Label ??
-      "";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+  if (s.includes("OPEN")) return "OPEN";
 
-    const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
-    const isTcs =
-      p.jurisdiction?.isTcs ??
-      p.isTcs ??
-      p.IsTcs ??
-      (typeof juris === "string" ? (juris === "TCS" ? true : false) : false) ??
-      false;
+  // fallback
+  return p?.endTime ? "CLOSED" : "OPEN";
+}
 
-    // ids/títulos
-    const problemId = p.problemId ?? p.ProblemId ?? p.displayId ?? p.DisplayId ?? p.id ?? p.Id ?? "";
-    const title = p.title ?? p.Title ?? p.shortDescription ?? p.ShortDescription ?? "(sin título)";
+/* ===== Merge por ID para no “perder” OPEN ===== */
+function keyOf(p) {
+  return p?.problemId || p?.displayId || p?.id || "";
+}
 
-    // otros campos usados por la UI
-    const severityLevel = p.severityLevel ?? p.SeverityLevel ?? p.severity ?? p.Severity ?? "";
-    const impactLevel = p.impactLevel ?? p.ImpactLevel ?? p.impact ?? p.Impact ?? "";
-    const tenant = p.tenant ?? p.Tenant ?? p.domain ?? p.Domain ?? "";
-    const affectedCI = p.affectedCI ?? p.AffectedCI ?? p.affectedEntities ?? p.AffectedEntities ?? [];
+function mergeUnique(oldList, newList) {
+  const map = new Map();
+  for (const p of oldList) map.set(keyOf(p), p);
+  for (const p of newList) map.set(keyOf(p), p);
+  return Array.from(map.values());
+}
 
-    return {
-      ...p,
+export default function TCSProblems() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [username, setUsername] = useState("");
 
-      // normalizados para la UI
-      problemId,
-      title,
-      severityLevel,
-      impactLevel,
-      environment,
-      affectedCI,
-      status,
-      tenant,
-      label: isTcs ? "TCS" : "NO TCS",
-      isTcs,
+  const [envTab, setEnvTab] = useState("prod"); // 'prod' | 'nonprod'
+  const [statusTab, setStatusTab] = useState("open"); // 'open' | 'closed'
 
-      // Fechas en ISO si se puede
-      startTime: startRaw ? new Date(startRaw).toISOString() : null,
-      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+  const refreshTimer = useRef(null);
+
+  // ===== Carga inicial: histórico + OPEN recientes =====
+  useEffect(() => {
+    let mounted = true;
+
+    async function loadInitial() {
+      try {
+        setLoading(true);
+        setError(null);
+        setProblems([]);
+
+        // 1) Traer histórico completo (para ver cerradas como antes)
+        //    (va llenando en batches)
+        const historyPromise = fetchTcsAllHistory({
+          pageSize: 500,
+          maxPages: 40,
+          onBatch: (batch) => {
+            if (!mounted) return;
+            setProblems((prev) => {
+              const merged = mergeUnique(prev, batch);
+              // Ordenar por startTime desc
+              merged.sort((a, b) => (new Date(b.startTime || 0) - new Date(a.startTime || 0)));
+              return merged;
+            });
+          },
+        });
+
+        // 2) Traer OPEN recientes (ayer + hoy = 2 días)
+        const recentOpen = await fetchTcsOpenRecent(2);
+
+        if (!mounted) return;
+
+        // Garantizar que las OPEN recientes estén sí o sí
+        setProblems((prev) => {
+          const merged = mergeUnique(prev, recentOpen);
+          merged.sort((a, b) => (new Date(b.startTime || 0) - new Date(a.startTime || 0)));
+          return merged;
+        });
+
+        // esperar a que termine histórico (por si quieres “loading” correcto)
+        await historyPromise;
+      } catch (e) {
+        if (!mounted) return;
+        setError(e?.message || String(e));
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    }
+
+    loadInitial();
+
+    return () => {
+      mounted = false;
+      if (refreshTimer.current) clearInterval(refreshTimer.current);
     };
-  });
+  }, []);
+
+  // ===== Refresco automático SOLO de OPEN recientes (cada 60s) =====
+  useEffect(() => {
+    // evita duplicar intervalos
+    if (refreshTimer.current) clearInterval(refreshTimer.current);
+
+    refreshTimer.current = setInterval(async () => {
+      try {
+        const recentOpen = await fetchTcsOpenRecent(2);
+
+        setProblems((prev) => {
+          // Reemplazamos/inyectamos las OPEN recientes sin tocar el resto del histórico
+          const merged = mergeUnique(prev, recentOpen);
+          merged.sort((a, b) => (new Date(b.startTime || 0) - new Date(a.startTime || 0)));
+          return merged;
+        });
+      } catch {
+        // si falla el refresh no rompas la UI
+      }
+    }, 60000);
+
+    return () => {
+      if (refreshTimer.current) clearInterval(refreshTimer.current);
+    };
+  }, []);
+
+  // ===== Listas por tabs =====
+  const prodList = useMemo(() => problems.filter(isProd), [problems]);
+
+  // ✅ IMPORTANTE: aquí era tu bug en screenshot: estabas usando isProd en vez de !isProd
+  const nonProdList = useMemo(() => problems.filter((p) => !isProd(p)), [problems]);
+
+  const envList = envTab === "prod" ? prodList : nonProdList;
+
+  const openList = useMemo(() => envList.filter((p) => normalizeStatus(p) === "OPEN"), [envList]);
+  const closedList = useMemo(() => envList.filter((p) => normalizeStatus(p) === "CLOSED"), [envList]);
+
+  const selectedList = statusTab === "open" ? openList : closedList;
+
+  if (error) return <h2 style={{ color: "red" }}>Error: {error}</h2>;
+
+  return (
+    <div style={{ maxWidth: "900px", margin: "0 auto", padding: "1rem" }}>
+      <h2>
+        Problemas TCS <span>({problems.length})</span>
+      </h2>
+
+      <UsernameInput value={username} onChange={setUsername} />
+
+      {loading && problems.length === 0 && <p>Cargando problemas TCS...</p>}
+      {!loading && problems.length === 0 && <p>No hay problemas TCS.</p>}
+
+      {/* Tabs de ambiente */}
+      <div style={{ display: "flex", gap: ".5rem", margin: "1rem 0 .5rem" }}>
+        <button
+          onClick={() => setEnvTab("prod")}
+          disabled={envTab === "prod"}
+          style={{
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "prod" ? "#dbeafe" : "#f8fafc",
+            fontWeight: envTab === "prod" ? "bold" : "normal",
+            cursor: envTab === "prod" ? "default" : "pointer",
+          }}
+        >
+          Productivo ({prodList.length})
+        </button>
+
+        <button
+          onClick={() => setEnvTab("nonprod")}
+          disabled={envTab === "nonprod"}
+          style={{
+            padding: ".5rem 1rem",
+            borderRadius: "999px",
+            border: "1px solid #cbd5e1",
+            background: envTab === "nonprod" ? "#fef3c7" : "#f8fafc",
+            fontWeight: envTab === "nonprod" ? "bold" : "normal",
+            cursor: envTab === "nonprod" ? "default" : "pointer",
+          }}
+        >
+          No Productivo ({nonProdList.length})
+        </button>
+      </div>
+
+      {/* Subtabs de estado */}
+      <div style={{ display: "flex", gap: ".5rem", margin: ".25rem 0 1rem" }}>
+        <button
+          onClick={() => setStatusTab("open")}
+          disabled={statusTab === "open"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "open" ? "#fde68a" : "#ffffff",
+            fontWeight: statusTab === "open" ? "bold" : "normal",
+            cursor: statusTab === "open" ? "default" : "pointer",
+          }}
+        >
+          Abiertas ({openList.length})
+        </button>
+
+        <button
+          onClick={() => setStatusTab("closed")}
+          disabled={statusTab === "closed"}
+          style={{
+            padding: ".35rem .9rem",
+            borderRadius: "999px",
+            border: "1px solid #e5e7eb",
+            background: statusTab === "closed" ? "#bbf7d0" : "#ffffff",
+            fontWeight: statusTab === "closed" ? "bold" : "normal",
+            cursor: statusTab === "closed" ? "default" : "pointer",
+          }}
+        >
+          Cerradas ({closedList.length})
+        </button>
+      </div>
+
+      {/* Render lista */}
+      {selectedList.map((p) => (
+        <ProblemCard key={keyOf(p)} problem={p} username={username} />
+      ))}
+    </div>
+  );
 }
-
-// 3) Fetch de UNA página con query-params
-async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize", String(pageSize));
-  if (startIso) params.set("start", startIso);
-  if (endIso) params.set("end", endIso);
-
-  const url = `${API}?${params.toString()}`;
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
-  }
-
-  // Puede venir array directo o envuelto
-  const json = await res.json();
-  const items = Array.isArray(json)
-    ? json
-    : json?.results || json?.items || json?.data || json?.value || [];
-
-  return normalize(items);
-}
-
-// 4) Utilidad: rango para un solo día local (YYYY-MM-DD)
-function getDayRange(dateStr /* YYYY-MM-DD */) {
-  const start = new Date(`${dateStr}T00:00:00`);
-  const end = new Date(`${dateStr}T23:59:59`);
-  return { startIso: start.toISOString(), endIso: end.toISOString() };
-}
-
-// 4.b) Convierte YYYY-MM-DD a límites de día en ISO
-export function toLocalDayIsoRange(dateStr) {
-  return getDayRange(dateStr);
-}
-
-// 5) Fetch histórico con paginado + filtros opcionales
-export async function fetchAllProblems({
-  onlyDate = ONLY_DATE, // string | null
-  pageSize = 500,
-  maxPages = 40,
-
-  onBatch, // (items) => void
-
-  tcsFilter, // true | false | undefined
-  statusFilter, // "OPEN" | "CLOSED" | undefined
-  environmentFilter, // "Productivo" | "NoProductivo" | undefined (o parte del texto)
-
-  startIso, // forzar ISO inicio
-  endIso, // forzar ISO fin
-
-  recentDays, // número => SOLO lo reciente (ej: 2)
-  // IMPORTANTE:
-  // Para evitar desfase timezone con backend, por defecto NO mando start/end al API
-  // cuando es "recentDays". Primero traigo páginas y filtro en cliente por fecha local.
-  sendRangeToApi = false,
-} = {}) {
-  // 1) Definir rango
-  let range = { startIso, endIso };
-
-  // si se pide solo lo reciente
-  if (typeof recentDays === "number" && recentDays > 0) {
-    const end = new Date();
-    const start = new Date();
-    start.setDate(end.getDate() - recentDays);
-
-    // guardamos rango para filtrar en cliente
-    range = { startIso: start.toISOString(), endIso: end.toISOString() };
-  }
-
-  // si no hay rango y viene onlyDate string
-  if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
-    range = getDayRange(onlyDate);
-  }
-
-  // 2) paginar
-  let all = [];
-  for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({
-      pageNumber: page,
-      pageSize,
-      // Solo mando al API si:
-      // - me forzaste start/end
-      // - o estás en onlyDate
-      // - o me activaste sendRangeToApi
-      startIso:
-        sendRangeToApi && range?.startIso
-          ? range.startIso
-          : typeof onlyDate === "string"
-          ? range.startIso
-          : startIso
-          ? startIso
-          : undefined,
-      endIso:
-        sendRangeToApi && range?.endIso
-          ? range.endIso
-          : typeof onlyDate === "string"
-          ? range.endIso
-          : endIso
-          ? endIso
-          : undefined,
-    });
-
-    if (!batch.length) break;
-
-    // 3) Filtros opcionales en cliente
-    let filtered = batch;
-
-    // (a) reciente por fecha (cliente)
-    if (typeof recentDays === "number" && recentDays > 0) {
-      const minT = range.startIso ? new Date(range.startIso).getTime() : null;
-      const maxT = range.endIso ? new Date(range.endIso).getTime() : null;
-      filtered = filtered.filter((x) => {
-        if (!x.startTime) return false;
-        const t = new Date(x.startTime).getTime();
-        if (minT != null && t < minT) return false;
-        if (maxT != null && t > maxT) return false;
-        return true;
-      });
-    }
-
-    // (b) TCS / NO TCS
-    if (typeof tcsFilter === "boolean") {
-      filtered = filtered.filter((x) => x.isTcs === tcsFilter);
-    }
-
-    // (c) Estado
-    if (statusFilter) {
-      const want = String(statusFilter).toUpperCase();
-      filtered = filtered.filter((x) => String(x.status || "").toUpperCase().includes(want));
-    }
-
-    // (d) Ambiente
-    if (environmentFilter) {
-      const want = String(environmentFilter).toUpperCase();
-      filtered = filtered.filter((x) => String(x.environment || "").toUpperCase().includes(want));
-    }
-
-    if (onBatch) onBatch(filtered);
-    all = all.concat(filtered);
-
-    if (batch.length < pageSize) break; // última página
-  }
-
-  // 4) Ordenar: más recientes primero
-  all.sort((a, b) => {
-    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-    return db - da;
-  });
-
-  return all;
-}
-
-// 6) Fetch por rango de fechas (YYYY-MM-DD) (si lo necesitas para DateRangeBar)
-export async function fetchByDateRange({
-  fromDate, // "YYYY-MM-DD"
-  toDate, // "YYYY-MM-DD"
-  tcsFilter,
-  statusFilter,
-  environmentFilter,
-} = {}) {
-  let startIso, endIso;
-
-  if (fromDate && toDate) {
-    const a = toLocalDayIsoRange(fromDate);
-    const b = toLocalDayIsoRange(toDate);
-    startIso = a.startIso;
-    endIso = b.endIso;
-  } else if (fromDate) {
-    startIso = toLocalDayIsoRange(fromDate).startIso;
-  } else if (toDate) {
-    endIso = toLocalDayIsoRange(toDate).endIso;
-  }
-
-  return fetchAllProblems({
-    onlyDate: null,
-    startIso,
-    endIso,
-    tcsFilter,
-    statusFilter,
-    environmentFilter,
-    // aquí sí tiene sentido mandar rango al API si tu backend lo respeta bien
-    sendRangeToApi: true,
-  });
-}
-
-// 7) Conveniencias (helpers)
-export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
-  fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
-
-export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
-  fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
-
-export const fetchTcsAllHistory = (opts = {}) =>
-  fetchAllProblems({ onlyDate: null, tcsFilter: true, ...opts });
-
-export const fetchNoTcsAllHistory = (opts = {}) =>
-  fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
-
-// ✅ Este es el que NECESITAS para “ayer + hoy” (últimas 48h) OPEN
-export const fetchTcsOpenRecent = (recentDays = 2, opts = {}) =>
-  fetchAllProblems({
-    onlyDate: null,
-    tcsFilter: true,
-    statusFilter: "OPEN",
-    recentDays,
-    // importante: NO mandar start/end al API para evitar desfase (filtramos en cliente)
-    sendRangeToApi: false,
-    // con pocas páginas alcanza porque son recientes
-    maxPages: 10,
-    pageSize: 500,
-    ...opts,
-  });
-
-
