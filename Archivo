@@ -1,0 +1,334 @@
+// ==============================
+// src/api/problems.js
+// ==============================
+
+// 0) CONFIG OPCIONAL FECHA
+// Si pones una fecha "YYYY-MM-DD" fuerza modo día puntual.
+// Si lo dejas en null => SIN límite por fecha (histórico completo).
+export const ONLY_DATE = null;
+
+// 1) BASE DE LA API (desde .env)
+// VITE_API_URL ejemplo:
+// - http://localhost:5000
+// - http://TU_SERVIDOR:PUERTO
+// - https://xxxxx.brs.devtunnels.ms
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error('Falta VITE_API_URL en .env (ej: "http://servidor:puerto")');
+
+const API = `${BASE}/api/Problems`;
+
+// 2) Normalizador robusto (soporta nombres distintos)
+// OJO: aquí es clave mapear bien Environment/Status/StartTime del backend.
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    // start / end (acepta nombres diversos)
+    const startRaw =
+      p.startTime ??
+      p.startTimeUtc ??
+      p.StartTime ??
+      p.StartTimeUtc ??
+      p.start_date ??
+      p.StartDate ??
+      null;
+
+    const endRaw =
+      p.endTime ??
+      p.EndTime ??
+      p.endTimeUtc ??
+      p.EndTimeUtc ??
+      p.end_date ??
+      p.EndDate ??
+      null;
+
+    // Ambiente (acepta nombres diversos)
+    const environment =
+      p.environment ??
+      p.Environment ??
+      p.environmentName ??
+      p.EnvironmentName ??
+      p.env ??
+      p.Env ??
+      p.entorno ??
+      p.Entorno ??
+      "";
+
+    // Estado (acepta nombres diversos)
+    const status =
+      p.status ??
+      p.Status ??
+      p.state ??
+      p.State ??
+      p.problemStatus ??
+      p.ProblemStatus ??
+      "";
+
+    // Jurisdicción / label (por si llega anidado)
+    const jurisRaw =
+      p.jurisdiction?.label ??
+      p.jurisdiction?.name ??
+      p.jurisdiction?.Jurisdiction ??
+      p.Jurisdiction ??
+      p.jurisdiction ??
+      p.label ??
+      p.Label ??
+      "";
+
+    const juris = typeof jurisRaw === "string" ? jurisRaw.trim().toUpperCase() : "";
+    const isTcs =
+      p.jurisdiction?.isTcs ??
+      p.isTcs ??
+      p.IsTcs ??
+      (typeof juris === "string" ? (juris === "TCS" ? true : false) : false) ??
+      false;
+
+    // ids/títulos
+    const problemId = p.problemId ?? p.ProblemId ?? p.displayId ?? p.DisplayId ?? p.id ?? p.Id ?? "";
+    const title = p.title ?? p.Title ?? p.shortDescription ?? p.ShortDescription ?? "(sin título)";
+
+    // otros campos usados por la UI
+    const severityLevel = p.severityLevel ?? p.SeverityLevel ?? p.severity ?? p.Severity ?? "";
+    const impactLevel = p.impactLevel ?? p.ImpactLevel ?? p.impact ?? p.Impact ?? "";
+    const tenant = p.tenant ?? p.Tenant ?? p.domain ?? p.Domain ?? "";
+    const affectedCI = p.affectedCI ?? p.AffectedCI ?? p.affectedEntities ?? p.AffectedEntities ?? [];
+
+    return {
+      ...p,
+
+      // normalizados para la UI
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment,
+      affectedCI,
+      status,
+      tenant,
+      label: isTcs ? "TCS" : "NO TCS",
+      isTcs,
+
+      // Fechas en ISO si se puede
+      startTime: startRaw ? new Date(startRaw).toISOString() : null,
+      endTime: endRaw ? new Date(endRaw).toISOString() : null,
+    };
+  });
+}
+
+// 3) Fetch de UNA página con query-params
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  // Puede venir array directo o envuelto
+  const json = await res.json();
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// 4) Utilidad: rango para un solo día local (YYYY-MM-DD)
+function getDayRange(dateStr /* YYYY-MM-DD */) {
+  const start = new Date(`${dateStr}T00:00:00`);
+  const end = new Date(`${dateStr}T23:59:59`);
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
+}
+
+// 4.b) Convierte YYYY-MM-DD a límites de día en ISO
+export function toLocalDayIsoRange(dateStr) {
+  return getDayRange(dateStr);
+}
+
+// 5) Fetch histórico con paginado + filtros opcionales
+export async function fetchAllProblems({
+  onlyDate = ONLY_DATE, // string | null
+  pageSize = 500,
+  maxPages = 40,
+
+  onBatch, // (items) => void
+
+  tcsFilter, // true | false | undefined
+  statusFilter, // "OPEN" | "CLOSED" | undefined
+  environmentFilter, // "Productivo" | "NoProductivo" | undefined (o parte del texto)
+
+  startIso, // forzar ISO inicio
+  endIso, // forzar ISO fin
+
+  recentDays, // número => SOLO lo reciente (ej: 2)
+  // IMPORTANTE:
+  // Para evitar desfase timezone con backend, por defecto NO mando start/end al API
+  // cuando es "recentDays". Primero traigo páginas y filtro en cliente por fecha local.
+  sendRangeToApi = false,
+} = {}) {
+  // 1) Definir rango
+  let range = { startIso, endIso };
+
+  // si se pide solo lo reciente
+  if (typeof recentDays === "number" && recentDays > 0) {
+    const end = new Date();
+    const start = new Date();
+    start.setDate(end.getDate() - recentDays);
+
+    // guardamos rango para filtrar en cliente
+    range = { startIso: start.toISOString(), endIso: end.toISOString() };
+  }
+
+  // si no hay rango y viene onlyDate string
+  if (!range.startIso && !range.endIso && typeof onlyDate === "string") {
+    range = getDayRange(onlyDate);
+  }
+
+  // 2) paginar
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({
+      pageNumber: page,
+      pageSize,
+      // Solo mando al API si:
+      // - me forzaste start/end
+      // - o estás en onlyDate
+      // - o me activaste sendRangeToApi
+      startIso:
+        sendRangeToApi && range?.startIso
+          ? range.startIso
+          : typeof onlyDate === "string"
+          ? range.startIso
+          : startIso
+          ? startIso
+          : undefined,
+      endIso:
+        sendRangeToApi && range?.endIso
+          ? range.endIso
+          : typeof onlyDate === "string"
+          ? range.endIso
+          : endIso
+          ? endIso
+          : undefined,
+    });
+
+    if (!batch.length) break;
+
+    // 3) Filtros opcionales en cliente
+    let filtered = batch;
+
+    // (a) reciente por fecha (cliente)
+    if (typeof recentDays === "number" && recentDays > 0) {
+      const minT = range.startIso ? new Date(range.startIso).getTime() : null;
+      const maxT = range.endIso ? new Date(range.endIso).getTime() : null;
+      filtered = filtered.filter((x) => {
+        if (!x.startTime) return false;
+        const t = new Date(x.startTime).getTime();
+        if (minT != null && t < minT) return false;
+        if (maxT != null && t > maxT) return false;
+        return true;
+      });
+    }
+
+    // (b) TCS / NO TCS
+    if (typeof tcsFilter === "boolean") {
+      filtered = filtered.filter((x) => x.isTcs === tcsFilter);
+    }
+
+    // (c) Estado
+    if (statusFilter) {
+      const want = String(statusFilter).toUpperCase();
+      filtered = filtered.filter((x) => String(x.status || "").toUpperCase().includes(want));
+    }
+
+    // (d) Ambiente
+    if (environmentFilter) {
+      const want = String(environmentFilter).toUpperCase();
+      filtered = filtered.filter((x) => String(x.environment || "").toUpperCase().includes(want));
+    }
+
+    if (onBatch) onBatch(filtered);
+    all = all.concat(filtered);
+
+    if (batch.length < pageSize) break; // última página
+  }
+
+  // 4) Ordenar: más recientes primero
+  all.sort((a, b) => {
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+    return db - da;
+  });
+
+  return all;
+}
+
+// 6) Fetch por rango de fechas (YYYY-MM-DD) (si lo necesitas para DateRangeBar)
+export async function fetchByDateRange({
+  fromDate, // "YYYY-MM-DD"
+  toDate, // "YYYY-MM-DD"
+  tcsFilter,
+  statusFilter,
+  environmentFilter,
+} = {}) {
+  let startIso, endIso;
+
+  if (fromDate && toDate) {
+    const a = toLocalDayIsoRange(fromDate);
+    const b = toLocalDayIsoRange(toDate);
+    startIso = a.startIso;
+    endIso = b.endIso;
+  } else if (fromDate) {
+    startIso = toLocalDayIsoRange(fromDate).startIso;
+  } else if (toDate) {
+    endIso = toLocalDayIsoRange(toDate).endIso;
+  }
+
+  return fetchAllProblems({
+    onlyDate: null,
+    startIso,
+    endIso,
+    tcsFilter,
+    statusFilter,
+    environmentFilter,
+    // aquí sí tiene sentido mandar rango al API si tu backend lo respeta bien
+    sendRangeToApi: true,
+  });
+}
+
+// 7) Conveniencias (helpers)
+export const fetchTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: true, ...opts });
+
+export const fetchNoTcsProblemsDay = (dateStr = ONLY_DATE, opts = {}) =>
+  fetchAllProblems({ onlyDate: dateStr, tcsFilter: false, ...opts });
+
+export const fetchTcsAllHistory = (opts = {}) =>
+  fetchAllProblems({ onlyDate: null, tcsFilter: true, ...opts });
+
+export const fetchNoTcsAllHistory = (opts = {}) =>
+  fetchAllProblems({ onlyDate: null, tcsFilter: false, ...opts });
+
+// ✅ Este es el que NECESITAS para “ayer + hoy” (últimas 48h) OPEN
+export const fetchTcsOpenRecent = (recentDays = 2, opts = {}) =>
+  fetchAllProblems({
+    onlyDate: null,
+    tcsFilter: true,
+    statusFilter: "OPEN",
+    recentDays,
+    // importante: NO mandar start/end al API para evitar desfase (filtramos en cliente)
+    sendRangeToApi: false,
+    // con pocas páginas alcanza porque son recientes
+    maxPages: 10,
+    pageSize: 500,
+    ...opts,
+  });
+
+
