@@ -1,3 +1,5 @@
+https://TU_API/api/Problems?pageNumber=1&pageSize=50
+
 // src/api/problems.js
 // ===========================
 // CONFIG FECHA (opcional)
