@@ -24,6 +24,24 @@ function cleanNull(v) {
   return v;
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+// IMPORTANTE:
+// El backend normalmente interpreta fechas "sin zona" como LOCAL del servidor.
+// Si tú mandas toISOString() (UTC) se te puede mover el día.
+// Por eso generamos un ISO LOCAL "YYYY-MM-DDTHH:mm:ss" (sin Z).
+function toLocalIsoNoZ(d) {
+  const yyyy = d.getFullYear();
+  const mm = pad2(d.getMonth() + 1);
+  const dd = pad2(d.getDate());
+  const hh = pad2(d.getHours());
+  const mi = pad2(d.getMinutes());
+  const ss = pad2(d.getSeconds());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
+}
+
 function parseDateToISO(v) {
   v = cleanNull(v);
   if (!v) return null;
@@ -55,8 +73,8 @@ function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
   const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
-  if (up.includes("OPEN")) return "OPEN";
-  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+  if (up === "OPEN" || up.includes(" OPEN")) return "OPEN";
+  if (up === "CLOSED" || up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
   // Fallback solo si NO vino status
   return endTimeISO ? "CLOSED" : "OPEN";
@@ -74,25 +92,20 @@ function normalizeEnvironment(envRaw) {
   return s || "";
 }
 
-/**
- * ✅ FIX CRÍTICO:
- * - "NO TCS" contiene "TCS" => antes se convertía erróneamente en TCS.
- * - Primero detectamos NO TCS, luego TCS exacto.
- */
+// ✅ FIX CRÍTICO:
+// "NO TCS" contiene "TCS" => antes se convertía en "TCS".
+// Ahora lo tratamos primero:
 function normalizeJurisdiction(jRaw) {
-  const raw = (cleanNull(jRaw) || "").toString().trim();
-  const up = raw.toUpperCase().replace(/\s+/g, " ").trim();
-
-  if (!up) return "OTROS";
+  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
 
   // Primero NO TCS
-  if (up === "NO TCS" || up.includes("NO TCS")) return "NO TCS";
+  if (s === "NO TCS" || s.includes("NO TCS")) return "NO TCS";
 
-  // Luego TCS (exacto o contiene pero NO NO-TCS)
-  if (up === "TCS" || up.startsWith("TCS ")) return "TCS";
+  // Luego TCS exacto / con espacios
+  if (s === "TCS" || /\bTCS\b/.test(s)) return "TCS";
 
-  // Si viene otra cosa
-  return raw;
+  // Otros valores que existan
+  return s || "OTROS";
 }
 
 // ===========================
@@ -149,44 +162,29 @@ function normalize(list) {
 }
 
 // ===========================
-// Rango: AYER 00:00 local -> AHORA (en ISO)
+// Rango: AYER 00:00 LOCAL -> AHORA (LOCAL)
+// Enviamos strings sin Z para que el backend no “mueva” el día por UTC.
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
-  return { startIso: start.toISOString(), endIso: now.toISOString() };
-}
 
-// ===========================
-// Fecha dentro de rango (client-side) para cuando el backend IGNORA start/end
-function inRangeISO(iso, startIso, endIso) {
-  if (!iso) return false;
-  const t = new Date(iso).getTime();
-  if (!Number.isFinite(t)) return false;
-
-  const a = startIso ? new Date(startIso).getTime() : -Infinity;
-  const b = endIso ? new Date(endIso).getTime() : Infinity;
-
-  return t >= a && t <= b;
+  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
 // ===========================
 // Fetch de UNA página
-async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
 
-  // Si el backend los soporta, perfecto. Si no, no rompe.
   if (startIso) params.set("start", startIso);
   if (endIso) params.set("end", endIso);
 
   const url = `${API}?${params.toString()}`;
-  const res = await fetch(url, {
-    headers: { accept: "application/json" },
-    signal,
-  });
+  const res = await fetch(url, { headers: { accept: "application/json" } });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -203,56 +201,27 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
 }
 
 // ===========================
-// Fetch con paginado (pero SOLO devuelve lo del rango AYER->HOY)
-// ✅ Cortamos paginado temprano si ya estamos en histórico.
+// Fetch con paginado (trae TODO lo del rango)
 export async function fetchProblemsRange({
   startIso,
   endIso,
   pageSize = 1000,
-  maxPages = 20,
+  maxPages = 500,
   onBatch,
 } = {}) {
-  const controller = new AbortController();
-  const { signal } = controller;
-
   let all = [];
-  let reachedOlderThanRange = false;
 
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
+
     if (!batch.length) break;
 
     if (onBatch) onBatch(batch);
+    all = all.concat(batch);
 
-    // ✅ Filtra por rango SIEMPRE (aunque el backend ignore start/end)
-    const batchInRange = batch.filter((x) => inRangeISO(x.startTime, startIso, endIso));
-    all = all.concat(batchInRange);
-
-    // ✅ Early stop: si en esta página ya vino MUY viejo, no sigas pidiendo páginas 100+
-    // (asumiendo que el API trae ordenado de más nuevo a más viejo, que es lo normal)
-    const oldest = batch
-      .map((x) => x.startTime)
-      .filter(Boolean)
-      .sort((a, b) => new Date(a).getTime() - new Date(b).getTime())[0];
-
-    if (oldest && startIso && new Date(oldest).getTime() < new Date(startIso).getTime()) {
-      reachedOlderThanRange = true;
-    }
-
-    if (reachedOlderThanRange) break;
-
-    // si el backend devuelve menos que pageSize => última página
+    // última página si llega incompleta
     if (batch.length < pageSize) break;
   }
-
-  // Dedup por problemId+startTime (evita duplicados por paginado raro)
-  const seen = new Set();
-  all = all.filter((x) => {
-    const k = `${x.problemId || ""}-${x.startTime || ""}`;
-    if (seen.has(k)) return false;
-    seen.add(k);
-    return true;
-  });
 
   // orden: más recientes primero
   all.sort((a, b) => {
@@ -264,9 +233,7 @@ export async function fetchProblemsRange({
   return all;
 }
 
-
--------
-
+-----
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -307,10 +274,14 @@ export default function Tcs() {
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
 
-      // ✅ OJO: pageSize alto + maxPages bajo (para NO irse a histórico)
-      const all = await fetchProblemsRange({ startIso, endIso, pageSize: 1000, maxPages: 20 });
+      const all = await fetchProblemsRange({
+        startIso,
+        endIso,
+        pageSize: 1000,
+        maxPages: 500,
+      });
 
-      // ✅ SOLO TCS (ya bien normalizado en problems.js)
+      // SOLO TCS EXACTO
       const tcs = all.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
 
       setBase(tcs);
@@ -319,7 +290,7 @@ export default function Tcs() {
     }
   };
 
-  // carga inicial + refresh cada 60s
+  // carga inicial + refresh “tiempo real” cada 60s
   useEffect(() => {
     load();
     const t = setInterval(load, 60000);
@@ -418,8 +389,8 @@ export default function Tcs() {
   );
 }
 
--------
 
+------
 
 // src/pages/Otros.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -457,10 +428,17 @@ export default function Otros() {
     setLoading(true);
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
-      const all = await fetchProblemsRange({ startIso, endIso, pageSize: 1000, maxPages: 20 });
 
-      // ✅ SOLO OTROS = todo lo que NO sea "TCS" (incluye "NO TCS")
+      const all = await fetchProblemsRange({
+        startIso,
+        endIso,
+        pageSize: 1000,
+        maxPages: 500,
+      });
+
+      // SOLO OTROS (NO TCS y cualquier cosa distinta de TCS)
       const otros = all.filter((x) => String(x.jurisdiction || "").toUpperCase() !== "TCS");
+
       setBase(otros);
     } finally {
       setLoading(false);
@@ -560,5 +538,3 @@ export default function Otros() {
     </div>
   );
 }
-
-
