@@ -1,0 +1,745 @@
+// src/api/problems.js
+// ===========================
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
+export const DEFAULT_RECENT_DAYS = 1;
+
+// ===========================
+// BASE DE LA API (desde .env)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+
+const API = `${BASE}/api/Problems`;
+
+// ===========================
+// Helpers
+function cleanNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return null;
+    const low = t.toLowerCase();
+    if (low === "null" || low === "undefined") return null;
+    return t;
+  }
+  return v;
+}
+
+function parseDateToISO(v) {
+  v = cleanNull(v);
+  if (!v) return null;
+
+  if (v instanceof Date) {
+    const ms = v.getTime();
+    return Number.isFinite(ms) ? v.toISOString() : null;
+  }
+
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+
+  if (typeof v === "string") {
+    let s = v.trim();
+
+    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
+    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
+
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+
+  return null;
+}
+
+// === ISO LOCAL SIN "Z" (evita desfase UTC que deja vacío el rango) ===
+// Formato: YYYY-MM-DDTHH:mm:ss
+function toLocalIsoNoZ(d) {
+  if (!(d instanceof Date)) d = new Date(d);
+  const pad = (n) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
+}
+
+function normalizeStatus(rawStatus, endTimeISO) {
+  const s = cleanNull(rawStatus);
+  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
+
+  // PRIORIDAD: si viene "OPEN", es OPEN (aunque venga endTime raro)
+  if (up.includes("OPEN")) return "OPEN";
+  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+
+  // Fallback solo si NO vino status
+  return endTimeISO ? "CLOSED" : "OPEN";
+}
+
+function normalizeEnvironment(envRaw) {
+  const s = (cleanNull(envRaw) || "").toString().trim();
+  const up = s.toUpperCase().replace(/\s+/g, "").replace(/_/g, "").replace(/-/g, "");
+
+  if (up.includes("NOPRODUCTIVO")) return "No Productivo";
+  if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
+
+  return s || "";
+}
+
+function normalizeJurisdiction(jRaw) {
+  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, "");
+
+  // Detecta "NOTCS" / "NO_TCS" / "NO TCS"
+  if (s.includes("NOTCS") || s.includes("NOTCS") || s.includes("NO_TCS") || s.includes("NOTCS") || s.includes("NOTCS")) {
+    return "NO TCS";
+  }
+  if (s.includes("NOTCS") || s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+
+  // Regla simple y robusta:
+  if (s.includes("NOTCS") || s.includes("NOTCS") || s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+
+  if (s.includes("NOTCS") || s.includes("NOTCS")) return "NO TCS";
+
+  // Mejor: si contiene "NOTCS" o "NOTCS" (variantes), NO TCS; si contiene "TCS", TCS
+  if (s.includes("NOTCS") || s.includes("NOTCS") || s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+
+  if (s.includes("NOTCS") || s.includes("NO_TCS") || s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("NOTCS") || s.includes("NOTCS")) return "NO TCS";
+
+  if (s.includes("NO") && s.includes("TCS")) return "NO TCS";
+  if (s.includes("NOTCS")) return "NO TCS";
+  if (s.includes("TCS")) return "TCS";
+
+  return "OTROS";
+}
+
+// ===========================
+// Normalizador robusto
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    const startRaw =
+      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
+
+    const endRaw =
+      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
+
+    const startTime = parseDateToISO(startRaw);
+    const endTime = parseDateToISO(endRaw);
+
+    const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
+
+    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
+    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
+
+    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
+    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
+
+    const affectedCI =
+      p?.affectedCI ??
+      p?.AffectedCI ??
+      p?.affectedEntities ??
+      p?.affectedEntitiesList ??
+      [];
+
+    const status = normalizeStatus(
+      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
+      endTime
+    );
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment: env,
+      jurisdiction: juris,
+      affectedCI,
+      status, // "OPEN" | "CLOSED"
+      tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
+      startTime,
+      endTime,
+    };
+  });
+}
+
+// ===========================
+// Rango: AYER 00:00 local -> AHORA (devuelve LOCAL sin Z)
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+
+  return {
+    startIso: toLocalIsoNoZ(start), // LOCAL
+    endIso: toLocalIsoNoZ(now),     // LOCAL
+  };
+}
+
+// ===========================
+// Fetch de UNA página
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+
+  // Si el backend los soporta, perfecto. Si no, no rompe.
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  const json = await res.json();
+
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// ===========================
+// Fetch con paginado (trae TODO lo del rango)
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  pageSize = 500,
+  maxPages = 50,
+  onBatch,
+} = {}) {
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
+    if (!batch.length) break;
+
+    if (onBatch) onBatch(batch);
+    all = all.concat(batch);
+
+    // si el backend devuelve menos que pageSize => última página
+    if (batch.length < pageSize) break;
+  }
+
+  // orden: más recientes primero
+  all.sort((a, b) => {
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+    return db - da;
+  });
+
+  return all;
+}
+
+----
+
+import React, { useEffect, useMemo, useState } from "react";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  calcularCriticidadDetallada,
+  getButtonColorByPercent,
+} from "../utils/slaUtils";
+
+// ==== Normaliza estado OPEN/CLOSED (por si acaso viene raro) ====
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? "";
+  const s = String(raw || "").trim().toUpperCase();
+
+  if (s.includes("OPEN")) return "OPEN";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+
+  // fallback
+  if (p?.endTime) return "CLOSED";
+  return "OPEN";
+}
+
+// === Traduce towerKey a icono correspondiente ===
+function towerToIconPath(towerKey) {
+  if (!towerKey) return null;
+  const key = String(towerKey).toLowerCase();
+
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
+  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
+    return "/icons/towers/Base.svg";
+  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
+
+  return null;
+}
+
+export default function ProblemCard({ problem, username }) {
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    endTime,
+    environment,
+    affectedCI = [],
+    tenant,
+    problemId,
+  } = problem;
+
+  const { get: catalogGet } = useBiaCatalog();
+
+  const hitFromCatalog = useMemo(() => {
+    for (const ci of affectedCI || []) {
+      const name = ci?.name || ci?.Nombre;
+      const hit = name ? catalogGet(name) : null;
+      if (hit) return hit;
+    }
+    return null;
+  }, [affectedCI, catalogGet]);
+
+  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
+
+  const { criticidad } = calcularCriticidadDetallada(problem, {
+    catalogLookup: (ciName) => catalogGet(ciName),
+  });
+
+  // === ESTADO OPEN/CLOSED (robusto) ===
+  const status = normalizeStatus(problem);
+
+  // === SLA / colores ===
+  const slaMinutes = getSlaMinutes(criticidad);
+
+  const start = new Date(startTime);
+
+  // IMPORTANTE: solo actualiza el reloj si está OPEN
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    if (status !== "OPEN") return; // CLOSED => NO corre
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
+  const elapsedMinutes = status === "OPEN" ? (now - start) / 60000 : 0;
+  const remainingMinutes = status === "OPEN" ? Math.max(slaMinutes - elapsedMinutes, 0) : 0;
+  const percentRemaining = status === "OPEN" ? Math.max((remainingMinutes / slaMinutes) * 100, 0) : 0;
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const totalSeconds = Math.floor(minutes * 60);
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const uniqueNames = [...new Set((affectedCI || []).map((ci) => ci?.name).filter(Boolean))];
+  const equipos = uniqueNames.join(", ");
+  const isDisabled = !username;
+  const dynatraceUrl = `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`;
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        borderRadius: "12px",
+        padding: "1rem 1.5rem",
+        marginBottom: "1rem",
+        backgroundColor: bgColor,
+        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+        opacity: status === "CLOSED" ? 0.9 : 1,
+      }}
+    >
+      {/* INFO A LA IZQUIERDA / ICONOS A LA DERECHA */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "1rem",
+          gap: "1rem",
+          width: "100%",
+        }}
+      >
+        {/* COLUMNA IZQUIERDA: INFORMACIÓN */}
+        <div style={{ flex: 1, paddingRight: "1rem" }}>
+          <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{title}</h3>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Severidad Dynatrace:</strong> {severityLevel}
+          </p>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Impacto:</strong> {impactLevel}
+          </p>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Inicio:</strong> {start.toLocaleString()}
+          </p>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Estado:</strong> {status}
+          </p>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Criticidad (BIA):</strong> {criticidad}
+          </p>
+          <p style={{ fontSize: "1.2rem" }}>
+            <strong>Equipos afectados:</strong> <small>{equipos}</small>
+          </p>
+        </div>
+
+        {/* COLUMNA CENTRAL: ICONOS */}
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            alignItems: "center",
+            gap: "1rem",
+            flexShrink: 0,
+            minWidth: "200px",
+          }}
+        >
+          {(() => {
+            const size = 110;
+            return (
+              <>
+                <img
+                  src={`/severidad${criticidad}.svg`}
+                  width={size}
+                  height={size}
+                  title={`Criticidad ${criticidad}`}
+                />
+                <img
+                  src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
+                  width={size}
+                  height={size}
+                  title={environment}
+                />
+                {towerIcon && (
+                  <img
+                    src={towerIcon}
+                    alt="tower"
+                    width={size}
+                    height={size}
+                    title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+                  />
+                )}
+              </>
+            );
+          })()}
+        </div>
+
+        {/* TEMPORIZADOR Y BOTÓN */}
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
+            {status === "OPEN" ? formatTime(remainingMinutes) : "00:00:00"}
+          </div>
+          <button
+            disabled={isDisabled}
+            onClick={() => window.open(dynatraceUrl, "_blank")}
+            style={{
+              marginTop: ".5rem",
+              padding: ".4rem 1rem",
+              fontSize: ".9rem",
+              fontWeight: "bold",
+              color: "#fff",
+              backgroundColor: isDisabled ? "#b0b0b0" : status === "CLOSED" ? "#6b7280" : buttonColor,
+              border: "none",
+              borderRadius: "8px",
+              cursor: isDisabled ? "not-allowed" : "pointer",
+            }}
+          >
+            Revisar problema
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+----
+
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function TCSProblems() {
+  const [username, setUsername] = useState("");
+  const [all, setAll] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeFilter, setActiveFilter] = useState("ALL"); // ALL | PROD | NOPROD | OPEN | CLOSED
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setAll([]);
+
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // Carga paginada y va “sumando” (para que se vea rápido)
+        const merged = [];
+        await fetchProblemsRange({
+          startIso,
+          endIso,
+          pageSize: 500,
+          maxPages: 50,
+          onBatch: (batch) => {
+            if (cancelled) return;
+            merged.push(...batch);
+            setAll([...merged]);
+          },
+        });
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // SOLO TCS
+  const tcsOnly = useMemo(() => {
+    return (all || []).filter((p) => (p?.jurisdiction || "").toUpperCase() === "TCS");
+  }, [all]);
+
+  const counts = useMemo(() => {
+    const prod = tcsOnly.filter((p) => p.environment === "Productivo").length;
+    const noprod = tcsOnly.filter((p) => p.environment === "No Productivo").length;
+    const open = tcsOnly.filter((p) => p.status === "OPEN").length;
+    const closed = tcsOnly.filter((p) => p.status === "CLOSED").length;
+    return { total: tcsOnly.length, prod, noprod, open, closed };
+  }, [tcsOnly]);
+
+  const filtered = useMemo(() => {
+    if (activeFilter === "PROD") return tcsOnly.filter((p) => p.environment === "Productivo");
+    if (activeFilter === "NOPROD") return tcsOnly.filter((p) => p.environment === "No Productivo");
+    if (activeFilter === "OPEN") return tcsOnly.filter((p) => p.status === "OPEN");
+    if (activeFilter === "CLOSED") return tcsOnly.filter((p) => p.status === "CLOSED");
+    return tcsOnly;
+  }, [tcsOnly, activeFilter]);
+
+  return (
+    <div style={{ padding: "2rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: "1rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "1rem", marginBottom: "1rem" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Tu usuario"
+          style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #ccc" }}
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
+        <Chip active={activeFilter === "PROD"} onClick={() => setActiveFilter("PROD")} color="#bfdbfe">
+          Productivo ({counts.prod})
+        </Chip>
+        <Chip active={activeFilter === "NOPROD"} onClick={() => setActiveFilter("NOPROD")} color="#e5e7eb">
+          No Productivo ({counts.noprod})
+        </Chip>
+        <Chip active={activeFilter === "OPEN"} onClick={() => setActiveFilter("OPEN")} color="#fde68a">
+          Abiertas ({counts.open})
+        </Chip>
+        <Chip active={activeFilter === "CLOSED"} onClick={() => setActiveFilter("CLOSED")} color="#bbf7d0">
+          Cerradas ({counts.closed})
+        </Chip>
+        <Chip active={activeFilter === "ALL"} onClick={() => setActiveFilter("ALL")}>
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <p style={{ textAlign: "center", fontWeight: 700 }}>
+          Cargando problemas...
+        </p>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <p style={{ textAlign: "center" }}>No hay problemas para mostrar.</p>
+      )}
+
+      <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
+        {filtered.map((p) => (
+          <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
+-----
+
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [all, setAll] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [activeFilter, setActiveFilter] = useState("ALL"); // ALL | PROD | NOPROD | OPEN | CLOSED
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      try {
+        setLoading(true);
+        setAll([]);
+
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        const merged = [];
+        await fetchProblemsRange({
+          startIso,
+          endIso,
+          pageSize: 500,
+          maxPages: 50,
+          onBatch: (batch) => {
+            if (cancelled) return;
+            merged.push(...batch);
+            setAll([...merged]);
+          },
+        });
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // TODO lo que NO sea TCS
+  const othersOnly = useMemo(() => {
+    return (all || []).filter((p) => (p?.jurisdiction || "").toUpperCase() !== "TCS");
+  }, [all]);
+
+  const counts = useMemo(() => {
+    const prod = othersOnly.filter((p) => p.environment === "Productivo").length;
+    const noprod = othersOnly.filter((p) => p.environment === "No Productivo").length;
+    const open = othersOnly.filter((p) => p.status === "OPEN").length;
+    const closed = othersOnly.filter((p) => p.status === "CLOSED").length;
+    return { total: othersOnly.length, prod, noprod, open, closed };
+  }, [othersOnly]);
+
+  const filtered = useMemo(() => {
+    if (activeFilter === "PROD") return othersOnly.filter((p) => p.environment === "Productivo");
+    if (activeFilter === "NOPROD") return othersOnly.filter((p) => p.environment === "No Productivo");
+    if (activeFilter === "OPEN") return othersOnly.filter((p) => p.status === "OPEN");
+    if (activeFilter === "CLOSED") return othersOnly.filter((p) => p.status === "CLOSED");
+    return othersOnly;
+  }, [othersOnly, activeFilter]);
+
+  return (
+    <div style={{ padding: "2rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: "1rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "1rem", marginBottom: "1rem" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Tu usuario"
+          style={{ padding: "6px 10px", borderRadius: "6px", border: "1px solid #ccc" }}
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
+        <Chip active={activeFilter === "PROD"} onClick={() => setActiveFilter("PROD")} color="#bfdbfe">
+          Productivo ({counts.prod})
+        </Chip>
+        <Chip active={activeFilter === "NOPROD"} onClick={() => setActiveFilter("NOPROD")} color="#e5e7eb">
+          No Productivo ({counts.noprod})
+        </Chip>
+        <Chip active={activeFilter === "OPEN"} onClick={() => setActiveFilter("OPEN")} color="#fde68a">
+          Abiertas ({counts.open})
+        </Chip>
+        <Chip active={activeFilter === "CLOSED"} onClick={() => setActiveFilter("CLOSED")} color="#bbf7d0">
+          Cerradas ({counts.closed})
+        </Chip>
+        <Chip active={activeFilter === "ALL"} onClick={() => setActiveFilter("ALL")}>
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <p style={{ textAlign: "center", fontWeight: 700 }}>
+          Cargando problemas...
+        </p>
+      )}
+
+      {!loading && filtered.length === 0 && (
+        <p style={{ textAlign: "center" }}>No hay problemas para mostrar.</p>
+      )}
+
+      <div style={{ maxWidth: "1100px", margin: "0 auto" }}>
+        {filtered.map((p) => (
+          <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        ))}
+      </div>
+    </div>
+  );
+}
