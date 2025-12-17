@@ -1,514 +1,8 @@
-// src/api/problems.js
-// ===========================
-// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
-export const DEFAULT_RECENT_DAYS = 1;
-
-// ===========================
-// BASE DE LA API (desde .env)
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
-
-const API = `${BASE}/api/Problems`;
-
-// ===========================
-// Helpers
-function cleanNull(v) {
-  if (v === undefined || v === null) return null;
-  if (typeof v === "string") {
-    const t = v.trim();
-    if (!t) return null;
-    const low = t.toLowerCase();
-    if (low === "null" || low === "undefined") return null;
-    return t;
-  }
-  return v;
-}
-
-function parseDateToISO(v) {
-  v = cleanNull(v);
-  if (!v) return null;
-
-  if (v instanceof Date) {
-    const ms = v.getTime();
-    return Number.isFinite(ms) ? v.toISOString() : null;
-  }
-
-  if (typeof v === "number") {
-    const d = new Date(v);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
-
-  if (typeof v === "string") {
-    let s = v.trim();
-
-    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
-    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
-
-    const d = new Date(s);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
-
-  return null;
-}
-
-function normalizeStatus(rawStatus, endTimeISO) {
-  const s = cleanNull(rawStatus);
-  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
-
-  if (up === "OPEN") return "OPEN";
-  if (up === "CLOSED" || up === "RESOLVED") return "CLOSED";
-
-  // Si el backend manda status raro/vacío, usamos la lógica SQL:
-  // EndTime NULL => OPEN, EndTime NOT NULL => CLOSED
-  return endTimeISO ? "CLOSED" : "OPEN";
-}
-
-function normalizeEnvironment(envRaw) {
-  const s = (cleanNull(envRaw) || "").toString().trim();
-  const up = s.toUpperCase().replace(/\s+/g, "");
-
-  if (up.includes("NOPRODUCTIVO") || up.includes("NO_PRODUCTIVO") || up.includes("NO-PRODUCTIVO")) {
-    return "No Productivo";
-  }
-  if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
-
-  // si viene distinto, lo dejamos tal cual
-  return s || "";
-}
-
-function normalizeJurisdiction(jRaw) {
-  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
-  // EXACTO: TCS => TCS, cualquier otro => NO TCS
-  return s === "TCS" ? "TCS" : "NO TCS";
-}
-
-// ===========================
-// Normalizador robusto
-function normalize(list) {
-  if (!Array.isArray(list)) return [];
-
-  return list.map((p) => {
-    const startRaw =
-      p?.startTime ?? p?.StartTime ?? p?.startTimeUtc ?? p?.StartTimeUtc ?? p?.Start ?? p?.start_date ?? null;
-
-    const endRaw =
-      p?.endTime ?? p?.EndTime ?? p?.endTimeUtc ?? p?.EndTimeUtc ?? p?.End ?? p?.end_date ?? null;
-
-    const startTime = parseDateToISO(startRaw);
-    const endTime = parseDateToISO(endRaw);
-
-    const problemId = p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
-
-    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
-    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
-
-    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
-    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
-
-    const affectedCI =
-      p?.affectedCI ??
-      p?.AffectedCI ??
-      p?.affectedEntities ??
-      p?.affectedEntitiesList ??
-      p?.AffectedEntities ??
-      [];
-
-    const tenant = p?.tenant ?? p?.Tenant ?? p?.domain ?? "";
-
-    const status = normalizeStatus(
-      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
-      endTime
-    );
-
-    return {
-      ...p,
-      problemId,
-      title,
-      severityLevel,
-      impactLevel,
-      environment: env,
-      jurisdiction: juris, // "TCS" | "NO TCS"
-      affectedCI,
-      status, // "OPEN" | "CLOSED"
-      tenant,
-      startTime,
-      endTime,
-    };
-  });
-}
-
-// ===========================
-// Rango: AYER 00:00 local -> AHORA (para filtrar en frontend, igual que tu SQL)
-export function getYesterdayToNowRangeIso() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setDate(now.getDate() - 1);
-  start.setHours(0, 0, 0, 0);
-  return { startIso: start.toISOString(), endIso: now.toISOString() };
-}
-
-// ===========================
-// Fetch de UNA página (NO forzamos start/end en URL para no “vaciar” si el backend no los usa bien)
-async function fetchPage({ pageNumber, pageSize }) {
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize", String(pageSize));
-
-  const url = `${API}?${params.toString()}`;
-  const res = await fetch(url, { headers: { accept: "application/json" } });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
-  }
-
-  const json = await res.json();
-
-  const items = Array.isArray(json)
-    ? json
-    : json?.results || json?.items || json?.data || json?.value || [];
-
-  return normalize(items);
-}
-
-// ===========================
-// Fetch con paginado + FILTRO por rango (AYER 00:00 -> ahora)
-export async function fetchProblemsRange({
-  startIso,
-  endIso,
-  pageSize = 500,
-  maxPages = 20,
-  onBatch,
-} = {}) {
-  const startMs = startIso ? new Date(startIso).getTime() : null;
-  const endMs = endIso ? new Date(endIso).getTime() : null;
-
-  let all = [];
-
-  for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize });
-    if (!batch.length) break;
-
-    if (onBatch) onBatch(batch);
-
-    // Filtra SOLO lo del rango (igual que tu SQL)
-    const filteredBatch = batch.filter((p) => {
-      const t = p.startTime ? new Date(p.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return false;
-      if (startMs !== null && t < startMs) return false;
-      if (endMs !== null && t >= endMs) return false;
-      return true;
-    });
-
-    all = all.concat(filteredBatch);
-
-    // si backend devuelve menos que pageSize => última página
-    if (batch.length < pageSize) break;
-
-    // Optimización: si el batch ya viene viejo (todo < startMs), paramos
-    if (startMs !== null) {
-      const newest = Math.max(...batch.map((x) => (x.startTime ? new Date(x.startTime).getTime() : 0)));
-      const oldest = Math.min(...batch.map((x) => (x.startTime ? new Date(x.startTime).getTime() : Number.MAX_SAFE_INTEGER)));
-      if (newest < startMs && oldest < startMs) break;
-    }
-  }
-
-  // orden: más recientes primero
-  all.sort((a, b) => {
-    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-    return db - da;
-  });
-
-  return all;
-}
-
-
------
-
-// src/pages/TCSProblems.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: 999,
-        cursor: "pointer",
-        margin: "0 6px 8px 0",
-        fontSize: 14,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function TCSProblems() {
-  const [loading, setLoading] = useState(true);
-  const [all, setAll] = useState([]);
-  const [user, setUser] = useState("");
-
-  // filtros combinables (NO se pisan)
-  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
-  const [statusFilter, setStatusFilter] = useState(null); // "OPEN" | "CLOSED" | null
-
-  useEffect(() => {
-    const run = async () => {
-      setLoading(true);
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-        const data = await fetchProblemsRange({ startIso, endIso, pageSize: 500, maxPages: 20 });
-        setAll(data);
-      } finally {
-        setLoading(false);
-      }
-    };
-    run();
-  }, []);
-
-  // Solo TCS en esta pestaña
-  const tcs = useMemo(() => all.filter((p) => p.jurisdiction === "TCS"), [all]);
-
-  // Filtro por usuario (tenant / displayId / title) -> como antes
-  const byUser = useMemo(() => {
-    const q = user.trim().toLowerCase();
-    if (!q) return tcs;
-
-    return tcs.filter((p) => {
-      const a = (p.tenant || "").toString().toLowerCase();
-      const b = (p.problemId || "").toString().toLowerCase();
-      const c = (p.title || "").toString().toLowerCase();
-      return a.includes(q) || b.includes(q) || c.includes(q);
-    });
-  }, [tcs, user]);
-
-  const filtered = useMemo(() => {
-    return byUser.filter((p) => {
-      if (envFilter && p.environment !== envFilter) return false;
-      if (statusFilter && p.status !== statusFilter) return false;
-      return true;
-    });
-  }, [byUser, envFilter, statusFilter]);
-
-  // Contadores (siempre sobre byUser, para que el usuario vea conteo real con su búsqueda)
-  const counts = useMemo(() => {
-    const productivo = byUser.filter((p) => p.environment === "Productivo").length;
-    const noProductivo = byUser.filter((p) => p.environment === "No Productivo").length;
-    const abiertas = byUser.filter((p) => p.status === "OPEN").length;
-    const cerradas = byUser.filter((p) => p.status === "CLOSED").length;
-    return { productivo, noProductivo, abiertas, cerradas, total: byUser.length };
-  }, [byUser]);
-
-  const toggleEnv = (value) => setEnvFilter((prev) => (prev === value ? null : value));
-  const toggleStatus = (value) => setStatusFilter((prev) => (prev === value ? null : value));
-
-  const clearAll = () => {
-    setEnvFilter(null);
-    setStatusFilter(null);
-  };
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 14px" }}>
-      <h1 style={{ textAlign: "center", fontFamily: "serif", fontSize: 44, margin: "10px 0 6px" }}>
-        Problemas TCS ({counts.total})
-      </h1>
-
-      <div style={{ textAlign: "center", marginBottom: 12 }}>
-        <label style={{ fontFamily: "serif", fontSize: 18 }}>
-          Usuario:&nbsp;
-          <input
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            style={{ padding: "6px 10px", border: "1px solid #999", width: 260 }}
-            placeholder="Tu usuario"
-          />
-        </label>
-      </div>
-
-      <div style={{ textAlign: "center", marginBottom: 8 }}>
-        <Chip active={envFilter === "Productivo"} onClick={() => toggleEnv("Productivo")}>
-          Productivo ({counts.productivo})
-        </Chip>
-
-        <Chip active={envFilter === "No Productivo"} onClick={() => toggleEnv("No Productivo")}>
-          No Productivo ({counts.noProductivo})
-        </Chip>
-
-        <Chip active={statusFilter === "OPEN"} onClick={() => toggleStatus("OPEN")} color="#fde68a">
-          Abiertas ({counts.abiertas})
-        </Chip>
-
-        <Chip active={statusFilter === "CLOSED"} onClick={() => toggleStatus("CLOSED")}>
-          Cerradas ({counts.cerradas})
-        </Chip>
-
-        <Chip active={!envFilter && !statusFilter} onClick={clearAll}>
-          Todos
-        </Chip>
-      </div>
-
-      {loading ? (
-        <p style={{ textAlign: "center", marginTop: 24 }}>Cargando problemas...</p>
-      ) : filtered.length === 0 ? (
-        <p style={{ textAlign: "center", marginTop: 24 }}>No hay problemas para mostrar.</p>
-      ) : (
-        filtered.map((p) => <ProblemCard key={p.problemId || `${p.title}-${p.startTime}`} problem={p} />)
-      )}
-    </div>
-  );
-}
-
------
-
-
-// src/pages/OtherProblems.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: 999,
-        cursor: "pointer",
-        margin: "0 6px 8px 0",
-        fontSize: 14,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function OtherProblems() {
-  const [loading, setLoading] = useState(true);
-  const [all, setAll] = useState([]);
-  const [user, setUser] = useState("");
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  useEffect(() => {
-    const run = async () => {
-      setLoading(true);
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-        const data = await fetchProblemsRange({ startIso, endIso, pageSize: 500, maxPages: 20 });
-        setAll(data);
-      } finally {
-        setLoading(false);
-      }
-    };
-    run();
-  }, []);
-
-  // Todo lo que NO es TCS
-  const others = useMemo(() => all.filter((p) => p.jurisdiction !== "TCS"), [all]);
-
-  const byUser = useMemo(() => {
-    const q = user.trim().toLowerCase();
-    if (!q) return others;
-
-    return others.filter((p) => {
-      const a = (p.tenant || "").toString().toLowerCase();
-      const b = (p.problemId || "").toString().toLowerCase();
-      const c = (p.title || "").toString().toLowerCase();
-      return a.includes(q) || b.includes(q) || c.includes(q);
-    });
-  }, [others, user]);
-
-  const filtered = useMemo(() => {
-    return byUser.filter((p) => {
-      if (envFilter && p.environment !== envFilter) return false;
-      if (statusFilter && p.status !== statusFilter) return false;
-      return true;
-    });
-  }, [byUser, envFilter, statusFilter]);
-
-  const counts = useMemo(() => {
-    const productivo = byUser.filter((p) => p.environment === "Productivo").length;
-    const noProductivo = byUser.filter((p) => p.environment === "No Productivo").length;
-    const abiertas = byUser.filter((p) => p.status === "OPEN").length;
-    const cerradas = byUser.filter((p) => p.status === "CLOSED").length;
-    return { productivo, noProductivo, abiertas, cerradas, total: byUser.length };
-  }, [byUser]);
-
-  const toggleEnv = (value) => setEnvFilter((prev) => (prev === value ? null : value));
-  const toggleStatus = (value) => setStatusFilter((prev) => (prev === value ? null : value));
-  const clearAll = () => {
-    setEnvFilter(null);
-    setStatusFilter(null);
-  };
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "20px 14px" }}>
-      <h1 style={{ textAlign: "center", fontFamily: "serif", fontSize: 44, margin: "10px 0 6px" }}>
-        Problemas Otros ({counts.total})
-      </h1>
-
-      <div style={{ textAlign: "center", marginBottom: 12 }}>
-        <label style={{ fontFamily: "serif", fontSize: 18 }}>
-          Usuario:&nbsp;
-          <input
-            value={user}
-            onChange={(e) => setUser(e.target.value)}
-            style={{ padding: "6px 10px", border: "1px solid #999", width: 260 }}
-            placeholder="Tu usuario"
-          />
-        </label>
-      </div>
-
-      <div style={{ textAlign: "center", marginBottom: 8 }}>
-        <Chip active={envFilter === "Productivo"} onClick={() => toggleEnv("Productivo")}>
-          Productivo ({counts.productivo})
-        </Chip>
-
-        <Chip active={envFilter === "No Productivo"} onClick={() => toggleEnv("No Productivo")}>
-          No Productivo ({counts.noProductivo})
-        </Chip>
-
-        <Chip active={statusFilter === "OPEN"} onClick={() => toggleStatus("OPEN")} color="#fde68a">
-          Abiertas ({counts.abiertas})
-        </Chip>
-
-        <Chip active={statusFilter === "CLOSED"} onClick={() => toggleStatus("CLOSED")}>
-          Cerradas ({counts.cerradas})
-        </Chip>
-
-        <Chip active={!envFilter && !statusFilter} onClick={clearAll}>
-          Todos
-        </Chip>
-      </div>
-
-      {loading ? (
-        <p style={{ textAlign: "center", marginTop: 24 }}>Cargando problemas...</p>
-      ) : filtered.length === 0 ? (
-        <p style={{ textAlign: "center", marginTop: 24 }}>No hay problemas para mostrar.</p>
-      ) : (
-        filtered.map((p) => <ProblemCard key={p.problemId || `${p.title}-${p.startTime}`} problem={p} />)
-      )}
-    </div>
-  );
-}
-
------
-
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
 
+// ===========================
+// Helpers de tiempo
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -522,10 +16,15 @@ function formatElapsed(ms) {
   return `${pad2(h)}:${pad2(m)}:${pad2(s)}`;
 }
 
+// ===========================
+// Componente
 export default function ProblemCard({ problem }) {
-  const isOpen = problem?.status === "OPEN";
+  if (!problem) return null;
 
-  // Tiempo: OPEN corre, CLOSED queda 00:00:00
+  const isOpen = problem.status === "OPEN";
+
+  // ===========================
+  // Reloj SOLO para OPEN
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -536,56 +35,126 @@ export default function ProblemCard({ problem }) {
 
   const elapsed = useMemo(() => {
     if (!isOpen) return "00:00:00";
-    const start = problem?.startTime ? new Date(problem.startTime).getTime() : null;
-    if (!start) return "00:00:00";
-    return formatElapsed(now - start);
-  }, [isOpen, now, problem?.startTime]);
+    if (!problem.startTime) return "00:00:00";
 
-  const bg = isOpen ? "#fef3c7" : "#e9a3b3"; // amarillo open / rosado closed (como venías usando)
-  const title = problem?.title || "(sin título)";
-  const sev = problem?.severityLevel || "";
-  const impact = problem?.impactLevel || "";
-  const env = problem?.environment || "";
-  const startTxt = problem?.startTime ? new Date(problem.startTime).toLocaleString() : "-";
-  const statusTxt = problem?.status || "-";
+    const startMs = new Date(problem.startTime).getTime();
+    if (!Number.isFinite(startMs)) return "00:00:00";
+
+    return formatElapsed(now - startMs);
+  }, [isOpen, now, problem.startTime]);
+
+  // ===========================
+  // Estilos por estado
+  const bgColor = isOpen ? "#fef3c7" : "#e9a3b3"; // OPEN amarillo / CLOSED rosado
+
+  // ===========================
+  // Datos visibles
+  const title = problem.title || "(sin título)";
+  const severity = problem.severityLevel || "-";
+  const impact = problem.impactLevel || "-";
+  const environment = problem.environment || "-";
+  const status = problem.status || "-";
+  const startText = problem.startTime
+    ? new Date(problem.startTime).toLocaleString()
+    : "-";
+
+  const affected =
+    Array.isArray(problem.affectedCI) && problem.affectedCI.length
+      ? problem.affectedCI.join(", ")
+      : "";
 
   return (
     <div
       style={{
-        background: bg,
-        borderRadius: 10,
-        padding: 20,
+        background: bgColor,
+        borderRadius: 12,
+        padding: 22,
         margin: "18px auto",
-        maxWidth: 900,
-        boxShadow: "0 1px 8px rgba(0,0,0,.10)",
+        maxWidth: 920,
+        boxShadow: "0 1px 10px rgba(0,0,0,.12)",
       }}
     >
-      <h2 style={{ fontFamily: "serif", margin: "0 0 10px 0" }}>{title}</h2>
+      {/* =======================
+          TÍTULO
+      ======================= */}
+      <h2 style={{ fontFamily: "serif", margin: "0 0 14px 0" }}>
+        {title}
+      </h2>
 
-      <div style={{ display: "flex", gap: 18, flexWrap: "wrap", alignItems: "center" }}>
-        <div style={{ minWidth: 360, fontFamily: "serif", fontSize: 18, lineHeight: 1.4 }}>
-          <div><b>Severidad Dynatrace:</b> {sev}</div>
-          <div><b>Impacto:</b> {impact}</div>
-          <div><b>Inicio:</b> {startTxt}</div>
-          <div><b>Estado:</b> {statusTxt}</div>
-          <div><b>Ambiente:</b> {env}</div>
+      {/* =======================
+          CONTENIDO
+      ======================= */}
+      <div
+        style={{
+          display: "flex",
+          gap: 20,
+          flexWrap: "wrap",
+          alignItems: "center",
+        }}
+      >
+        {/* INFO IZQUIERDA */}
+        <div
+          style={{
+            minWidth: 380,
+            fontFamily: "serif",
+            fontSize: 18,
+            lineHeight: 1.5,
+          }}
+        >
+          <div>
+            <b>Severidad Dynatrace:</b> {severity}
+          </div>
+          <div>
+            <b>Impacto:</b> {impact}
+          </div>
+          <div>
+            <b>Inicio:</b> {startText}
+          </div>
+          <div>
+            <b>Estado:</b> {status}
+          </div>
+          <div>
+            <b>Ambiente:</b> {environment}
+          </div>
+          {affected && (
+            <div>
+              <b>Equipos afectados:</b> {affected}
+            </div>
+          )}
         </div>
 
-        <div style={{ marginLeft: "auto", textAlign: "right", minWidth: 200 }}>
-          <div style={{ fontSize: 40, fontFamily: "serif" }}>{elapsed}</div>
+        {/* TIEMPO + BOTÓN */}
+        <div
+          style={{
+            marginLeft: "auto",
+            textAlign: "right",
+            minWidth: 200,
+          }}
+        >
+          <div
+            style={{
+              fontSize: 42,
+              fontFamily: "serif",
+              fontWeight: "bold",
+            }}
+          >
+            {elapsed}
+          </div>
+
           <button
             style={{
-              marginTop: 8,
+              marginTop: 10,
               background: "rgba(0,0,0,.35)",
               color: "#fff",
               border: "none",
-              padding: "8px 14px",
+              padding: "10px 16px",
               borderRadius: 8,
               cursor: "pointer",
+              fontSize: 14,
             }}
             onClick={() => {
-              // aquí puedes abrir el link si tienes URL
-              // window.open(problem?.problemUrl, "_blank");
+              // Si luego quieres abrir Dynatrace:
+              // if (problem.problemUrl) window.open(problem.problemUrl, "_blank");
             }}
           >
             Revisar problema
