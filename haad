@@ -1,381 +1,246 @@
-// src/pages/Tcs.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+// src/api/problems.js
+// ===========================
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
+export const DEFAULT_RECENT_DAYS = 1;
 
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
+// ===========================
+// BASE DE LA API (desde .env)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+
+const API = `${BASE}/api/Problems`;
+
+// ===========================
+// Helpers
+function cleanNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return null;
+    const low = t.toLowerCase();
+    if (low === "null" || low === "undefined") return null;
+    return t;
+  }
+  return v;
 }
 
-export default function Tcs() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
+function parseDateToISO(v) {
+  v = cleanNull(v);
+  if (!v) return null;
 
-  // dataset base (AYER->HOY)
-  const [base, setBase] = useState([]);
+  if (v instanceof Date) {
+    const ms = v.getTime();
+    return Number.isFinite(ms) ? v.toISOString() : null;
+  }
 
-  // filtros de UI
-  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
-  const [statusFilter, setStatusFilter] = useState(null); // "OPEN" | "CLOSED" | null
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
 
-  // ✅ Para cargar rápido y evitar requests solapados
-  const seenRef = useRef(new Set());
-  const ctrlRef = useRef(null);
+  if (typeof v === "string") {
+    let s = v.trim();
 
-  const load = async () => {
-    // Evita que se amontonen requests si refresca y el anterior sigue corriendo
-    if (ctrlRef.current) ctrlRef.current.abort();
-    const ctrl = new AbortController();
-    ctrlRef.current = ctrl;
+    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
+    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
 
-    setLoading(true);
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
 
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
+  return null;
+}
 
-      // Pintar rápido: limpia el listado y el set de "seen"
-      seenRef.current = new Set();
-      setBase([]);
+function normalizeStatus(rawStatus, endTimeISO) {
+  const s = cleanNull(rawStatus);
+  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        pageSize: 1000, // ✅ menos páginas => más rápido
-        maxPages: 200,
-        signal: ctrl.signal, // ✅ para poder abortar
-        onBatch: (batch) => {
-          // SOLO TCS (del batch)
-          const tcsBatch = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
+  if (up.includes("OPEN")) return "OPEN";
+  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
-          setBase((prev) => {
-            const next = [...prev];
+  // fallback solo si NO vino status
+  return endTimeISO ? "CLOSED" : "OPEN";
+}
 
-            for (const p of tcsBatch) {
-              const key = `${p.problemId}-${p.startTime}`;
-              if (!seenRef.current.has(key)) {
-                seenRef.current.add(key);
-                next.push(p);
-              }
-            }
+function normalizeEnvironment(envRaw) {
+  const s = (cleanNull(envRaw) || "").toString().trim();
+  const up = s.toUpperCase().replace(/\s+/g, "");
 
-            // orden: más recientes primero
-            next.sort((a, b) => {
-              const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-              const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-              return db - da;
-            });
+  // Normaliza variaciones: "NoProductivo", "No Productivo", "NO_PRODUCTIVO"
+  if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
+    return "No Productivo";
+  }
+  if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
 
-            return next;
-          });
-        },
-      });
-    } catch (e) {
-      // Si fue abortado, no es error real
-      if (e?.name !== "AbortError") console.error(e);
-    } finally {
-      setLoading(false);
-    }
-  };
+  return s || "";
+}
 
-  // carga inicial + refresh “tiempo real” cada 60s
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 60000);
-    return () => {
-      clearInterval(t);
-      // aborta al desmontar
-      if (ctrlRef.current) ctrlRef.current.abort();
+/**
+ * ✅ IMPORTANTE:
+ * "NO TCS" contiene el texto "TCS", por eso NO se puede usar includes("TCS") a secas.
+ * Reglas:
+ * - Si empieza con "NO" y contiene "TCS" => "OTROS"
+ * - Si es exactamente "TCS" => "TCS"
+ * - Si contiene "TCS" pero NO está negado => "TCS"
+ * - caso contrario => "OTROS"
+ */
+function normalizeJurisdiction(jRaw) {
+  const raw = (cleanNull(jRaw) || "").toString().trim();
+  const up = raw.toUpperCase();
+
+  if (!up) return "OTROS";
+
+  // Casos "NO TCS", "NO_TCS", "NO-TCS"
+  const compact = up.replace(/\s+/g, "");
+  if (compact.startsWith("NO") && compact.includes("TCS")) return "OTROS";
+
+  if (up === "TCS") return "TCS";
+
+  // Si el texto tiene TCS pero no está negado
+  if (up.includes("TCS")) return "TCS";
+
+  return "OTROS";
+}
+
+// ===========================
+// Normalizador robusto
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    const startRaw =
+      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
+
+    const endRaw =
+      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
+
+    const startTime = parseDateToISO(startRaw);
+    const endTime = parseDateToISO(endRaw);
+
+    const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
+
+    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
+    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
+
+    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
+    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
+
+    const affectedCI =
+      p?.affectedCI ??
+      p?.AffectedCI ??
+      p?.affectedEntities ??
+      p?.affectedEntitiesList ??
+      [];
+
+    const status = normalizeStatus(
+      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
+      endTime
+    );
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment: env,
+      jurisdiction: juris, // "TCS" | "OTROS"
+      affectedCI,
+      status, // "OPEN" | "CLOSED"
+      tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
+      startTime,
+      endTime,
     };
-  }, []);
-
-  // Conteos (del dataset TCS completo del rango)
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  // Lista visible (aplica filtros)
-  const visible = useMemo(() => {
-    let list = base;
-
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas TCS ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
+  });
 }
 
-----
-
-// src/pages/Otros.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
+// ===========================
+// Rango: AYER 00:00 local -> AHORA
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return { startIso: start.toISOString(), endIso: now.toISOString() };
 }
 
-export default function Otros() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
+// ===========================
+// ✅ Fetch de UNA página (soporta signal)
+// NOTA: NO enviamos start/end al backend por defecto (para no romper si no lo soporta).
+async function fetchPage({ pageNumber, pageSize, signal }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
 
-  const [base, setBase] = useState([]);
+  const url = `${API}?${params.toString()}`;
 
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
+  const res = await fetch(url, {
+    headers: { accept: "application/json" },
+    signal,
+  });
 
-  // ✅ Para cargar rápido y evitar requests solapados
-  const seenRef = useRef(new Set());
-  const ctrlRef = useRef(null);
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
 
-  const load = async () => {
-    if (ctrlRef.current) ctrlRef.current.abort();
-    const ctrl = new AbortController();
-    ctrlRef.current = ctrl;
+  const json = await res.json();
 
-    setLoading(true);
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
 
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
+  return normalize(items);
+}
 
-      seenRef.current = new Set();
-      setBase([]);
+// ===========================
+// ✅ Fetch con paginado (trae TODO y filtra por rango en el FRONT)
+// - onBatch: para pintar rápido
+// - signal: para abortar requests viejos
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  pageSize = 500,
+  maxPages = 50,
+  onBatch,
+  signal,
+} = {}) {
+  const startMs = startIso ? new Date(startIso).getTime() : null;
+  const endMs = endIso ? new Date(endIso).getTime() : null;
 
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        pageSize: 1000,
-        maxPages: 200,
-        signal: ctrl.signal,
-        onBatch: (batch) => {
-          // SOLO OTROS (no TCS)
-          const otrosBatch = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() !== "TCS");
+  let all = [];
 
-          setBase((prev) => {
-            const next = [...prev];
+  for (let page = 1; page <= maxPages; page++) {
+    const batchRaw = await fetchPage({ pageNumber: page, pageSize, signal });
+    if (!batchRaw.length) break;
 
-            for (const p of otrosBatch) {
-              const key = `${p.problemId}-${p.startTime}`;
-              if (!seenRef.current.has(key)) {
-                seenRef.current.add(key);
-                next.push(p);
-              }
-            }
+    // ✅ FILTRO REAL (ayer 00:00 -> ahora) EN EL FRONT
+    const batch = batchRaw.filter((p) => {
+      const t = p?.startTime ? new Date(p.startTime).getTime() : null;
+      if (!Number.isFinite(t)) return false;
 
-            next.sort((a, b) => {
-              const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-              const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-              return db - da;
-            });
+      if (startMs !== null && t < startMs) return false;
+      if (endMs !== null && t > endMs) return false;
 
-            return next;
-          });
-        },
-      });
-    } catch (e) {
-      if (e?.name !== "AbortError") console.error(e);
-    } finally {
-      setLoading(false);
+      return true;
+    });
+
+    if (batch.length) {
+      if (onBatch) onBatch(batch);
+      all = all.concat(batch);
     }
-  };
 
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 60000);
-    return () => {
-      clearInterval(t);
-      if (ctrlRef.current) ctrlRef.current.abort();
-    };
-  }, []);
+    // Si vino menos que pageSize => última página
+    if (batchRaw.length < pageSize) break;
+  }
 
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
+  // orden: más recientes primero
+  all.sort((a, b) => {
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+    return db - da;
+  });
 
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas Otros ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
+  return all;
 }
