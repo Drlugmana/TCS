@@ -1,13 +1,17 @@
-
 // src/api/problems.js
-
+// ===========================
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
 export const DEFAULT_RECENT_DAYS = 1;
 
+// ===========================
+// BASE DE LA API (desde .env)
 const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
 
 const API = `${BASE}/api/Problems`;
 
+// ===========================
+// Helpers
 function cleanNull(v) {
   if (v === undefined || v === null) return null;
   if (typeof v === "string") {
@@ -20,12 +24,18 @@ function cleanNull(v) {
   return v;
 }
 
-// Date local -> "YYYY-MM-DDTHH:mm:ss" (SIN Z)
-function toLocalIsoNoZ(d) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
-    d.getMinutes()
-  )}:${pad(d.getSeconds())}`;
+// ---- IMPORTANTE: NO usar toISOString() para el rango,
+// porque eso lo vuelve UTC y te corre horas (en Ecuador -05:00).
+// En vez de eso mandamos "YYYY-MM-DDTHH:mm:ss" SIN Z => el backend lo interpreta local.
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function toLocalDateTimeString(d) {
+  return (
+    `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}` +
+    `T${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
+  );
 }
 
 function parseDateToISO(v) {
@@ -59,34 +69,44 @@ function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
   const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
-  if (up.includes("OPEN")) return "OPEN";
-  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+  // Si viene OPEN => OPEN
+  if (up === "OPEN" || up.includes(" OPEN")) return "OPEN";
 
+  // Si viene CLOSED/RESOLVED => CLOSED
+  if (up === "CLOSED" || up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+
+  // Fallback solo si NO vino status
   return endTimeISO ? "CLOSED" : "OPEN";
 }
 
 function normalizeEnvironment(envRaw) {
   const s = (cleanNull(envRaw) || "").toString().trim();
+
+  // Normaliza variaciones: "NoProductivo", "No Productivo", "NO_PRODUCTIVO"
   const up = s.toUpperCase().replace(/\s+/g, "");
   if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
     return "No Productivo";
   }
   if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
+
   return s || "";
 }
 
-/**
- * IMPORTANTÍSIMO:
- * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
- */
+// ✅ FIX CLAVE: "NO TCS" NO puede caer como TCS
 function normalizeJurisdiction(jRaw) {
-  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
-  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS")) return "OTROS";
-  if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS") || s.endsWith("TCS")) return "TCS";
-  if (s.includes("TCS")) return "TCS";
+  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
+
+  // casos típicos de NO TCS
+  if (s === "NO TCS" || s === "NOTCS" || s.includes("NO TCS")) return "OTROS";
+
+  // solo TCS exacto (o empieza con TCS)
+  if (s === "TCS" || s.startsWith("TCS ")) return "TCS";
+
   return "OTROS";
 }
 
+// ===========================
+// Normalizador robusto
 function normalize(list) {
   if (!Array.isArray(list)) return [];
 
@@ -101,10 +121,10 @@ function normalize(list) {
     const endTime = parseDateToISO(endRaw);
 
     const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
 
-    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
-    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
+    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? p?.Severity ?? "";
+    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? p?.Impact ?? "";
 
     const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
     const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
@@ -128,9 +148,9 @@ function normalize(list) {
       severityLevel,
       impactLevel,
       environment: env,
-      jurisdiction: juris,
+      jurisdiction: juris,   // "TCS" | "OTROS"
       affectedCI,
-      status,
+      status,                 // "OPEN" | "CLOSED"
       tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
       startTime,
       endTime,
@@ -138,25 +158,34 @@ function normalize(list) {
   });
 }
 
-export function getYesterdayToNowRangeIso() {
+// ===========================
+// Rango: AYER 00:00 local -> AHORA (local)
+// Igualito que tu SQL: StartTime >= CONVERT(DATE,GETDATE()-1) AND StartTime < GETDATE()
+export function getYesterdayToNowRangeLocal() {
   const now = new Date();
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
-  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
+  return {
+    startLocal: toLocalDateTimeString(start),
+    endLocal: toLocalDateTimeString(now),
+  };
 }
 
-async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
+// ===========================
+// Fetch de UNA página
+async function fetchPage({ pageNumber, pageSize, startLocal, endLocal }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
-  if (startIso) params.set("start", startIso);
-  if (endIso) params.set("end", endIso);
+
+  // Mandamos en local SIN Z para que no se corra por UTC
+  if (startLocal) params.set("start", startLocal);
+  if (endLocal) params.set("end", endLocal);
 
   const url = `${API}?${params.toString()}`;
-
-  const res = await fetch(url, { headers: { accept: "application/json" }, signal });
+  const res = await fetch(url, { headers: { accept: "application/json" } });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -172,64 +201,30 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
   return normalize(items);
 }
 
-/**
- * Paginación segura:
- * - Avanza page=1..maxPages (NO salta a 200, 400, etc.)
- * - Corta si ya no hay nuevos o si el batch viene vacío
- */
+// ===========================
+// Fetch con paginado (trae TODO lo del rango)
+// ✅ performance: subimos pageSize por defecto para que cargue más rápido (menos requests)
 export async function fetchProblemsRange({
-  startIso,
-  endIso,
-  pageSize = 1000,
-  maxPages = 60,
+  startLocal,
+  endLocal,
+  pageSize = 5000,   // antes 500 => demasiadas páginas y lento
+  maxPages = 30,     // ajusta si necesitas más
   onBatch,
-  signal,
 } = {}) {
   let all = [];
-  const seen = new Set();
-
-  // Filtrado por rango en cliente (por si backend ignora start/end)
-  const startMs = startIso ? new Date(startIso).getTime() : null;
-  const endMs = endIso ? new Date(endIso).getTime() : null;
-
-  let noNewStreak = 0;
 
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
-
+    const batch = await fetchPage({ pageNumber: page, pageSize, startLocal, endLocal });
     if (!batch.length) break;
 
-    // filtro rango
-    const inRange = batch.filter((x) => {
-      const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return true;
-      if (startMs && t < startMs) return false;
-      if (endMs && t > endMs) return false;
-      return true;
-    });
+    if (onBatch) onBatch(batch);
+    all = all.concat(batch);
 
-    let newCount = 0;
-    for (const x of inRange) {
-      const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        all.push(x);
-        newCount++;
-      }
-    }
-
-    if (onBatch) onBatch(inRange, page);
-
-    // si 3 páginas seguidas no agregan nuevos, cortamos
-    if (newCount === 0) noNewStreak++;
-    else noNewStreak = 0;
-
-    if (noNewStreak >= 3) break;
-
-    // si backend pagina bien, última página suele venir < pageSize
+    // si el backend devuelve menos que pageSize => última página
     if (batch.length < pageSize) break;
   }
 
+  // orden: más recientes primero
   all.sort((a, b) => {
     const da = a.startTime ? new Date(a.startTime).getTime() : 0;
     const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -241,179 +236,183 @@ export async function fetchProblemsRange({
 
 ------
 
-
-// src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchProblemsRange, getYesterdayToNowRangeLocal } from "../api/problems";
 
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
+const REFRESH_MS = 60_000; // 60s (cámbialo a 30_000 si quieres cada 30s)
 
 export default function Tcs() {
-  const [username, setUsername] = useState("");
+  const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  const [base, setBase] = useState([]);
+  // 👇 si tú ya tienes estos estados (tabs/filtros), NO los cambies
+  // deja los tuyos tal cual. Solo asegúrate de que setProblems se llame.
+  // Ejemplo:
+  const [activeEnv, setActiveEnv] = useState("Todos"); // Productivo / No Productivo / Todos
+  const [activeStatus, setActiveStatus] = useState("Todos"); // Abiertas / Cerradas / Todos
 
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
+  const isFetchingRef = useRef(false);
+  const timerRef = useRef(null);
 
-  const abortRef = useRef(null);
-
-  const load = async () => {
-    // corta cualquier carga anterior (evita que se acumulen requests)
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
+  async function loadProblems() {
+    // Evita que se solapen llamadas si una demora
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
 
     setLoading(true);
-    setBase([]); // para que no se mezcle con cargas viejas
-
     try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const tcsAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        pageSize: 1000,
-        maxPages: 60,
-        signal: controller.signal,
-
-        // pintamos incremental
-        onBatch: (batch) => {
-          for (const x of batch) {
-            if (String(x.jurisdiction || "").toUpperCase() === "TCS") {
-              tcsAccum.push(x);
-            }
-          }
-          setBase([...tcsAccum]);
-        },
+      const { startLocal, endLocal } = getYesterdayToNowRangeLocal();
+      const all = await fetchProblemsRange({
+        startLocal,
+        endLocal,
+        pageSize: 5000,
+        maxPages: 30,
       });
+
+      // ✅ aquí filtramos SOLO TCS (para que TCS y Otros no se mezclen)
+      const onlyTcs = all.filter((p) => p.jurisdiction === "TCS");
+      setProblems(onlyTcs);
     } catch (e) {
-      // Si abortó por refresco, no molestamos
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
+      console.error("Error cargando TCS:", e);
+      setProblems([]); // opcional
     } finally {
       setLoading(false);
+      isFetchingRef.current = false;
     }
-  };
+  }
 
   useEffect(() => {
-    load();
-    const t = setInterval(load, 60000);
+    // 1) carga inicial
+    loadProblems();
+
+    // 2) refresco automático
+    timerRef.current = setInterval(() => {
+      loadProblems();
+    }, REFRESH_MS);
+
+    // cleanup
     return () => {
-      clearInterval(t);
-      if (abortRef.current) abortRef.current.abort();
+      if (timerRef.current) clearInterval(timerRef.current);
     };
   }, []);
 
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
+  // ---- filtros de UI (si ya tienes los tuyos, deja los tuyos) ----
+  const filtered = useMemo(() => {
+    let list = problems;
 
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    if (activeEnv !== "Todos") {
+      list = list.filter((p) => (p.environment || "") === activeEnv);
+    }
+
+    if (activeStatus === "Abiertas") {
+      list = list.filter((p) => p.status === "OPEN");
+    } else if (activeStatus === "Cerradas") {
+      list = list.filter((p) => p.status === "CLOSED");
+    }
+
     return list;
-  }, [base, envFilter, statusFilter]);
+  }, [problems, activeEnv, activeStatus]);
 
+  // ---- aquí NO toco tu diseño: solo te dejo un ejemplo mínimo ----
+  // En tu código real, deja tu render actual, solo cambia el data source a `filtered`.
   return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas TCS ({counts.total})
-      </h1>
+    <div>
+      {/* Tu UI tal cual */}
+      {loading && <div style={{ textAlign: "center" }}>Cargando problemas...</div>}
 
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
+      {/* Renderiza la lista filtrada */}
+      {filtered.map((p) => (
+        <div key={p.problemId}>
+          {/* TU CARD ORIGINAL AQUÍ */}
+          {p.title} - {p.status}
         </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
------
+----
 
-http://localhost:44334/api/Problems?pageNumber=1&pageSize=1000&start=2025-12-16T00:00:00&end=2025-12-17T23:59:59
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { fetchProblemsRange, getYesterdayToNowRangeLocal } from "../api/problems";
+
+const REFRESH_MS = 60_000;
+
+export default function Otros() {
+  const [problems, setProblems] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  // Si tú ya tienes estos estados, conserva los tuyos
+  const [activeEnv, setActiveEnv] = useState("Todos");
+  const [activeStatus, setActiveStatus] = useState("Todos");
+
+  const isFetchingRef = useRef(false);
+  const timerRef = useRef(null);
+
+  async function loadProblems() {
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+
+    setLoading(true);
+    try {
+      const { startLocal, endLocal } = getYesterdayToNowRangeLocal();
+      const all = await fetchProblemsRange({
+        startLocal,
+        endLocal,
+        pageSize: 5000,
+        maxPages: 30,
+      });
+
+      // ✅ aquí filtramos SOLO OTROS (NO TCS)
+      const onlyOthers = all.filter((p) => p.jurisdiction === "OTROS");
+      setProblems(onlyOthers);
+    } catch (e) {
+      console.error("Error cargando OTROS:", e);
+      setProblems([]);
+    } finally {
+      setLoading(false);
+      isFetchingRef.current = false;
+    }
+  }
+
+  useEffect(() => {
+    loadProblems();
+
+    timerRef.current = setInterval(() => {
+      loadProblems();
+    }, REFRESH_MS);
+
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const filtered = useMemo(() => {
+    let list = problems;
+
+    if (activeEnv !== "Todos") {
+      list = list.filter((p) => (p.environment || "") === activeEnv);
+    }
+
+    if (activeStatus === "Abiertas") {
+      list = list.filter((p) => p.status === "OPEN");
+    } else if (activeStatus === "Cerradas") {
+      list = list.filter((p) => p.status === "CLOSED");
+    }
+
+    return list;
+  }, [problems, activeEnv, activeStatus]);
+
+  return (
+    <div>
+      {loading && <div style={{ textAlign: "center" }}>Cargando problemas...</div>}
+
+      {filtered.map((p) => (
+        <div key={p.problemId}>
+          {/* TU CARD ORIGINAL AQUÍ */}
+          {p.title} - {p.status}
+        </div>
+      ))}
+    </div>
+  );
+}
