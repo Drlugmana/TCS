@@ -1,263 +1,3 @@
-// src/api/problems.js
-
-export const DEFAULT_RECENT_DAYS = 1;
-
-const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
-if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
-
-const API = `${BASE}/api/Problems`;
-
-function cleanNull(v) {
-  if (v === undefined || v === null) return null;
-  if (typeof v === "string") {
-    const t = v.trim();
-    if (!t) return null;
-    const low = t.toLowerCase();
-    if (low === "null" || low === "undefined") return null;
-    return t;
-  }
-  return v;
-}
-
-// Date local -> "YYYY-MM-DDTHH:mm:ss" (SIN Z)
-function toLocalIsoNoZ(d) {
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(
-    d.getMinutes()
-  )}:${pad(d.getSeconds())}`;
-}
-
-function parseDateToISO(v) {
-  v = cleanNull(v);
-  if (!v) return null;
-
-  if (v instanceof Date) {
-    const ms = v.getTime();
-    return Number.isFinite(ms) ? v.toISOString() : null;
-  }
-
-  if (typeof v === "number") {
-    const d = new Date(v);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
-
-  if (typeof v === "string") {
-    let s = v.trim();
-
-    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
-    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
-
-    const d = new Date(s);
-    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-  }
-
-  return null;
-}
-
-function normalizeStatus(rawStatus, endTimeISO) {
-  const s = cleanNull(rawStatus);
-  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
-
-  if (up.includes("OPEN")) return "OPEN";
-  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
-
-  return endTimeISO ? "CLOSED" : "OPEN";
-}
-
-function normalizeEnvironment(envRaw) {
-  const s = (cleanNull(envRaw) || "").toString().trim();
-  const up = s.toUpperCase().replace(/\s+/g, "");
-  if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
-    return "No Productivo";
-  }
-  if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
-  return s || "";
-}
-
-/**
- * IMPORTANTÍSIMO:
- * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
- */
-function normalizeJurisdiction(jRaw) {
-  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
-  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS")) return "OTROS";
-  if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS") || s.endsWith("TCS")) return "TCS";
-  if (s.includes("TCS")) return "TCS";
-  return "OTROS";
-}
-
-function normalize(list) {
-  if (!Array.isArray(list)) return [];
-
-  return list.map((p) => {
-    const startRaw =
-      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
-
-    const endRaw =
-      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
-
-    const startTime = parseDateToISO(startRaw);
-    const endTime = parseDateToISO(endRaw);
-
-    const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
-
-    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
-    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
-
-    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
-    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
-
-    const affectedCI =
-      p?.affectedCI ??
-      p?.AffectedCI ??
-      p?.affectedEntities ??
-      p?.affectedEntitiesList ??
-      [];
-
-    const status = normalizeStatus(
-      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
-      endTime
-    );
-
-    return {
-      ...p,
-      problemId,
-      title,
-      severityLevel,
-      impactLevel,
-      environment: env,
-      jurisdiction: juris,
-      affectedCI,
-      status,
-      tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
-      startTime,
-      endTime,
-    };
-  });
-}
-
-export function getYesterdayToNowRangeIso() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setDate(now.getDate() - 1);
-  start.setHours(0, 0, 0, 0);
-
-  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
-}
-
-/**
- * ✅ FIX CLAVE:
- * ahora sí enviamos jurisdiction al backend
- */
-async function fetchPage({ pageNumber, pageSize, startIso, endIso, jurisdiction, signal }) {
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize", String(pageSize));
-  if (startIso) params.set("start", startIso);
-  if (endIso) params.set("end", endIso);
-  if (jurisdiction) params.set("jurisdiction", String(jurisdiction)); // <-- FIX
-
-  const url = `${API}?${params.toString()}`;
-
-  const res = await fetch(url, {
-    headers: { Accept: "application/json" },
-    signal,
-  });
-
-  if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
-  }
-
-  const json = await res.json();
-
-  const items = Array.isArray(json)
-    ? json
-    : json?.results || json?.items || json?.data || json?.value || [];
-
-  return normalize(items);
-}
-
-/**
- * Paginación segura:
- * - Avanza page=1..maxPages (NO salta a 200, 400, etc.)
- * - Corta si ya no hay nuevos o si el batch viene vacío
- */
-export async function fetchProblemsRange({
-  startIso,
-  endIso,
-  jurisdiction,            // <-- FIX: nuevo parámetro
-  pageSize = 1000,
-  maxPages = 60,
-  onBatch,
-  signal,
-} = {}) {
-  let all = [];
-  const seen = new Set();
-
-  // Filtrado por rango en cliente (por si backend ignora start/end)
-  const startMs = startIso ? new Date(startIso).getTime() : null;
-  const endMs = endIso ? new Date(endIso).getTime() : null;
-
-  let noNewStreak = 0;
-
-  for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({
-      pageNumber: page,
-      pageSize,
-      startIso,
-      endIso,
-      jurisdiction,         // <-- FIX
-      signal,
-    });
-
-    if (!batch.length) break;
-
-    // filtro rango
-    const inRange = batch.filter((x) => {
-      const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return true;
-      if (startMs && t < startMs) return false;
-      if (endMs && t > endMs) return false;
-      return true;
-    });
-
-    let newCount = 0;
-    for (const x of inRange) {
-      const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        all.push(x);
-        newCount++;
-      }
-    }
-
-    if (onBatch) onBatch(inRange, page);
-
-    // si 3 páginas seguidas no agregan nuevos, cortamos
-    if (newCount === 0) noNewStreak++;
-    else noNewStreak = 0;
-
-    if (noNewStreak >= 3) break;
-
-    // si backend pagina bien, última página suele venir < pageSize
-    if (batch.length < pageSize) break;
-  }
-
-  all.sort((a, b) => {
-    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-    return db - da;
-  });
-
-  return all;
-}
-
-
-------
-
-
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
@@ -292,8 +32,15 @@ export default function Tcs() {
 
   const abortRef = useRef(null);
 
+  // ✅ NUEVO: evita refrescos duplicados
+  const inFlightRef = useRef(false);
+
   const load = async () => {
-    // corta cualquier carga anterior (evita que se acumulen requests)
+    // ✅ Si ya está cargando, NO vuelvas a lanzar otra carga (evita “refrescar” otra vez)
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    // corta cualquier carga anterior (por seguridad)
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -308,32 +55,33 @@ export default function Tcs() {
       await fetchProblemsRange({
         startIso,
         endIso,
-        jurisdiction: "TCS", // ✅ FIX: pedir SOLO TCS al backend
+        jurisdiction: "TCS",
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
 
-        // pintamos incremental (MISMA lógica visual que tenías)
+        // pintamos incremental (igual que antes)
         onBatch: (batch) => {
-          for (const x of batch) {
-            tcsAccum.push(x);
-          }
+          for (const x of batch) tcsAccum.push(x);
           setBase([...tcsAccum]);
         },
       });
     } catch (e) {
-      // Si abortó por refresco, no molestamos
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
         console.error(e);
       }
     } finally {
       setLoading(false);
+      inFlightRef.current = false;
     }
   };
 
   useEffect(() => {
     load();
+
+    // ✅ Auto refresh, pero sin duplicar cargas (gracias a inFlightRef)
     const t = setInterval(load, 60000);
+
     return () => {
       clearInterval(t);
       if (abortRef.current) abortRef.current.abort();
@@ -371,7 +119,15 @@ export default function Tcs() {
         />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: "10px",
+          flexWrap: "wrap",
+          marginBottom: "18px",
+        }}
+      >
         <Chip
           active={envFilter === "Productivo"}
           color="#93c5fd"
