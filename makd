@@ -146,16 +146,24 @@ export function getYesterdayToNowRangeIso() {
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
-async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
+/**
+ * ✅ FIX CLAVE:
+ * ahora sí enviamos jurisdiction al backend
+ */
+async function fetchPage({ pageNumber, pageSize, startIso, endIso, jurisdiction, signal }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
   if (startIso) params.set("start", startIso);
   if (endIso) params.set("end", endIso);
+  if (jurisdiction) params.set("jurisdiction", String(jurisdiction)); // <-- FIX
 
   const url = `${API}?${params.toString()}`;
 
-  const res = await fetch(url, { headers: { accept: "application/json" }, signal });
+  const res = await fetch(url, {
+    headers: { Accept: "application/json" },
+    signal,
+  });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -179,6 +187,7 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
 export async function fetchProblemsRange({
   startIso,
   endIso,
+  jurisdiction,            // <-- FIX: nuevo parámetro
   pageSize = 1000,
   maxPages = 60,
   onBatch,
@@ -194,7 +203,14 @@ export async function fetchProblemsRange({
   let noNewStreak = 0;
 
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
+    const batch = await fetchPage({
+      pageNumber: page,
+      pageSize,
+      startIso,
+      endIso,
+      jurisdiction,         // <-- FIX
+      signal,
+    });
 
     if (!batch.length) break;
 
@@ -238,7 +254,9 @@ export async function fetchProblemsRange({
   return all;
 }
 
------
+
+------
+
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -281,7 +299,6 @@ export default function Tcs() {
     abortRef.current = controller;
 
     setLoading(true);
-    setBase([]); // para que no se mezcle con cargas viejas
 
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
@@ -291,16 +308,15 @@ export default function Tcs() {
       await fetchProblemsRange({
         startIso,
         endIso,
+        jurisdiction: "TCS", // ✅ FIX: pedir SOLO TCS al backend
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
 
-        // pintamos incremental
+        // pintamos incremental (MISMA lógica visual que tenías)
         onBatch: (batch) => {
           for (const x of batch) {
-            if (String(x.jurisdiction || "").toUpperCase() === "TCS") {
-              tcsAccum.push(x);
-            }
+            tcsAccum.push(x);
           }
           setBase([...tcsAccum]);
         },
@@ -411,6 +427,3 @@ export default function Tcs() {
     </div>
   );
 }
-
-
-
