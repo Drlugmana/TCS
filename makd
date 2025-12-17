@@ -1,6 +1,6 @@
 // src/api/problems.js
 // ===========================
-// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA (hora local)
 export const DEFAULT_RECENT_DAYS = 1;
 
 // ===========================
@@ -24,21 +24,15 @@ function cleanNull(v) {
   return v;
 }
 
-function pad2(n) {
-  return String(n).padStart(2, "0");
-}
-
-// IMPORTANTE:
-// El backend normalmente interpreta fechas "sin zona" como LOCAL del servidor.
-// Si tú mandas toISOString() (UTC) se te puede mover el día.
-// Por eso generamos un ISO LOCAL "YYYY-MM-DDTHH:mm:ss" (sin Z).
+// Convierte Date -> "YYYY-MM-DDTHH:mm:ss" (SIN Z) en hora LOCAL
 function toLocalIsoNoZ(d) {
+  const pad = (n) => String(n).padStart(2, "0");
   const yyyy = d.getFullYear();
-  const mm = pad2(d.getMonth() + 1);
-  const dd = pad2(d.getDate());
-  const hh = pad2(d.getHours());
-  const mi = pad2(d.getMinutes());
-  const ss = pad2(d.getSeconds());
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
 }
 
@@ -73,39 +67,26 @@ function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
   const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
-  if (up === "OPEN" || up.includes(" OPEN")) return "OPEN";
-  if (up === "CLOSED" || up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+  if (up.includes("OPEN")) return "OPEN";
+  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
-  // Fallback solo si NO vino status
   return endTimeISO ? "CLOSED" : "OPEN";
 }
 
 function normalizeEnvironment(envRaw) {
   const s = (cleanNull(envRaw) || "").toString().trim();
-
   const up = s.toUpperCase().replace(/\s+/g, "");
   if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
     return "No Productivo";
   }
   if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
-
   return s || "";
 }
 
-// ✅ FIX CRÍTICO:
-// "NO TCS" contiene "TCS" => antes se convertía en "TCS".
-// Ahora lo tratamos primero:
 function normalizeJurisdiction(jRaw) {
   const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
-
-  // Primero NO TCS
-  if (s === "NO TCS" || s.includes("NO TCS")) return "NO TCS";
-
-  // Luego TCS exacto / con espacios
-  if (s === "TCS" || /\bTCS\b/.test(s)) return "TCS";
-
-  // Otros valores que existan
-  return s || "OTROS";
+  if (s.includes("TCS")) return "TCS";
+  return "OTROS";
 }
 
 // ===========================
@@ -151,9 +132,9 @@ function normalize(list) {
       severityLevel,
       impactLevel,
       environment: env,
-      jurisdiction: juris, // "TCS" | "NO TCS" | otros
+      jurisdiction: juris,
       affectedCI,
-      status, // "OPEN" | "CLOSED"
+      status,
       tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
       startTime,
       endTime,
@@ -162,14 +143,14 @@ function normalize(list) {
 }
 
 // ===========================
-// Rango: AYER 00:00 LOCAL -> AHORA (LOCAL)
-// Enviamos strings sin Z para que el backend no “mueva” el día por UTC.
+// Rango: AYER 00:00 local -> AHORA local (IMPORTANTE: sin UTC)
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
+  // OJO: enviamos formato LOCAL sin "Z" para que SQL (GETDATE) no se descuadre
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
@@ -180,6 +161,7 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
 
+  // Si el backend los soporta, filtra en servidor. Si no, igual filtramos en cliente después.
   if (startIso) params.set("start", startIso);
   if (endIso) params.set("end", endIso);
 
@@ -201,25 +183,57 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
 }
 
 // ===========================
-// Fetch con paginado (trae TODO lo del rango)
+// Fetch con paginado (trae TODO lo del rango) - seguro (sin bucles infinitos)
 export async function fetchProblemsRange({
   startIso,
   endIso,
   pageSize = 1000,
-  maxPages = 500,
+  maxPages = 200,
   onBatch,
 } = {}) {
   let all = [];
+  const seen = new Set();
+
+  // Para filtrar por rango en cliente (por si backend ignora start/end)
+  const startMs = startIso ? new Date(startIso).getTime() : null;
+  const endMs = endIso ? new Date(endIso).getTime() : null;
+
+  let emptyOrNoNewStreak = 0;
 
   for (let page = 1; page <= maxPages; page++) {
     const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
 
     if (!batch.length) break;
 
-    if (onBatch) onBatch(batch);
-    all = all.concat(batch);
+    // Filtra por rango (cliente)
+    const batchInRange = batch.filter((x) => {
+      const t = x.startTime ? new Date(x.startTime).getTime() : null;
+      if (!t || !Number.isFinite(t)) return true;
+      if (startMs && t < startMs) return false;
+      if (endMs && t > endMs) return false;
+      return true;
+    });
 
-    // última página si llega incompleta
+    // Dedup: evita repetir lo mismo si backend pagina raro
+    let newCount = 0;
+    for (const x of batchInRange) {
+      const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        all.push(x);
+        newCount++;
+      }
+    }
+
+    if (onBatch) onBatch(batchInRange);
+
+    // Si ya no llega NADA nuevo varias veces, cortamos (evita page 700+)
+    if (newCount === 0) emptyOrNoNewStreak++;
+    else emptyOrNoNewStreak = 0;
+
+    if (emptyOrNoNewStreak >= 3) break;
+
+    // Si el backend sí pagina bien: cuando devuelve menos que pageSize, es última página
     if (batch.length < pageSize) break;
   }
 
@@ -233,7 +247,7 @@ export async function fetchProblemsRange({
   return all;
 }
 
------
+---11
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -274,30 +288,30 @@ export default function Tcs() {
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
 
+      // IMPORTANTE: pageSize grande + maxPages razonable + paginado seguro en problems.js
       const all = await fetchProblemsRange({
         startIso,
         endIso,
         pageSize: 1000,
-        maxPages: 500,
+        maxPages: 200,
       });
 
-      // SOLO TCS EXACTO
+      // SOLO TCS
       const tcs = all.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
-
       setBase(tcs);
     } finally {
       setLoading(false);
     }
   };
 
-  // carga inicial + refresh “tiempo real” cada 60s
+  // carga inicial + refresh cada 60s
   useEffect(() => {
     load();
     const t = setInterval(load, 60000);
     return () => clearInterval(t);
   }, []);
 
-  // Conteos (del dataset TCS completo del rango)
+  // Conteos
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
@@ -389,152 +403,5 @@ export default function Tcs() {
   );
 }
 
-
 ------
 
-// src/pages/Otros.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function Otros() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const all = await fetchProblemsRange({
-        startIso,
-        endIso,
-        pageSize: 1000,
-        maxPages: 500,
-      });
-
-      // SOLO OTROS (NO TCS y cualquier cosa distinta de TCS)
-      const otros = all.filter((x) => String(x.jurisdiction || "").toUpperCase() !== "TCS");
-
-      setBase(otros);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  useEffect(() => {
-    load();
-    const t = setInterval(load, 60000);
-    return () => clearInterval(t);
-  }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas Otros ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
-}
