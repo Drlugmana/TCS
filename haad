@@ -1,0 +1,153 @@
+// src/components/ProblemCard.jsx
+import React, { useEffect, useMemo, useState } from "react";
+
+/**
+ * Calcula duración:
+ * - OPEN  → ahora - startTime
+ * - CLOSED → endTime - startTime
+ * - Si CLOSED y no hay endTime → 00:00:00
+ */
+function calculateDuration({ status, startTime, endTime }) {
+  if (!startTime) return "00:00:00";
+
+  const start = new Date(startTime).getTime();
+  if (!Number.isFinite(start)) return "00:00:00";
+
+  let end;
+
+  if (status === "OPEN") {
+    end = Date.now();
+  } else {
+    if (!endTime) return "00:00:00";
+    end = new Date(endTime).getTime();
+    if (!Number.isFinite(end)) return "00:00:00";
+  }
+
+  const diff = Math.max(0, end - start);
+
+  const hours = Math.floor(diff / 3600000);
+  const minutes = Math.floor((diff % 3600000) / 60000);
+  const seconds = Math.floor((diff % 60000) / 1000);
+
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+}
+
+export default function ProblemCard({ problem }) {
+  const {
+    title,
+    severityLevel,
+    impactLevel,
+    startTime,
+    endTime,
+    status,
+    environment,
+    jurisdiction,
+    affectedCI,
+  } = problem;
+
+  const [now, setNow] = useState(Date.now());
+
+  // ⏱️ Solo refresca el reloj si está OPEN
+  useEffect(() => {
+    if (status !== "OPEN") return;
+
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [status]);
+
+  const duration = useMemo(
+    () =>
+      calculateDuration({
+        status,
+        startTime,
+        endTime,
+      }),
+    [status, startTime, endTime, now]
+  );
+
+  const isClosed = status === "CLOSED";
+
+  return (
+    <div
+      style={{
+        background: isClosed
+          ? "linear-gradient(135deg,#e8a3b1,#d98ca3)"
+          : "linear-gradient(135deg,#f1c40f,#f39c12)",
+        borderRadius: 14,
+        padding: 20,
+        marginBottom: 16,
+        boxShadow: "0 6px 14px rgba(0,0,0,.15)",
+      }}
+    >
+      <h2 style={{ marginTop: 0 }}>{title}</h2>
+
+      <p>
+        <b>Severidad Dynatrace:</b> {severityLevel}
+      </p>
+      <p>
+        <b>Impacto:</b> {impactLevel}
+      </p>
+      <p>
+        <b>Inicio:</b>{" "}
+        {startTime
+          ? new Date(startTime).toLocaleString()
+          : "No disponible"}
+      </p>
+      <p>
+        <b>Estado:</b> {status}
+      </p>
+      <p>
+        <b>Criticidad (BIA):</b> {severityLevel}
+      </p>
+      <p>
+        <b>Equipos afectados:</b>{" "}
+        {Array.isArray(affectedCI) && affectedCI.length
+          ? affectedCI.join(", ")
+          : "—"}
+      </p>
+
+      {/* Chips */}
+      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+        <Chip label={severityLevel?.includes("S1") ? "S1" : "S4"} />
+        <Chip label={environment || "N/A"} />
+        <Chip label={jurisdiction || "N/A"} />
+      </div>
+
+      {/* Tiempo */}
+      <div style={{ marginTop: 12, fontWeight: "bold", fontSize: 18 }}>
+        {duration}
+      </div>
+
+      <button
+        style={{
+          marginTop: 10,
+          padding: "6px 12px",
+          borderRadius: 8,
+          border: "none",
+          background: "#aaa",
+          cursor: "pointer",
+        }}
+      >
+        Revisar problema
+      </button>
+    </div>
+  );
+}
+
+function Chip({ label }) {
+  return (
+    <span
+      style={{
+        padding: "6px 12px",
+        borderRadius: 999,
+        background: "#2c3e50",
+        color: "white",
+        fontWeight: "bold",
+        fontSize: 12,
+      }}
+    >
+      {label}
+    </span>
+  );
+}
