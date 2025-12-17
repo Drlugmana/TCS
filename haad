@@ -1,0 +1,449 @@
+// src/api/problems.js
+// ===========================
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
+export const DEFAULT_RECENT_DAYS = 1;
+
+// ===========================
+// BASE DE LA API (desde .env)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+
+const API = `${BASE}/api/Problems`;
+
+// ===========================
+// Helpers
+function cleanNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return null;
+    const low = t.toLowerCase();
+    if (low === "null" || low === "undefined") return null;
+    return t;
+  }
+  return v;
+}
+
+function parseSpanishAmPmToken(token) {
+  const t = (token || "").toLowerCase().replace(/\s/g, "");
+  // "a. m." / "am"
+  if (t.includes("a.m") || t === "am") return "AM";
+  // "p. m." / "pm"
+  if (t.includes("p.m") || t === "pm") return "PM";
+  return null;
+}
+
+/**
+ * PARSE ROBUSTO:
+ * - Date / number
+ * - ISO
+ * - SQL "YYYY-MM-DD HH:mm:ss"
+ * - "DD/MM/YYYY, HH:mm:ss a. m."
+ * - "DD/MM/YYYY HH:mm:ss a. m."
+ */
+function parseToDate(v) {
+  v = cleanNull(v);
+  if (!v) return null;
+
+  if (v instanceof Date) {
+    const ms = v.getTime();
+    return Number.isFinite(ms) ? v : null;
+  }
+
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d : null;
+  }
+
+  if (typeof v !== "string") return null;
+
+  let s = v.trim();
+  if (!s) return null;
+
+  // 1) SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
+  if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}/.test(s)) {
+    s = s.replace(" ", "T");
+    const d = new Date(s);
+    if (Number.isFinite(d.getTime())) return d;
+  }
+
+  // 2) ISO (o casi ISO)
+  {
+    const d = new Date(s);
+    if (Number.isFinite(d.getTime())) return d;
+  }
+
+  // 3) "DD/MM/YYYY, HH:mm:ss a. m." (o sin coma)
+  // Ej: "17/12/2025, 10:49:10 a. m."
+  //     "17/12/2025 10:49:10 p. m."
+  const m = s.match(
+    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,)?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?$/i
+  );
+
+  if (m) {
+    let day = parseInt(m[1], 10);
+    let mon = parseInt(m[2], 10);
+    let year = parseInt(m[3], 10);
+    let hh = parseInt(m[4], 10);
+    let mm = parseInt(m[5], 10);
+    let ss = parseInt(m[6] || "0", 10);
+    const ampm = parseSpanishAmPmToken(m[7]);
+
+    if (ampm === "PM" && hh < 12) hh += 12;
+    if (ampm === "AM" && hh === 12) hh = 0;
+
+    const d = new Date(year, mon - 1, day, hh, mm, ss, 0); // LOCAL
+    if (Number.isFinite(d.getTime())) return d;
+  }
+
+  return null;
+}
+
+function parseDateToISO(v) {
+  const d = parseToDate(v);
+  return d ? d.toISOString() : null;
+}
+
+function normalizeStatus(rawStatus, endTimeISO) {
+  const s = cleanNull(rawStatus);
+  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
+
+  if (up.includes("OPEN")) return "OPEN";
+  if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
+
+  return endTimeISO ? "CLOSED" : "OPEN";
+}
+
+function normalizeEnvironment(envRaw) {
+  const s = (cleanNull(envRaw) || "").toString().trim();
+  const up = s.toUpperCase().replace(/\s+/g, "");
+
+  if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
+    return "No Productivo";
+  }
+  if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
+
+  return s || "";
+}
+
+function normalizeJurisdiction(jRaw) {
+  const raw = (cleanNull(jRaw) || "").toString().trim();
+  const up = raw.toUpperCase().replace(/\s+/g, "");
+
+  // "NO TCS" / "NO_TCS" => OTROS
+  if (up.startsWith("NO") && up.includes("TCS")) return "OTROS";
+
+  if (up.includes("TCS")) return "TCS";
+  return "OTROS";
+}
+
+// ===========================
+// Normalizador robusto
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    const startRaw =
+      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
+
+    const endRaw =
+      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
+
+    const startDate = parseToDate(startRaw); // 👈 importante
+    const endDate = parseToDate(endRaw);
+
+    const startTime = startDate ? startDate.toISOString() : null;
+    const endTime = endDate ? endDate.toISOString() : null;
+
+    const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
+
+    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
+    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
+
+    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
+    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
+
+    const affectedCI =
+      p?.affectedCI ??
+      p?.AffectedCI ??
+      p?.affectedEntities ??
+      p?.affectedEntitiesList ??
+      [];
+
+    const status = normalizeStatus(
+      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
+      endTime
+    );
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment: env,
+      jurisdiction: juris,
+      affectedCI,
+      status, // OPEN | CLOSED
+      tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
+      startTime,
+      endTime,
+
+      // 👇 extra interno para filtrar sin fallar
+      __startMs: startDate ? startDate.getTime() : null,
+    };
+  });
+}
+
+// ===========================
+// Rango: AYER 00:00 local -> AHORA (ms)
+export function getYesterdayToNowRangeMs() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return { startMs: start.getTime(), endMs: now.getTime() };
+}
+
+// (por si lo usas en UI)
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return { startIso: start.toISOString(), endIso: now.toISOString() };
+}
+
+// ===========================
+// Fetch de UNA página
+async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+
+  // Si el backend los soporta, perfecto. Si no, no rompe.
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+  const res = await fetch(url, { headers: { accept: "application/json" }, signal });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  const json = await res.json();
+
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// ===========================
+// Fetch con paginado (trae TODO lo del rango AYER->AHORA)
+// ✅ Corte temprano para que cargue rápido
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  pageSize = 500,
+  maxPages = 200,
+  onBatch,
+  signal,
+} = {}) {
+  const { startMs, endMs } = getYesterdayToNowRangeMs();
+
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
+    if (!batch.length) break;
+
+    // ✅ FILTRO LOCAL REAL (no falla por formato)
+    const filtered = batch.filter((p) => {
+      const t = p?.__startMs;
+      return Number.isFinite(t) && t >= startMs && t <= endMs;
+    });
+
+    if (filtered.length) {
+      onBatch?.(filtered);
+      all = all.concat(filtered);
+    }
+
+    // ✅ Corte rápido: si el más viejo de la página ya está antes de AYER 00:00, ya no hay más dentro del rango
+    const oldest = batch[batch.length - 1];
+    const oldestMs = oldest?.__startMs;
+    if (Number.isFinite(oldestMs) && oldestMs < startMs) break;
+
+    if (batch.length < pageSize) break;
+  }
+
+  // orden: más recientes primero
+  all.sort((a, b) => {
+    const da = Number.isFinite(a.__startMs) ? a.__startMs : 0;
+    const db = Number.isFinite(b.__startMs) ? b.__startMs : 0;
+    return db - da;
+  });
+
+  return all;
+}
+
+----
+
+// src/pages/Tcs.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function Tcs() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+
+  const load = async () => {
+    abortRef.current?.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+    setBase([]);
+
+    try {
+      await fetchProblemsRange({
+        pageSize: 500,
+        maxPages: 200,
+        signal: controller.signal,
+        onBatch: (batch) => {
+          const tcs = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
+          if (tcs.length) setBase((prev) => prev.concat(tcs));
+        },
+      });
+    } catch (e) {
+      if (e?.name !== "AbortError") console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      abortRef.current?.abort();
+      clearInterval(t);
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
