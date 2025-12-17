@@ -1,0 +1,381 @@
+// src/pages/Tcs.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function Tcs() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  // dataset base (AYER->HOY)
+  const [base, setBase] = useState([]);
+
+  // filtros de UI
+  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
+  const [statusFilter, setStatusFilter] = useState(null); // "OPEN" | "CLOSED" | null
+
+  // ✅ Para cargar rápido y evitar requests solapados
+  const seenRef = useRef(new Set());
+  const ctrlRef = useRef(null);
+
+  const load = async () => {
+    // Evita que se amontonen requests si refresca y el anterior sigue corriendo
+    if (ctrlRef.current) ctrlRef.current.abort();
+    const ctrl = new AbortController();
+    ctrlRef.current = ctrl;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      // Pintar rápido: limpia el listado y el set de "seen"
+      seenRef.current = new Set();
+      setBase([]);
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        pageSize: 1000, // ✅ menos páginas => más rápido
+        maxPages: 200,
+        signal: ctrl.signal, // ✅ para poder abortar
+        onBatch: (batch) => {
+          // SOLO TCS (del batch)
+          const tcsBatch = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
+
+          setBase((prev) => {
+            const next = [...prev];
+
+            for (const p of tcsBatch) {
+              const key = `${p.problemId}-${p.startTime}`;
+              if (!seenRef.current.has(key)) {
+                seenRef.current.add(key);
+                next.push(p);
+              }
+            }
+
+            // orden: más recientes primero
+            next.sort((a, b) => {
+              const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+              const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+              return db - da;
+            });
+
+            return next;
+          });
+        },
+      });
+    } catch (e) {
+      // Si fue abortado, no es error real
+      if (e?.name !== "AbortError") console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // carga inicial + refresh “tiempo real” cada 60s
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      clearInterval(t);
+      // aborta al desmontar
+      if (ctrlRef.current) ctrlRef.current.abort();
+    };
+  }, []);
+
+  // Conteos (del dataset TCS completo del rango)
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  // Lista visible (aplica filtros)
+  const visible = useMemo(() => {
+    let list = base;
+
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+----
+
+// src/pages/Otros.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function Otros() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  // ✅ Para cargar rápido y evitar requests solapados
+  const seenRef = useRef(new Set());
+  const ctrlRef = useRef(null);
+
+  const load = async () => {
+    if (ctrlRef.current) ctrlRef.current.abort();
+    const ctrl = new AbortController();
+    ctrlRef.current = ctrl;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      seenRef.current = new Set();
+      setBase([]);
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        pageSize: 1000,
+        maxPages: 200,
+        signal: ctrl.signal,
+        onBatch: (batch) => {
+          // SOLO OTROS (no TCS)
+          const otrosBatch = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() !== "TCS");
+
+          setBase((prev) => {
+            const next = [...prev];
+
+            for (const p of otrosBatch) {
+              const key = `${p.problemId}-${p.startTime}`;
+              if (!seenRef.current.has(key)) {
+                seenRef.current.add(key);
+                next.push(p);
+              }
+            }
+
+            next.sort((a, b) => {
+              const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+              const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+              return db - da;
+            });
+
+            return next;
+          });
+        },
+      });
+    } catch (e) {
+      if (e?.name !== "AbortError") console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      clearInterval(t);
+      if (ctrlRef.current) ctrlRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
