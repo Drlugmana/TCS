@@ -1,153 +1,791 @@
+// src/api/problems.js
+// ===========================
+// Traer por defecto: desde AYER 00:00 (hora local) hasta AHORA
+export const DEFAULT_RECENT_DAYS = 1;
+
+// ===========================
+// BASE DE LA API (desde .env)
+const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
+if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
+
+const API = `${BASE}/api/Problems`;
+
+// ===========================
+// Helpers
+function cleanNull(v) {
+  if (v === undefined || v === null) return null;
+  if (typeof v === "string") {
+    const t = v.trim();
+    if (!t) return null;
+    const low = t.toLowerCase();
+    if (low === "null" || low === "undefined") return null;
+    return t;
+  }
+  return v;
+}
+
+function parseDateToISO(v) {
+  v = cleanNull(v);
+  if (!v) return null;
+
+  if (v instanceof Date) {
+    const ms = v.getTime();
+    return Number.isFinite(ms) ? v.toISOString() : null;
+  }
+
+  if (typeof v === "number") {
+    const d = new Date(v);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+
+  if (typeof v === "string") {
+    let s = v.trim();
+
+    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
+    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
+
+    const d = new Date(s);
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+  }
+
+  return null;
+}
+
+function normalizeStatus(rawStatus) {
+  const s = (cleanNull(rawStatus) || "").toString().trim().toUpperCase();
+  if (!s) return ""; // si viene vacío, no inventamos
+  if (s === "OPEN" || s.includes("OPEN")) return "OPEN";
+  if (s === "CLOSED" || s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+  return s;
+}
+
+function normalizeEnvironment(envRaw) {
+  const s = (cleanNull(envRaw) || "").toString().trim();
+  const up = s.toUpperCase().replace(/\s+/g, "");
+
+  // En tu BD se ve: "NoProductivo" y "Productivo"
+  if (up === "NOPRODUCTIVO" || up.includes("NO_PRODUCTIVO") || up.includes("NO-PRODUCTIVO")) {
+    return "No Productivo";
+  }
+  if (up === "PRODUCTIVO" || up === "PROD") return "Productivo";
+
+  return s || "";
+}
+
+function normalizeJurisdiction(jRaw) {
+  // IMPORTANTÍSIMO: "NO TCS" contiene "TCS", por eso se mezclaba.
+  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
+
+  // Primero NO TCS
+  if (s === "NO TCS" || s.includes("NO TCS") || s.includes("NOTCS") || s.includes("NO_TCS")) return "NO TCS";
+
+  // Luego TCS
+  if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS")) return "TCS";
+
+  return "OTROS";
+}
+
+// ===========================
+// Normalizador robusto
+function normalize(list) {
+  if (!Array.isArray(list)) return [];
+
+  return list.map((p) => {
+    const startRaw =
+      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
+
+    const endRaw =
+      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
+
+    const startTime = parseDateToISO(startRaw);
+    const endTime = parseDateToISO(endRaw);
+
+    const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
+
+    const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
+    const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
+
+    const env = normalizeEnvironment(p?.environment ?? p?.Environment ?? p?.environmentName ?? "");
+    const juris = normalizeJurisdiction(p?.jurisdiction ?? p?.Jurisdiction ?? p?.label ?? p?.Label ?? "");
+
+    const affectedCI =
+      p?.affectedCI ??
+      p?.AffectedCI ??
+      p?.affectedEntities ??
+      p?.affectedEntitiesList ??
+      p?.AffectedEntities ??
+      [];
+
+    const status = normalizeStatus(p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState);
+
+    return {
+      ...p,
+      problemId,
+      title,
+      severityLevel,
+      impactLevel,
+      environment: env,
+      jurisdiction: juris,
+      affectedCI,
+      status, // "OPEN" | "CLOSED"
+      tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
+      startTime,
+      endTime,
+    };
+  });
+}
+
+// ===========================
+// Rango: AYER 00:00 local -> AHORA
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return { startIso: start.toISOString(), endIso: now.toISOString() };
+}
+
+function inRangeISO(iso, startIso, endIso) {
+  if (!iso || !startIso || !endIso) return true;
+  const t = new Date(iso).getTime();
+  const a = new Date(startIso).getTime();
+  const b = new Date(endIso).getTime();
+  if (!Number.isFinite(t) || !Number.isFinite(a) || !Number.isFinite(b)) return true;
+  return t >= a && t <= b;
+}
+
+// ===========================
+// Fetch de UNA página
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
+  const params = new URLSearchParams();
+  params.set("pageNumber", String(pageNumber));
+  params.set("pageSize", String(pageSize));
+
+  // Si el backend los soporta, perfecto.
+  // Si NO los soporta, igual filtramos luego en el frontend por startTime.
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
+
+  const url = `${API}?${params.toString()}`;
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} en ${url}\n${txt}`);
+  }
+
+  const json = await res.json();
+
+  const items = Array.isArray(json)
+    ? json
+    : json?.results || json?.items || json?.data || json?.value || [];
+
+  return normalize(items);
+}
+
+// ===========================
+// Fetch con paginado (trae TODO lo del rango)
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  pageSize = 500,
+  maxPages = 50,
+  onBatch,
+} = {}) {
+  if (!startIso || !endIso) {
+    const r = getYesterdayToNowRangeIso();
+    startIso = r.startIso;
+    endIso = r.endIso;
+  }
+
+  let all = [];
+  for (let page = 1; page <= maxPages; page++) {
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
+    if (!batch.length) break;
+
+    if (onBatch) onBatch(batch);
+    all = all.concat(batch);
+
+    // si el backend devuelve menos que pageSize => última página
+    if (batch.length < pageSize) break;
+  }
+
+  // Filtro final por rango (por si el backend no filtró)
+  all = all.filter((p) => inRangeISO(p?.startTime, startIso, endIso));
+
+  // orden: más recientes primero
+  all.sort((a, b) => {
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
+    return db - da;
+  });
+
+  return all;
+}
+
+------
+
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
 
-/**
- * Calcula duración:
- * - OPEN  → ahora - startTime
- * - CLOSED → endTime - startTime
- * - Si CLOSED y no hay endTime → 00:00:00
- */
-function calculateDuration({ status, startTime, endTime }) {
-  if (!startTime) return "00:00:00";
-
-  const start = new Date(startTime).getTime();
-  if (!Number.isFinite(start)) return "00:00:00";
-
-  let end;
-
-  if (status === "OPEN") {
-    end = Date.now();
-  } else {
-    if (!endTime) return "00:00:00";
-    end = new Date(endTime).getTime();
-    if (!Number.isFinite(end)) return "00:00:00";
-  }
-
-  const diff = Math.max(0, end - start);
-
-  const hours = Math.floor(diff / 3600000);
-  const minutes = Math.floor((diff % 3600000) / 60000);
-  const seconds = Math.floor((diff % 60000) / 1000);
-
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
+function pad2(n) {
+  const x = Math.max(0, Math.floor(n));
+  return x < 10 ? `0${x}` : `${x}`;
 }
 
-export default function ProblemCard({ problem }) {
-  const {
-    title,
-    severityLevel,
-    impactLevel,
-    startTime,
-    endTime,
-    status,
-    environment,
-    jurisdiction,
-    affectedCI,
-  } = problem;
+function formatHHMMSS(totalSeconds) {
+  const s = Math.max(0, Math.floor(totalSeconds));
+  const hh = Math.floor(s / 3600);
+  const mm = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  return `${pad2(hh)}:${pad2(mm)}:${pad2(ss)}`;
+}
 
-  const [now, setNow] = useState(Date.now());
+function getBiaS(p) {
+  const raw =
+    p?.criticidadBIA ??
+    p?.CriticidadBIA ??
+    p?.bia ??
+    p?.BIA ??
+    p?.Bia ??
+    p?.criticalityBIA ??
+    p?.CriticalityBIA ??
+    p?.severity ??
+    p?.severityLevel ??
+    p?.SeverityLevel ??
+    "";
+  const s = (raw || "").toString().toUpperCase();
+  const m = s.match(/S[1-4]/);
+  return m ? m[0] : "S4";
+}
 
-  // ⏱️ Solo refresca el reloj si está OPEN
+function envBadgeText(env) {
+  const up = (env || "").toString().toUpperCase();
+  if (up.includes("NO PRODUCTIVO") || up.includes("NOPRODUCTIVO")) return "EnP";
+  if (up.includes("PRODUCTIVO")) return "PROD";
+  return env || "";
+}
+
+function platformBadge(p) {
+  // Si tienes un campo claro (ej: platform), úsalo. Si no, intenta inferir.
+  const raw = p?.platform ?? p?.Platform ?? p?.team ?? p?.Team ?? p?.grupo ?? "";
+  const s = (raw || "").toString().trim().toUpperCase();
+  if (s) return s;
+
+  // inferencia suave por texto
+  const t = `${p?.title || ""} ${Array.isArray(p?.affectedCI) ? p.affectedCI.join(" ") : ""}`.toUpperCase();
+  if (t.includes("WINTEL") || t.includes("WINDOWS")) return "WINTEL";
+  if (t.includes("AIX") || t.includes("UNIX") || t.includes("LINUX")) return "UNIX";
+  return "";
+}
+
+function cardBg(status) {
+  // En tus pantallazos: OPEN amarillo / CLOSED rosado
+  return status === "OPEN" ? "#e7d68a" : "#d7a3b6";
+}
+
+export default function ProblemCard({ problem, onReview }) {
+  const status = (problem?.status || "").toString().toUpperCase();
+  const startISO = problem?.startTime;
+  const startMs = useMemo(() => (startISO ? new Date(startISO).getTime() : NaN), [startISO]);
+
+  const [nowMs, setNowMs] = useState(Date.now());
+
+  // Solo corre el timer si OPEN
   useEffect(() => {
     if (status !== "OPEN") return;
-
-    const id = setInterval(() => setNow(Date.now()), 1000);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(id);
   }, [status]);
 
-  const duration = useMemo(
-    () =>
-      calculateDuration({
-        status,
-        startTime,
-        endTime,
-      }),
-    [status, startTime, endTime, now]
-  );
+  const elapsed = useMemo(() => {
+    if (status !== "OPEN") return 0; // CLOSED => 00:00:00
+    if (!Number.isFinite(startMs)) return 0;
+    return Math.max(0, Math.floor((nowMs - startMs) / 1000));
+  }, [status, startMs, nowMs]);
 
-  const isClosed = status === "CLOSED";
+  const bia = getBiaS(problem);
+  const envTxt = envBadgeText(problem?.environment);
+  const plat = platformBadge(problem);
+
+  const affected =
+    Array.isArray(problem?.affectedCI)
+      ? problem.affectedCI.filter(Boolean).join(", ")
+      : (problem?.affectedCI || "").toString();
 
   return (
     <div
       style={{
-        background: isClosed
-          ? "linear-gradient(135deg,#e8a3b1,#d98ca3)"
-          : "linear-gradient(135deg,#f1c40f,#f39c12)",
-        borderRadius: 14,
-        padding: 20,
-        marginBottom: 16,
-        boxShadow: "0 6px 14px rgba(0,0,0,.15)",
+        background: cardBg(status),
+        borderRadius: 12,
+        padding: 22,
+        marginBottom: 18,
+        boxShadow: "0 2px 10px rgba(0,0,0,.12)",
+        maxWidth: 980,
       }}
     >
-      <h2 style={{ marginTop: 0 }}>{title}</h2>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 16 }}>
+        <div style={{ flex: 1, minWidth: 260 }}>
+          <h2 style={{ margin: 0, fontFamily: "Georgia, serif" }}>{problem?.title || "(sin título)"}</h2>
 
-      <p>
-        <b>Severidad Dynatrace:</b> {severityLevel}
-      </p>
-      <p>
-        <b>Impacto:</b> {impactLevel}
-      </p>
-      <p>
-        <b>Inicio:</b>{" "}
-        {startTime
-          ? new Date(startTime).toLocaleString()
-          : "No disponible"}
-      </p>
-      <p>
-        <b>Estado:</b> {status}
-      </p>
-      <p>
-        <b>Criticidad (BIA):</b> {severityLevel}
-      </p>
-      <p>
-        <b>Equipos afectados:</b>{" "}
-        {Array.isArray(affectedCI) && affectedCI.length
-          ? affectedCI.join(", ")
-          : "—"}
-      </p>
+          <div style={{ marginTop: 12, lineHeight: 1.7, fontFamily: "Georgia, serif" }}>
+            <div>
+              <b>Severidad Dynatrace:</b> {problem?.severityLevel || ""}
+            </div>
+            <div>
+              <b>Impacto:</b> {problem?.impactLevel || ""}
+            </div>
+            <div>
+              <b>Inicio:</b>{" "}
+              {startISO ? new Date(startISO).toLocaleString() : ""}
+            </div>
+            <div>
+              <b>Estado:</b> {status || ""}
+            </div>
+            <div>
+              <b>Criticidad (BIA):</b> {bia}
+            </div>
+            <div>
+              <b>Equipos afectados:</b> {affected || ""}
+            </div>
+          </div>
+        </div>
 
-      {/* Chips */}
-      <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
-        <Chip label={severityLevel?.includes("S1") ? "S1" : "S4"} />
-        <Chip label={environment || "N/A"} />
-        <Chip label={jurisdiction || "N/A"} />
+        <div style={{ minWidth: 220, textAlign: "right" }}>
+          <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, alignItems: "center" }}>
+            {/* Badge BIA */}
+            <div
+              style={{
+                width: 62,
+                height: 56,
+                borderRadius: 10,
+                background: "#6b6b6b",
+                color: "white",
+                fontWeight: "bold",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                fontSize: 18,
+              }}
+            >
+              {bia}
+            </div>
+
+            {/* Badge ENV */}
+            {envTxt ? (
+              <div
+                style={{
+                  width: 74,
+                  height: 56,
+                  borderRadius: 10,
+                  background: envTxt === "PROD" ? "#1f6fd5" : "#4b4b4b",
+                  color: "white",
+                  fontWeight: "bold",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 18,
+                }}
+              >
+                {envTxt}
+              </div>
+            ) : null}
+
+            {/* Badge Plataforma */}
+            {plat ? (
+              <div
+                style={{
+                  width: 88,
+                  height: 56,
+                  borderRadius: 10,
+                  background: "#08a0d6",
+                  color: "white",
+                  fontWeight: "bold",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  fontSize: 18,
+                }}
+              >
+                {plat}
+              </div>
+            ) : null}
+          </div>
+
+          <div style={{ marginTop: 16, fontFamily: "Georgia, serif" }}>
+            <div style={{ fontSize: 34, fontWeight: "bold" }}>{formatHHMMSS(elapsed)}</div>
+
+            <button
+              onClick={() => onReview?.(problem)}
+              style={{
+                marginTop: 8,
+                padding: "8px 14px",
+                borderRadius: 8,
+                border: "none",
+                cursor: "pointer",
+                background: "rgba(0,0,0,.18)",
+                color: "white",
+                fontWeight: "bold",
+              }}
+            >
+              Revisar problema
+            </button>
+          </div>
+        </div>
       </div>
-
-      {/* Tiempo */}
-      <div style={{ marginTop: 12, fontWeight: "bold", fontSize: 18 }}>
-        {duration}
-      </div>
-
-      <button
-        style={{
-          marginTop: 10,
-          padding: "6px 12px",
-          borderRadius: 8,
-          border: "none",
-          background: "#aaa",
-          cursor: "pointer",
-        }}
-      >
-        Revisar problema
-      </button>
     </div>
   );
 }
 
-function Chip({ label }) {
+----
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
   return (
-    <span
+    <button
+      onClick={onClick}
       style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
         padding: "6px 12px",
         borderRadius: 999,
-        background: "#2c3e50",
-        color: "white",
+        cursor: "pointer",
+        fontFamily: "Georgia, serif",
         fontWeight: "bold",
-        fontSize: 12,
       }}
     >
-      {label}
-    </span>
+      {children}
+    </button>
+  );
+}
+
+function norm(s) {
+  return (s || "").toString().trim().toUpperCase();
+}
+
+export default function TCSProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [all, setAll] = useState([]);
+
+  // filtros combinables
+  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
+  const [statusFilter, setStatusFilter] = useState(null); // "OPEN" | "CLOSED" | null
+
+  useEffect(() => {
+    let alive = true;
+
+    async function run() {
+      setLoading(true);
+      setErr("");
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+        const data = await fetchProblemsRange({ startIso, endIso, pageSize: 500, maxPages: 50 });
+        if (!alive) return;
+        setAll(Array.isArray(data) ? data : []);
+      } catch (e) {
+        if (!alive) return;
+        setErr(e?.message || "Error cargando problemas");
+      } finally {
+        if (!alive) return;
+        setLoading(false);
+      }
+    }
+
+    run();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // base: solo TCS + (opcional) filtro por usuario (si existe campo)
+  const base = useMemo(() => {
+    const u = norm(username);
+    return all.filter((p) => {
+      if (norm(p?.jurisdiction) !== "TCS") return false;
+
+      if (u) {
+        const pu = norm(p?.user ?? p?.usuario ?? p?.User ?? p?.Usuario ?? "");
+        if (!pu.includes(u)) return false;
+      }
+      return true;
+    });
+  }, [all, username]);
+
+  // “facetas” (conteos) sobre base (sin aplicar chips)
+  const counts = useMemo(() => {
+    const c = {
+      total: base.length,
+      prod: base.filter((p) => norm(p?.environment) === "PRODUCTIVO").length,
+      nprod: base.filter((p) => norm(p?.environment).includes("NO PRODUCTIVO")).length,
+      open: base.filter((p) => norm(p?.status) === "OPEN").length,
+      closed: base.filter((p) => norm(p?.status) === "CLOSED").length,
+    };
+    return c;
+  }, [base]);
+
+  // lista final según filtros combinados
+  const filtered = useMemo(() => {
+    return base.filter((p) => {
+      if (envFilter) {
+        if (envFilter === "Productivo" && norm(p?.environment) !== "PRODUCTIVO") return false;
+        if (envFilter === "No Productivo" && !norm(p?.environment).includes("NO PRODUCTIVO")) return false;
+      }
+      if (statusFilter) {
+        if (norm(p?.status) !== statusFilter) return false;
+      }
+      return true;
+    });
+  }, [base, envFilter, statusFilter]);
+
+  function toggleEnv(v) {
+    setEnvFilter((prev) => (prev === v ? null : v));
+  }
+  function toggleStatus(v) {
+    setStatusFilter((prev) => (prev === v ? null : v));
+  }
+  function resetAll() {
+    setEnvFilter(null);
+    setStatusFilter(null);
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h1 style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ textAlign: "center", marginBottom: 10, fontFamily: "Georgia, serif" }}>
+        <label style={{ marginRight: 8, fontWeight: "bold" }}>Usuario:</label>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Tu usuario"
+          style={{ padding: 6, width: 240, fontFamily: "Georgia, serif" }}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <Chip active={envFilter === "Productivo"} onClick={() => toggleEnv("Productivo")}>
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip active={envFilter === "No Productivo"} onClick={() => toggleEnv("No Productivo")}>
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip active={statusFilter === "OPEN"} onClick={() => toggleStatus("OPEN")} color="#f3e27e">
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip active={statusFilter === "CLOSED"} onClick={() => toggleStatus("CLOSED")}>
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip active={!envFilter && !statusFilter} onClick={resetAll}>
+          Todos
+        </Chip>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>Cargando problemas...</div>
+      ) : err ? (
+        <div style={{ textAlign: "center", color: "crimson", fontFamily: "Georgia, serif" }}>{err}</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>No hay problemas para mostrar.</div>
+      ) : (
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 1020 }}>
+            {filtered.map((p, idx) => (
+              <ProblemCard
+                key={`${p?.problemId || "p"}-${idx}`}
+                problem={p}
+                onReview={() => {
+                  // Si tienes una URL al problema, aquí abres:
+                  // window.open(p?.url, "_blank");
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+----
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: 999,
+        cursor: "pointer",
+        fontFamily: "Georgia, serif",
+        fontWeight: "bold",
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function norm(s) {
+  return (s || "").toString().trim().toUpperCase();
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState("");
+  const [all, setAll] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function run() {
+      setLoading(true);
+      setErr("");
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+        const data = await fetchProblemsRange({ startIso, endIso, pageSize: 500, maxPages: 50 });
+        if (!alive) return;
+        setAll(Array.isArray(data) ? data : []);
+      } catch (e) {
+        if (!alive) return;
+        setErr(e?.message || "Error cargando problemas");
+      } finally {
+        if (!alive) return;
+        setLoading(false);
+      }
+    }
+
+    run();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const base = useMemo(() => {
+    const u = norm(username);
+    return all.filter((p) => {
+      const j = norm(p?.jurisdiction);
+      // En “Otros” queremos NO TCS + OTROS
+      if (!(j === "NO TCS" || j === "OTROS")) return false;
+
+      if (u) {
+        const pu = norm(p?.user ?? p?.usuario ?? p?.User ?? p?.Usuario ?? "");
+        if (!pu.includes(u)) return false;
+      }
+      return true;
+    });
+  }, [all, username]);
+
+  const counts = useMemo(() => {
+    return {
+      total: base.length,
+      prod: base.filter((p) => norm(p?.environment) === "PRODUCTIVO").length,
+      nprod: base.filter((p) => norm(p?.environment).includes("NO PRODUCTIVO")).length,
+      open: base.filter((p) => norm(p?.status) === "OPEN").length,
+      closed: base.filter((p) => norm(p?.status) === "CLOSED").length,
+    };
+  }, [base]);
+
+  const filtered = useMemo(() => {
+    return base.filter((p) => {
+      if (envFilter) {
+        if (envFilter === "Productivo" && norm(p?.environment) !== "PRODUCTIVO") return false;
+        if (envFilter === "No Productivo" && !norm(p?.environment).includes("NO PRODUCTIVO")) return false;
+      }
+      if (statusFilter) {
+        if (norm(p?.status) !== statusFilter) return false;
+      }
+      return true;
+    });
+  }, [base, envFilter, statusFilter]);
+
+  function toggleEnv(v) {
+    setEnvFilter((prev) => (prev === v ? null : v));
+  }
+  function toggleStatus(v) {
+    setStatusFilter((prev) => (prev === v ? null : v));
+  }
+  function resetAll() {
+    setEnvFilter(null);
+    setStatusFilter(null);
+  }
+
+  return (
+    <div style={{ padding: 20 }}>
+      <h1 style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ textAlign: "center", marginBottom: 10, fontFamily: "Georgia, serif" }}>
+        <label style={{ marginRight: 8, fontWeight: "bold" }}>Usuario:</label>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="Tu usuario"
+          style={{ padding: 6, width: 240, fontFamily: "Georgia, serif" }}
+        />
+      </div>
+
+      <div style={{ display: "flex", gap: 10, justifyContent: "center", flexWrap: "wrap", marginBottom: 14 }}>
+        <Chip active={envFilter === "Productivo"} onClick={() => toggleEnv("Productivo")}>
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip active={envFilter === "No Productivo"} onClick={() => toggleEnv("No Productivo")}>
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip active={statusFilter === "OPEN"} onClick={() => toggleStatus("OPEN")} color="#f3e27e">
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip active={statusFilter === "CLOSED"} onClick={() => toggleStatus("CLOSED")}>
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip active={!envFilter && !statusFilter} onClick={resetAll}>
+          Todos
+        </Chip>
+      </div>
+
+      {loading ? (
+        <div style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>Cargando problemas...</div>
+      ) : err ? (
+        <div style={{ textAlign: "center", color: "crimson", fontFamily: "Georgia, serif" }}>{err}</div>
+      ) : filtered.length === 0 ? (
+        <div style={{ textAlign: "center", fontFamily: "Georgia, serif" }}>No hay problemas para mostrar.</div>
+      ) : (
+        <div style={{ display: "flex", justifyContent: "center" }}>
+          <div style={{ width: "100%", maxWidth: 1020 }}>
+            {filtered.map((p, idx) => (
+              <ProblemCard key={`${p?.problemId || "p"}-${idx}`} problem={p} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
