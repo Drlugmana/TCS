@@ -24,116 +24,64 @@ function cleanNull(v) {
   return v;
 }
 
-function parseSpanishAmPmToken(token) {
-  const t = (token || "").toLowerCase().replace(/\s/g, "");
-  // "a. m." / "am"
-  if (t.includes("a.m") || t === "am") return "AM";
-  // "p. m." / "pm"
-  if (t.includes("p.m") || t === "pm") return "PM";
-  return null;
-}
-
-/**
- * PARSE ROBUSTO:
- * - Date / number
- * - ISO
- * - SQL "YYYY-MM-DD HH:mm:ss"
- * - "DD/MM/YYYY, HH:mm:ss a. m."
- * - "DD/MM/YYYY HH:mm:ss a. m."
- */
-function parseToDate(v) {
+function parseDateToISO(v) {
   v = cleanNull(v);
   if (!v) return null;
 
   if (v instanceof Date) {
     const ms = v.getTime();
-    return Number.isFinite(ms) ? v : null;
+    return Number.isFinite(ms) ? v.toISOString() : null;
   }
 
   if (typeof v === "number") {
     const d = new Date(v);
-    return Number.isFinite(d.getTime()) ? d : null;
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
 
-  if (typeof v !== "string") return null;
+  if (typeof v === "string") {
+    let s = v.trim();
 
-  let s = v.trim();
-  if (!s) return null;
+    // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
+    if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
 
-  // 1) SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
-  if (/^\d{4}-\d{2}-\d{2}\s+\d{1,2}:\d{2}/.test(s)) {
-    s = s.replace(" ", "T");
     const d = new Date(s);
-    if (Number.isFinite(d.getTime())) return d;
-  }
-
-  // 2) ISO (o casi ISO)
-  {
-    const d = new Date(s);
-    if (Number.isFinite(d.getTime())) return d;
-  }
-
-  // 3) "DD/MM/YYYY, HH:mm:ss a. m." (o sin coma)
-  // Ej: "17/12/2025, 10:49:10 a. m."
-  //     "17/12/2025 10:49:10 p. m."
-  const m = s.match(
-    /^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:,)?\s+(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?$/i
-  );
-
-  if (m) {
-    let day = parseInt(m[1], 10);
-    let mon = parseInt(m[2], 10);
-    let year = parseInt(m[3], 10);
-    let hh = parseInt(m[4], 10);
-    let mm = parseInt(m[5], 10);
-    let ss = parseInt(m[6] || "0", 10);
-    const ampm = parseSpanishAmPmToken(m[7]);
-
-    if (ampm === "PM" && hh < 12) hh += 12;
-    if (ampm === "AM" && hh === 12) hh = 0;
-
-    const d = new Date(year, mon - 1, day, hh, mm, ss, 0); // LOCAL
-    if (Number.isFinite(d.getTime())) return d;
+    return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
 
   return null;
-}
-
-function parseDateToISO(v) {
-  const d = parseToDate(v);
-  return d ? d.toISOString() : null;
 }
 
 function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
   const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
+  // Lo más importante: si viene "OPEN" que sea OPEN (aunque endTime venga raro)
   if (up.includes("OPEN")) return "OPEN";
   if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
+  // Fallback solo si NO vino status
   return endTimeISO ? "CLOSED" : "OPEN";
 }
 
 function normalizeEnvironment(envRaw) {
   const s = (cleanNull(envRaw) || "").toString().trim();
-  const up = s.toUpperCase().replace(/\s+/g, "");
 
+  // Normaliza variaciones: "NoProductivo", "No Productivo", "NO_PRODUCTIVO"
+  const up = s.toUpperCase().replace(/\s+/g, "");
   if (up.includes("NOPRODUCTIVO") || up.includes("NO-PRODUCTIVO") || up.includes("NO_PRODUCTIVO")) {
     return "No Productivo";
   }
   if (up.includes("PRODUCTIVO") || up === "PROD") return "Productivo";
 
+  // si viene vacío o distinto, devuelve tal cual
   return s || "";
 }
 
 function normalizeJurisdiction(jRaw) {
-  const raw = (cleanNull(jRaw) || "").toString().trim();
-  const up = raw.toUpperCase().replace(/\s+/g, "");
-
-  // "NO TCS" / "NO_TCS" => OTROS
-  if (up.startsWith("NO") && up.includes("TCS")) return "OTROS";
-
-  if (up.includes("TCS")) return "TCS";
+  const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase();
+  // OJO: "NO TCS" incluye "TCS" => por eso chequeamos primero NO TCS
+  if (s.includes("NO TCS") || s.includes("NOTCS") || s.includes("NO_TCS")) return "OTROS";
+  if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS")) return "TCS";
   return "OTROS";
 }
 
@@ -149,14 +97,11 @@ function normalize(list) {
     const endRaw =
       p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
 
-    const startDate = parseToDate(startRaw); // 👈 importante
-    const endDate = parseToDate(endRaw);
-
-    const startTime = startDate ? startDate.toISOString() : null;
-    const endTime = endDate ? endDate.toISOString() : null;
+    const startTime = parseDateToISO(startRaw);
+    const endTime = parseDateToISO(endRaw);
 
     const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
 
     const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
     const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
@@ -185,39 +130,27 @@ function normalize(list) {
       environment: env,
       jurisdiction: juris,
       affectedCI,
-      status, // OPEN | CLOSED
+      status, // "OPEN" | "CLOSED"
       tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
       startTime,
       endTime,
-
-      // 👇 extra interno para filtrar sin fallar
-      __startMs: startDate ? startDate.getTime() : null,
     };
   });
 }
 
 // ===========================
-// Rango: AYER 00:00 local -> AHORA (ms)
-export function getYesterdayToNowRangeMs() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setDate(now.getDate() - 1);
-  start.setHours(0, 0, 0, 0);
-  return { startMs: start.getTime(), endMs: now.getTime() };
-}
-
-// (por si lo usas en UI)
+// Rango: AYER 00:00 local -> AHORA (igual a SQL CONVERT(date, GETDATE()-1))
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
-  return { startIso: start.toISOString(), endIso: now.toISOString() };
+  return { startIso: start.toISOString(), endIso: now.toISOString(), startLocal: start, endLocal: now };
 }
 
 // ===========================
 // Fetch de UNA página
-async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
+async function fetchPage({ pageNumber, pageSize, startIso, endIso }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
@@ -227,7 +160,7 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
   if (endIso) params.set("end", endIso);
 
   const url = `${API}?${params.toString()}`;
-  const res = await fetch(url, { headers: { accept: "application/json" }, signal });
+  const res = await fetch(url, { headers: { accept: "application/json" } });
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
@@ -244,58 +177,299 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
 }
 
 // ===========================
-// Fetch con paginado (trae TODO lo del rango AYER->AHORA)
-// ✅ Corte temprano para que cargue rápido
+// Fetch con paginado "inteligente":
+// - Trae páginas desde la más reciente
+// - Filtra SOLO [ayer 00:00 -> ahora]
+// - Se detiene cuando la página ya viene más vieja que el inicio (para no traer histórico)
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  pageSize = 500,
+  startLocal,
+  endLocal,
+  pageSize = 1000,
   maxPages = 200,
   onBatch,
-  signal,
 } = {}) {
-  const { startMs, endMs } = getYesterdayToNowRangeMs();
+  const startMs = startLocal instanceof Date ? startLocal.getTime() : (startIso ? new Date(startIso).getTime() : null);
+  const endMs = endLocal instanceof Date ? endLocal.getTime() : (endIso ? new Date(endIso).getTime() : null);
 
   let all = [];
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso });
     if (!batch.length) break;
 
-    // ✅ FILTRO LOCAL REAL (no falla por formato)
-    const filtered = batch.filter((p) => {
-      const t = p?.__startMs;
-      return Number.isFinite(t) && t >= startMs && t <= endMs;
+    // Filtrar por rango usando FECHA del propio registro (como tu SQL)
+    const inRange = batch.filter((p) => {
+      if (!p?.startTime) return false;
+      const t = new Date(p.startTime).getTime();
+      if (!Number.isFinite(t)) return false;
+      if (startMs != null && t < startMs) return false;
+      if (endMs != null && t >= endMs) return false;
+      return true;
     });
 
-    if (filtered.length) {
-      onBatch?.(filtered);
-      all = all.concat(filtered);
+    if (onBatch) onBatch(inRange);
+    all = all.concat(inRange);
+
+    // ✅ Corte rápido: si la página ya viene más vieja que el inicio => stop
+    // Tomamos el MÁS viejo de la página (mínimo startTime)
+    const times = batch
+      .map((p) => (p?.startTime ? new Date(p.startTime).getTime() : NaN))
+      .filter((x) => Number.isFinite(x));
+
+    if (times.length && startMs != null) {
+      const oldest = Math.min(...times);
+      if (oldest < startMs) break;
     }
 
-    // ✅ Corte rápido: si el más viejo de la página ya está antes de AYER 00:00, ya no hay más dentro del rango
-    const oldest = batch[batch.length - 1];
-    const oldestMs = oldest?.__startMs;
-    if (Number.isFinite(oldestMs) && oldestMs < startMs) break;
-
+    // Si backend devolvió menos que pageSize => última página
     if (batch.length < pageSize) break;
   }
 
-  // orden: más recientes primero
+  // Orden: más recientes primero
   all.sort((a, b) => {
-    const da = Number.isFinite(a.__startMs) ? a.__startMs : 0;
-    const db = Number.isFinite(b.__startMs) ? b.__startMs : 0;
+    const da = a.startTime ? new Date(a.startTime).getTime() : 0;
+    const db = b.startTime ? new Date(b.startTime).getTime() : 0;
     return db - da;
   });
 
   return all;
 }
 
-----
+
+------
+
+
+// src/components/ProblemCard.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  calcularCriticidadDetallada,
+  getButtonColorByPercent,
+} from "../utils/slaUtils";
+
+// Normaliza estado OPEN/CLOSED (sin inventar OPEN si viene CLOSED)
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
+  const s = String(raw || "").trim().toUpperCase();
+
+  if (s.includes("OPEN")) return "OPEN";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+
+  // fallback solo si no vino status
+  return p?.endTime ? "CLOSED" : "OPEN";
+}
+
+// Iconos por tower
+function towerToIconPath(towerKey) {
+  if (!towerKey) return null;
+  const key = String(towerKey).toLowerCase();
+
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
+  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
+    return "/icons/towers/Base.svg";
+  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
+
+  return null;
+}
+
+export default function ProblemCard({ problem, username }) {
+  const { get: catalogGet } = useBiaCatalog();
+
+  const status = useMemo(() => normalizeStatus(problem), [problem]);
+  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
+
+  // Buscar coincidencia con catálogo
+  const hitFromCatalog = useMemo(() => {
+    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+    for (const ci of arr) {
+      const name = ci?.name || ci?.Nombre;
+      const hit = name ? catalogGet(name) : null;
+      if (hit) return hit;
+    }
+    return null;
+  }, [problem, catalogGet]);
+
+  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
+
+  const { criticidad } = calcularCriticidadDetallada(problem, {
+    catalogLookup: (ciName) => catalogGet(ciName),
+  });
+
+  // SLA
+  const slaMinutes = getSlaMinutes(criticidad);
+
+  // Timer: SOLO si está OPEN
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    if (status === "CLOSED") return; // NO corre en CLOSED
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
+  const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
+  const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
+    slaMinutes,
+    elapsedMinutes,
+    status,
+  ]);
+
+  const percentRemaining = useMemo(() => {
+    if (status === "CLOSED") return 100;
+    return Math.max((remainingMinutes / slaMinutes) * 100, 0);
+  }, [remainingMinutes, slaMinutes, status]);
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const totalSeconds = Math.floor(minutes * 60);
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+  const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
+  const equipos = uniqueNames.join(", ");
+
+  const isDisabled = !username;
+  const tenant = problem?.tenant || "";
+  const problemId = problem?.problemId || problem?.displayId || "";
+
+  const dynatraceUrl = tenant && problemId
+    ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+    : "#";
+
+  const environment = problem?.environment || "";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        borderRadius: "12px",
+        padding: "1rem 1.5rem",
+        marginBottom: "1rem",
+        backgroundColor: bgColor,
+        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+      }}
+    >
+      {/* IZQUIERDA: INFO */}
+      <div style={{ flex: 1, paddingRight: "1rem" }}>
+        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
+        </p>
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Impacto:</strong> {problem?.impactLevel}
+        </p>
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Inicio:</strong> {start.toLocaleString()}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Estado:</strong> {status}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Criticidad (BIA):</strong> {criticidad}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Equipos afectados:</strong> <small>{equipos}</small>
+        </p>
+      </div>
+
+      {/* CENTRO: ICONOS */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: "1rem",
+          flexShrink: 0,
+          minWidth: "220px",
+        }}
+      >
+        {(() => {
+          const size = 110;
+          return (
+            <>
+              <img
+                src={`/severidad${criticidad}.svg`}
+                width={size}
+                height={size}
+                title={`Criticidad ${criticidad}`}
+                alt={`Criticidad ${criticidad}`}
+              />
+              <img
+                src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
+                width={size}
+                height={size}
+                title={environment}
+                alt={environment}
+              />
+              {towerIcon && (
+                <img
+                  src={towerIcon}
+                  alt="tower"
+                  width={size}
+                  height={size}
+                  title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+                />
+              )}
+            </>
+          );
+        })()}
+      </div>
+
+      {/* DERECHA: TIMER + BOTÓN */}
+      <div style={{ textAlign: "center", minWidth: "160px" }}>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
+          {formatTime(remainingMinutes)}
+        </div>
+
+        <button
+          disabled={isDisabled || dynatraceUrl === "#"}
+          onClick={() => window.open(dynatraceUrl, "_blank")}
+          style={{
+            marginTop: ".5rem",
+            padding: ".4rem 1rem",
+            fontSize: ".9rem",
+            fontWeight: "bold",
+            color: "#fff",
+            backgroundColor: isDisabled
+              ? "#b0b0b0"
+              : status === "CLOSED"
+              ? "#6b7280"
+              : buttonColor,
+            border: "none",
+            borderRadius: "8px",
+            cursor: isDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
+
+-------
+
+
 
 // src/pages/Tcs.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange } from "../api/problems";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -319,33 +493,186 @@ export default function Tcs() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
 
+  // dataset base (AYER->HOY)
+  const [base, setBase] = useState([]);
+
+  // filtros de UI
+  const [envFilter, setEnvFilter] = useState(null); // "Productivo" | "No Productivo" | null
+  const [statusFilter, setStatusFilter] = useState(null); // "OPEN" | "CLOSED" | null
+
+  const load = async () => {
+    setLoading(true);
+    try {
+      const { startIso, endIso, startLocal, endLocal } = getYesterdayToNowRangeIso();
+
+      // ✅ Trae rápido: corta páginas cuando ya viene más viejo que AYER 00:00
+      const all = await fetchProblemsRange({
+        startIso,
+        endIso,
+        startLocal,
+        endLocal,
+        pageSize: 1000,
+        maxPages: 200,
+      });
+
+      // SOLO TCS
+      const tcs = all.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
+      setBase(tcs);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // carga inicial + refresh “tiempo real” cada 60s
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => clearInterval(t);
+  }, []);
+
+  // Conteos (del dataset TCS completo del rango)
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  // Lista visible (aplica filtros)
+  const visible = useMemo(() => {
+    let list = base;
+
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+-------
+
+// src/pages/Otros.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function Otros() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
   const [base, setBase] = useState([]);
 
   const [envFilter, setEnvFilter] = useState(null);
   const [statusFilter, setStatusFilter] = useState(null);
 
-  const abortRef = useRef(null);
-
   const load = async () => {
-    abortRef.current?.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
     setLoading(true);
-    setBase([]);
-
     try {
-      await fetchProblemsRange({
-        pageSize: 500,
+      const { startIso, endIso, startLocal, endLocal } = getYesterdayToNowRangeIso();
+
+      const all = await fetchProblemsRange({
+        startIso,
+        endIso,
+        startLocal,
+        endLocal,
+        pageSize: 1000,
         maxPages: 200,
-        signal: controller.signal,
-        onBatch: (batch) => {
-          const tcs = batch.filter((x) => String(x.jurisdiction || "").toUpperCase() === "TCS");
-          if (tcs.length) setBase((prev) => prev.concat(tcs));
-        },
       });
-    } catch (e) {
-      if (e?.name !== "AbortError") console.error(e);
+
+      // SOLO OTROS (no TCS)
+      const otros = all.filter((x) => String(x.jurisdiction || "").toUpperCase() !== "TCS");
+      setBase(otros);
     } finally {
       setLoading(false);
     }
@@ -354,10 +681,7 @@ export default function Tcs() {
   useEffect(() => {
     load();
     const t = setInterval(load, 60000);
-    return () => {
-      abortRef.current?.abort();
-      clearInterval(t);
-    };
+    return () => clearInterval(t);
   }, []);
 
   const counts = useMemo(() => {
@@ -378,7 +702,7 @@ export default function Tcs() {
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas TCS ({counts.total})
+        Problemas Otros ({counts.total})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
