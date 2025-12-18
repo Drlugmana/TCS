@@ -263,13 +263,12 @@ export async function fetchLatestSignature({
 }
 
 
-----
-
+--------
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -300,19 +299,15 @@ export default function Tcs() {
 
   const abortRef = useRef(null);
 
-  // evita cargas duplicadas
+  // ✅ NUEVO: evita refrescos duplicados
   const inFlightRef = useRef(false);
 
-  // throttle UI para que no se vuelva lento
-  const lastUiUpdateRef = useRef(0);
-
-  // ✅ firma del último estado visto en BD
-  const lastSignatureRef = useRef(null);
-
   const load = async () => {
+    // ✅ Si ya está cargando, NO vuelvas a lanzar otra carga (evita “refrescar” otra vez)
     if (inFlightRef.current) return;
     inFlightRef.current = true;
 
+    // corta cualquier carga anterior (por seguridad)
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -323,41 +318,21 @@ export default function Tcs() {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
 
       const tcsAccum = [];
-      lastUiUpdateRef.current = 0;
 
       await fetchProblemsRange({
         startIso,
         endIso,
+        jurisdiction: "TCS",
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
 
+        // pintamos incremental (igual que antes)
         onBatch: (batch) => {
-          for (const x of batch) {
-            if (String(x.jurisdiction || "").toUpperCase() === "TCS") {
-              tcsAccum.push(x);
-            }
-          }
-
-          const now = Date.now();
-          if (now - lastUiUpdateRef.current >= 300) {
-            lastUiUpdateRef.current = now;
-            setBase([...tcsAccum]);
-          }
+          for (const x of batch) tcsAccum.push(x);
+          setBase([...tcsAccum]);
         },
       });
-
-      setBase([...tcsAccum]);
-
-      // ✅ al terminar carga, guardamos la firma actual para que no vuelva a recargar sin cambios
-      const sig = await fetchLatestSignature({
-        startIso,
-        endIso,
-        jurisdiction: "TCS",
-        signal: controller.signal,
-      }).catch(() => null);
-
-      if (sig) lastSignatureRef.current = sig;
     } catch (e) {
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
         console.error(e);
@@ -368,43 +343,11 @@ export default function Tcs() {
     }
   };
 
-  // ✅ revisa si cambió BD (solo 1 request liviano) y recién ahí recarga todo
-  const checkChanges = async () => {
-    if (inFlightRef.current) return;
-
-    const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-    try {
-      const sig = await fetchLatestSignature({
-        startIso,
-        endIso,
-        jurisdiction: "TCS",
-      });
-
-      if (!sig) return;
-
-      // si es la primera vez
-      if (!lastSignatureRef.current) {
-        lastSignatureRef.current = sig;
-        return;
-      }
-
-      // ✅ si cambió => recargamos
-      if (sig !== lastSignatureRef.current) {
-        lastSignatureRef.current = sig;
-        load();
-      }
-    } catch (e) {
-      // silencioso para no molestar si hay fallas puntuales
-      // (pero puedes dejar console.error si quieres)
-    }
-  };
-
   useEffect(() => {
     load();
 
-    // ✅ “casi tiempo real” sin recargar si no cambió la BD
-    const t = setInterval(checkChanges, 15000);
+    // ✅ Auto refresh, pero sin duplicar cargas (gracias a inFlightRef)
+    const t = setInterval(load, 60000);
 
     return () => {
       clearInterval(t);
@@ -443,7 +386,15 @@ export default function Tcs() {
         />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: "10px",
+          flexWrap: "wrap",
+          marginBottom: "18px",
+        }}
+      >
         <Chip
           active={envFilter === "Productivo"}
           color="#93c5fd"
