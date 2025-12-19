@@ -27,6 +27,15 @@ function toLocalIsoNoZ(d) {
   )}:${pad(d.getSeconds())}`;
 }
 
+function parseAmPmToken(tok) {
+  if (!tok) return null;
+  const t = tok.toLowerCase().replace(/\s+/g, "");
+  // soporta: am, pm, a.m., p.m., a.m, p.m, a. m., p. m.
+  if (t.includes("a.m") || t === "am") return "AM";
+  if (t.includes("p.m") || t === "pm") return "PM";
+  return null;
+}
+
 function parseDateToISO(v) {
   v = cleanNull(v);
   if (!v) return null;
@@ -43,8 +52,57 @@ function parseDateToISO(v) {
 
   if (typeof v === "string") {
     let s = v.trim();
+
     // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
     if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
+
+    // ✅ Formato latino: "dd/MM/yyyy" o "dd/MM/yyyy, h:mm:ss a.m./p.m."
+    // Ej: "17/12/2025, 6:45:00 p.m."
+    const mLat = s.match(
+      /^(\d{2})\/(\d{2})\/(\d{4})(?:\s*,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?)?$/i
+    );
+    if (mLat) {
+      const dd = Number(mLat[1]);
+      const mm = Number(mLat[2]);
+      const yyyy = Number(mLat[3]);
+
+      let hh = mLat[4] != null ? Number(mLat[4]) : 0;
+      const mi = mLat[5] != null ? Number(mLat[5]) : 0;
+      const ss = mLat[6] != null ? Number(mLat[6]) : 0;
+
+      const ampm = parseAmPmToken(mLat[7]);
+
+      // convierte a 24h si viene AM/PM
+      if (ampm === "PM" && hh < 12) hh += 12;
+      if (ampm === "AM" && hh === 12) hh = 0;
+
+      const d = new Date(yyyy, mm - 1, dd, hh, mi, ss); // local
+      return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+    }
+
+    // ✅ Formato: "dd-MM-yyyy ..."
+    const mLat2 = s.match(
+      /^(\d{2})-(\d{2})-(\d{4})(?:\s*,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?)?$/i
+    );
+    if (mLat2) {
+      const dd = Number(mLat2[1]);
+      const mm = Number(mLat2[2]);
+      const yyyy = Number(mLat2[3]);
+
+      let hh = mLat2[4] != null ? Number(mLat2[4]) : 0;
+      const mi = mLat2[5] != null ? Number(mLat2[5]) : 0;
+      const ss = mLat2[6] != null ? Number(mLat2[6]) : 0;
+
+      const ampm = parseAmPmToken(mLat2[7]);
+
+      if (ampm === "PM" && hh < 12) hh += 12;
+      if (ampm === "AM" && hh === 12) hh = 0;
+
+      const d = new Date(yyyy, mm - 1, dd, hh, mi, ss);
+      return Number.isFinite(d.getTime()) ? d.toISOString() : null;
+    }
+
+    // fallback nativo
     const d = new Date(s);
     return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
@@ -90,10 +148,22 @@ function normalize(list) {
 
   return list.map((p) => {
     const startRaw =
-      p?.startTime ?? p?.startTimeUtc ?? p?.StartTime ?? p?.StartTimeUtc ?? p?.start_date ?? p?.Start ?? null;
+      p?.startTime ??
+      p?.startTimeUtc ??
+      p?.StartTime ??
+      p?.StartTimeUtc ??
+      p?.start_date ??
+      p?.Start ??
+      null;
 
     const endRaw =
-      p?.endTime ?? p?.endTimeUtc ?? p?.EndTime ?? p?.EndTimeUtc ?? p?.end_date ?? p?.End ?? null;
+      p?.endTime ??
+      p?.endTimeUtc ??
+      p?.EndTime ??
+      p?.EndTimeUtc ??
+      p?.end_date ??
+      p?.End ??
+      null;
 
     const startTime = parseDateToISO(startRaw);
     const endTime = parseDateToISO(endRaw);
@@ -146,9 +216,7 @@ export function getYesterdayToNowRangeIso() {
 }
 
 /**
- * ✅ FIX CLAVE:
- * Por ahora NO enviamos start/end al backend porque te filtra mal y devuelve 0.
- * Filtramos ayer→hoy en cliente (exacto como SQL).
+ * ✅ FIX: NO enviamos start/end al backend (para que no devuelva 0 por parsing del server)
  */
 async function fetchPage({ pageNumber, pageSize, signal }) {
   const params = new URLSearchParams();
@@ -173,9 +241,6 @@ async function fetchPage({ pageNumber, pageSize, signal }) {
   return normalize(items);
 }
 
-/**
- * Paginación segura + filtro exacto del query en cliente.
- */
 export async function fetchProblemsRange({
   startIso,
   endIso,
@@ -199,16 +264,16 @@ export async function fetchProblemsRange({
     const batch = await fetchPage({ pageNumber: page, pageSize, signal });
     if (!batch.length) break;
 
-    // ✅ filtro rango exacto:  start <= t < end
+    // ✅ filtro rango exacto: start <= t < end
+    // ✅ si NO se puede parsear fecha, NO lo botan (para no quedar en 0)
     const inRange = batch.filter((x) => {
       const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return false;
+      if (!t || !Number.isFinite(t)) return true; // <-- clave para que no muera la pantalla
       if (startMs && t < startMs) return false;
       if (endMs && t >= endMs) return false;
       return true;
     });
 
-    // ✅ filtro jurisdicción exacto a BD
     let inScope = inRange;
     if (target) {
       inScope = inRange.filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target);
@@ -242,11 +307,6 @@ export async function fetchProblemsRange({
   return all;
 }
 
-/**
- * ✅ LIGERO:
- * Firma del último registro en el rango (ayer→hoy).
- * Si cambia => refresca.
- */
 export async function fetchLatestSignature({
   startIso,
   endIso,
@@ -262,7 +322,7 @@ export async function fetchLatestSignature({
   const filtered = batch
     .filter((x) => {
       const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return false;
+      if (!t || !Number.isFinite(t)) return true;
       if (startMs && t < startMs) return false;
       if (endMs && t >= endMs) return false;
       return true;
@@ -280,597 +340,6 @@ export async function fetchLatestSignature({
   return `${top.problemId || ""}|${top.status || ""}|${top.startTime || ""}|${top.endTime || ""}`;
 }
 
+----
 
 
---------
-
-
-// src/pages/Tcs.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function Tcs() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  const abortRef = useRef(null);
-  const inFlightRef = useRef(false);
-  const lastSigRef = useRef(null);
-
-  const load = async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
-
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const tcsAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        jurisdiction: "TCS",
-        pageSize: 500,
-        maxPages: 60,
-        signal: controller.signal,
-
-        onBatch: (batch) => {
-          for (const x of batch) tcsAccum.push(x);
-          setBase([...tcsAccum]);
-        },
-      });
-    } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
-    } finally {
-      setLoading(false);
-      inFlightRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    load();
-
-    const poll = async () => {
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-        const sig = await fetchLatestSignature({
-          startIso,
-          endIso,
-          jurisdiction: "TCS",
-        });
-
-        if (lastSigRef.current === null) {
-          lastSigRef.current = sig;
-          return;
-        }
-
-        if (sig && sig !== lastSigRef.current) {
-          lastSigRef.current = sig;
-          load();
-        }
-      } catch (e) {}
-    };
-
-    const t = setInterval(poll, 20000);
-
-    return () => {
-      clearInterval(t);
-      if (abortRef.current) abortRef.current.abort();
-    };
-  }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas TCS ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
-}
-
-------
-
-
-// src/pages/OtherProblems.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function OtherProblems() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  const abortRef = useRef(null);
-  const inFlightRef = useRef(false);
-  const lastSigRef = useRef(null);
-
-  const load = async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
-
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const otherAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        jurisdiction: "OTROS",
-        pageSize: 500,
-        maxPages: 60,
-        signal: controller.signal,
-
-        onBatch: (batch) => {
-          for (const x of batch) otherAccum.push(x);
-          setBase([...otherAccum]);
-        },
-      });
-    } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
-    } finally {
-      setLoading(false);
-      inFlightRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    load();
-
-    const poll = async () => {
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-        const sig = await fetchLatestSignature({
-          startIso,
-          endIso,
-          jurisdiction: "OTROS",
-        });
-
-        if (lastSigRef.current === null) {
-          lastSigRef.current = sig;
-          return;
-        }
-
-        if (sig && sig !== lastSigRef.current) {
-          lastSigRef.current = sig;
-          load();
-        }
-      } catch (e) {}
-    };
-
-    const t = setInterval(poll, 20000);
-
-    return () => {
-      clearInterval(t);
-      if (abortRef.current) abortRef.current.abort();
-    };
-  }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas Otros ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
-}
-
-
------
-
-
-// src/pages/AllProblems.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function AllProblems() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  const abortRef = useRef(null);
-  const inFlightRef = useRef(false);
-  const lastSigRef = useRef(null);
-
-  const load = async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
-
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const allAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        jurisdiction: null,
-        pageSize: 500,
-        maxPages: 60,
-        signal: controller.signal,
-
-        onBatch: (batch) => {
-          for (const x of batch) allAccum.push(x);
-          setBase([...allAccum]);
-        },
-      });
-    } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
-    } finally {
-      setLoading(false);
-      inFlightRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    load();
-
-    const poll = async () => {
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-        const sigTcs = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
-        const sigOtros = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
-        const sig = sigTcs || sigOtros || null;
-
-        if (lastSigRef.current === null) {
-          lastSigRef.current = sig;
-          return;
-        }
-
-        if (sig && sig !== lastSigRef.current) {
-          lastSigRef.current = sig;
-          load();
-        }
-      } catch (e) {}
-    };
-
-    const t = setInterval(poll, 20000);
-
-    return () => {
-      clearInterval(t);
-      if (abortRef.current) abortRef.current.abort();
-    };
-  }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas (Todos) ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
-}
