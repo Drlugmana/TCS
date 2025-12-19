@@ -1,132 +1,115 @@
 // src/api/problems.js
 
-function getApiBase() {
-  // Vite: usa import.meta.env (NO process.env)
-  const fromVite = (import.meta?.env?.VITE_API_BASE_URL || "").trim();
-  if (fromVite) return fromVite.replace(/\/+$/, "");
+// ✅ Vite: usar import.meta.env (NO process.env)
+const RAW_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  import.meta.env.VITE_API ||
+  "https://localhost:44334";
 
-  // Opcional: si algún día quieres inyectarlo desde index.html
-  const fromWindow = (window.__API_BASE_URL__ || "").trim();
-  if (fromWindow) return fromWindow.replace(/\/+$/, "");
+// normaliza: sin slash final
+const API_BASE = String(RAW_BASE || "").replace(/\/+$/, "");
 
-  // Fallback: tu backend local (según tus screenshots)
-  return "https://localhost:44334";
+// endpoint real del backend (por Swagger): /api/problems
+const PROBLEMS_PATH = "/api/problems";
+
+function buildUrl(path, params = {}) {
+  const url = new URL(API_BASE + path);
+
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    url.searchParams.set(k, String(v));
+  });
+
+  return url.toString();
 }
 
-const API_BASE = getApiBase();
-
-// Normaliza ambiente a lo que tu UI ya usa
-export function normalizeEnvironment(env) {
-  const e = String(env || "").trim();
-  if (!e) return "";
-  if (e.toLowerCase() === "noproductivo") return "No Productivo";
-  if (e.toLowerCase() === "productivo") return "Productivo";
-  return e; // por si viene ya con espacio u otro valor
-}
-
-// Rango ISO: desde ayer (00:00) hasta ahora
+// Devuelve rango: desde AYER 00:00:00 hasta AHORA (como tu SQL)
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
-
   const start = new Date(now);
-  start.setDate(start.getDate() - 1);
+  start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
-  // backend suele aceptar ISO; si el tuyo acepta otro formato, avísame
-  const startIso = start.toISOString();
-  const endIso = now.toISOString();
-
-  return { startIso, endIso };
-}
-
-// Convierte el objeto del backend a tu forma esperada por el Front
-function mapProblem(p) {
   return {
-    ...p,
-    // Normalizaciones para que tu UI cuente bien Productivo/No Productivo:
-    environment: normalizeEnvironment(p.environment || p.Environment),
-
-    // Normalizaciones para que ProblemCard encuentre datos:
-    startTime: p.startTime || p.StartTime,
-    endTime: p.endTime || p.EndTime,
-    status: p.status || p.Status,
-    severityLevel: p.severityLevel || p.SeverityLevel,
-    impactLevel: p.impactLevel || p.ImpactLevel,
-    title: p.title || p.Title,
-
-    // IDs:
-    displayId: p.displayId || p.DisplayId,
-    problemId: p.problemId || p.ProblemId,
-
-    // Tenant:
-    tenant: p.tenant || p.Tenant,
-
-    // Affected:
-    affectedCI: p.affectedCI || p.AffectedCI || p.affectedCi || [],
+    startIso: start.toISOString(),
+    endIso: now.toISOString(),
   };
 }
 
-// Trae 1 página desde /api/problems (tu endpoint real)
+// Normaliza respuesta del backend (por si cambia casing)
+function normalizePagedResponse(json) {
+  const totalRecords =
+    json?.totalRecords ?? json?.TotalRecords ?? json?.total ?? json?.Total ?? 0;
+
+  const totalPages =
+    json?.totalPages ?? json?.TotalPages ?? json?.pages ?? json?.Pages ?? 1;
+
+  const pageNumber =
+    json?.pageNumber ?? json?.PageNumber ?? json?.page ?? json?.Page ?? 1;
+
+  const pageSize =
+    json?.pageSize ?? json?.PageSize ?? json?.size ?? json?.Size ?? 50;
+
+  const data = json?.data ?? json?.Data ?? json?.items ?? json?.Items ?? [];
+
+  return {
+    totalRecords: Number(totalRecords) || 0,
+    totalPages: Number(totalPages) || 1,
+    pageNumber: Number(pageNumber) || 1,
+    pageSize: Number(pageSize) || 50,
+    data: Array.isArray(data) ? data : [],
+  };
+}
+
 export async function fetchProblemsPage({
   pageNumber = 1,
   pageSize = 50,
-  startIso = null,
-  endIso = null,
-  jurisdiction = null,
-  status = null, // "OPEN" o "CLOSED" opcional
+  startIso,
+  endIso,
+  jurisdiction, // "TCS" | "OTROS" | null
+  status, // "OPEN" | "CLOSED" | null
   signal,
 } = {}) {
-  const url = new URL(`${API_BASE}/api/problems`);
+  const url = buildUrl(PROBLEMS_PATH, {
+    pageNumber,
+    pageSize,
+    startTime: startIso,
+    endTime: endIso,
+    jurisdiction,
+    status,
+  });
 
-  url.searchParams.set("pageNumber", String(pageNumber));
-  url.searchParams.set("pageSize", String(pageSize));
-
-  // Estos nombres de filtros dependen de tu backend.
-  // Si tu backend NO los soporta, igual funcionará sin filtrar.
-  if (startIso) url.searchParams.set("startTime", startIso);
-  if (endIso) url.searchParams.set("endTime", endIso);
-  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-  if (status) url.searchParams.set("status", status);
-
-  const res = await fetch(url.toString(), {
+  const res = await fetch(url, {
     method: "GET",
-    headers: {
-      Accept: "application/json",
-    },
     signal,
+    headers: { Accept: "application/json" },
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`fetchProblemsPage failed ${res.status}: ${text}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} - ${txt}`);
   }
 
   const json = await res.json();
-
-  const data = Array.isArray(json?.data) ? json.data.map(mapProblem) : [];
-  const totalPages = Number(json?.totalPages || 0);
-  const totalRecords = Number(json?.totalRecords || 0);
-
-  return { data, totalPages, totalRecords };
+  return normalizePagedResponse(json);
 }
 
-// Trae varias páginas (para llenar tu lista)
+// Trae varias páginas y va entregando batches
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction = null,
-  status = null,
+  jurisdiction,
+  status,
   pageSize = 1000,
   maxPages = 60,
   signal,
   onBatch,
 } = {}) {
-  let page = 1;
-  let pagesSeen = 0;
+  let pageNumber = 1;
 
-  while (pagesSeen < maxPages) {
-    const { data, totalPages } = await fetchProblemsPage({
-      pageNumber: page,
+  for (let i = 0; i < maxPages; i++) {
+    const page = await fetchProblemsPage({
+      pageNumber,
       pageSize,
       startIso,
       endIso,
@@ -135,52 +118,51 @@ export async function fetchProblemsRange({
       signal,
     });
 
-    if (onBatch) onBatch(data);
+    if (typeof onBatch === "function") onBatch(page.data);
 
-    pagesSeen += 1;
+    // corta si no hay data o ya llegamos al final
+    if (!page.data.length) break;
+    if (pageNumber >= page.totalPages) break;
 
-    // si no hay más data, corta
-    if (!data.length) break;
-
-    // si el backend reporta totalPages, respétalo
-    if (totalPages && page >= totalPages) break;
-
-    page += 1;
+    pageNumber += 1;
   }
 }
 
-// ✅ “Firma” sin endpoint extra: trae 1 registro y construye una firma estable
+// ✅ “Firma” sin endpoint extra: revisa el primer registro
 export async function fetchLatestSignature({
   startIso,
   endIso,
-  jurisdiction = null,
-  signal,
+  jurisdiction,
+  status,
 } = {}) {
-  const { data } = await fetchProblemsPage({
+  const page = await fetchProblemsPage({
     pageNumber: 1,
     pageSize: 1,
     startIso,
     endIso,
     jurisdiction,
-    signal,
+    status,
   });
 
-  const first = data?.[0];
+  const first = page.data?.[0];
   if (!first) return null;
 
-  const id = first.displayId || first.problemId || "";
+  const pid = first.problemId || first.displayId || "";
   const st = first.startTime || "";
-  const status = first.status || "";
-  return `${id}|${st}|${status}`;
+  const ss = first.status || first.Status || "";
+  return `${pid}|${st}|${ss}|${jurisdiction || ""}|${status || ""}`;
 }
 
------
-
+------
 
 // src/pages/TCSProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+import {
+  fetchProblemsRange,
+  fetchLatestSignature,
+  getYesterdayToNowRangeIso,
+} from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -188,7 +170,7 @@ function Chip({ active, onClick, children, color }) {
       onClick={onClick}
       style={{
         border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        background: active ? color || "#e5e7eb" : "#f3f4f6",
         padding: "6px 12px",
         borderRadius: "999px",
         cursor: "pointer",
@@ -232,10 +214,10 @@ export default function TCSProblems() {
         startIso,
         endIso,
         jurisdiction: "TCS",
+        status: "OPEN", // ✅ igual que tu SQL (solo OPEN)
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
@@ -258,8 +240,12 @@ export default function TCSProblems() {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
 
-        // ✅ ya NO llama /Problems/latestSignature (evita 404)
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "TCS",
+          status: "OPEN",
+        });
 
         if (lastSigRef.current === null) {
           lastSigRef.current = sig;
@@ -284,8 +270,10 @@ export default function TCSProblems() {
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
+
     const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
     const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+
     return { total: base.length, prod, nprod, open, closed };
   }, [base]);
 
@@ -363,18 +351,22 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.displayId || p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
--------
+------
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+import {
+  fetchProblemsRange,
+  fetchLatestSignature,
+  getYesterdayToNowRangeIso,
+} from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -382,7 +374,7 @@ function Chip({ active, onClick, children, color }) {
       onClick={onClick}
       style={{
         border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        background: active ? color || "#e5e7eb" : "#f3f4f6",
         padding: "6px 12px",
         borderRadius: "999px",
         cursor: "pointer",
@@ -426,10 +418,10 @@ export default function OtherProblems() {
         startIso,
         endIso,
         jurisdiction: "OTROS",
+        status: "OPEN", // ✅ igual que tu SQL (solo OPEN)
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
@@ -452,8 +444,12 @@ export default function OtherProblems() {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
 
-        // ✅ evita 404
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "OTROS",
+          status: "OPEN",
+        });
 
         if (lastSigRef.current === null) {
           lastSigRef.current = sig;
@@ -478,8 +474,10 @@ export default function OtherProblems() {
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
+
     const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
     const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+
     return { total: base.length, prod, nprod, open, closed };
   }, [base]);
 
@@ -493,7 +491,7 @@ export default function OtherProblems() {
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas Otros ({counts.total})
+        Problemas (Otros) ({counts.total})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
@@ -557,14 +555,15 @@ export default function OtherProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.displayId || p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
 
--------
+------
+
 
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -585,26 +584,7 @@ function normalizeStatus(p) {
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
 
   // fallback solo si no vino status
-  return p?.endTime || p?.EndTime ? "CLOSED" : "OPEN";
-}
-
-// Fechas robustas (por si viene "YYYY-MM-DD HH:mm:ss.fffffff")
-function safeDate(v) {
-  if (!v) return new Date();
-  if (v instanceof Date) return v;
-
-  const s = String(v).trim();
-  // Si viene con espacio, lo pasamos a formato tipo ISO parcial
-  // Ej: "2025-12-19 12:39:00.0000000" -> "2025-12-19T12:39:00.0000000"
-  const normalized = s.includes(" ") ? s.replace(" ", "T") : s;
-
-  const d = new Date(normalized);
-  if (!isNaN(d.getTime())) return d;
-
-  // último intento: sin fracciones largas
-  const cut = normalized.split(".")[0];
-  const d2 = new Date(cut);
-  return isNaN(d2.getTime()) ? new Date() : d2;
+  return p?.endTime ? "CLOSED" : "OPEN";
 }
 
 // Iconos por tower
@@ -624,8 +604,7 @@ export default function ProblemCard({ problem, username }) {
   const { get: catalogGet } = useBiaCatalog();
 
   const status = useMemo(() => normalizeStatus(problem), [problem]);
-
-  const start = useMemo(() => safeDate(problem?.startTime || problem?.StartTime), [problem]);
+  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
 
   // Buscar coincidencia con catálogo
   const hitFromCatalog = useMemo(() => {
@@ -657,11 +636,10 @@ export default function ProblemCard({ problem, username }) {
   }, [status]);
 
   const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
-  const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
-    slaMinutes,
-    elapsedMinutes,
-    status,
-  ]);
+  const remainingMinutes = useMemo(
+    () => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)),
+    [slaMinutes, elapsedMinutes, status]
+  );
 
   const percentRemaining = useMemo(() => {
     if (status === "CLOSED") return 100;
@@ -684,18 +662,15 @@ export default function ProblemCard({ problem, username }) {
   const equipos = uniqueNames.join(", ");
 
   const isDisabled = !username;
-  const tenant = problem?.tenant || problem?.Tenant || "";
-
-  // ✅ Dynatrace suele usar el displayId tipo "P-xxxx"
-  const pid = problem?.displayId || problem?.DisplayId || problem?.problemId || problem?.ProblemId || "";
+  const tenant = problem?.tenant || "";
+  const problemId = problem?.problemId || problem?.displayId || "";
 
   const dynatraceUrl =
-    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${pid}` : "#";
+    tenant && problemId
+      ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+      : "#";
 
-  // Ambiente (tu UI usa Productivo / No Productivo)
-  const environmentRaw = problem?.environment || problem?.Environment || "";
-  const environment =
-    String(environmentRaw).toLowerCase() === "noproductivo" ? "No Productivo" : environmentRaw;
+  const environment = problem?.environment || "";
 
   return (
     <div
