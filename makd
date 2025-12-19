@@ -43,10 +43,8 @@ function parseDateToISO(v) {
 
   if (typeof v === "string") {
     let s = v.trim();
-
     // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
     if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
-
     const d = new Date(s);
     return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
@@ -75,15 +73,27 @@ function normalizeEnvironment(envRaw) {
 }
 
 /**
- * IMPORTANTÍSIMO:
- * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
+ * ✅ FIX CLAVE:
+ * - Si Jurisdiction viene NULL/vacío => NO lo mandamos a OTROS.
+ * - Primero detectamos NO TCS (porque contiene "TCS").
+ * - Luego TCS.
+ * - Si no coincide, devolvemos "" (vacío).
  */
 function normalizeJurisdiction(jRaw) {
   const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
-  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS")) return "OTROS";
+
+  // ✅ Si viene NULL/vacío, NO lo mandes a OTROS (para que no se mezcle)
+  if (!s) return "";
+
+  // ✅ primero NO TCS (porque contiene "TCS")
+  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS") || s.includes("NO  TCS")) return "OTROS";
+
+  // ✅ luego TCS
   if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS") || s.endsWith("TCS")) return "TCS";
   if (s.includes("TCS")) return "TCS";
-  return "OTROS";
+
+  // ✅ si no coincide, lo dejamos vacío (no OTROS)
+  return "";
 }
 
 function normalize(list) {
@@ -100,7 +110,7 @@ function normalize(list) {
     const endTime = parseDateToISO(endRaw);
 
     const problemId = p?.problemId ?? p?.displayId ?? p?.DisplayId ?? p?.id ?? p?.pid ?? "";
-    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? "(sin título)";
+    const title = p?.title ?? p?.Title ?? p?.shortDescription ?? p?.ShortDescription ?? "(sin título)";
 
     const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? p?.severity ?? "";
     const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? p?.impact ?? "";
@@ -142,7 +152,6 @@ export function getYesterdayToNowRangeIso() {
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
-
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
@@ -242,8 +251,6 @@ export async function fetchProblemsRange({
  * ✅ LIGERO:
  * Trae una “firma” del último registro del rango para saber si cambió algo en BD.
  * Si la firma cambia => el Front refresca.
- *
- * IMPORTANTE: aquí filtramos usando el campo YA NORMALIZADO: x.jurisdiction === "TCS" / "OTROS"
  */
 export async function fetchLatestSignature({
   startIso,
@@ -254,9 +261,11 @@ export async function fetchLatestSignature({
   // pedimos poco (para NO traer 10k)
   const batch = await fetchPage({ pageNumber: 1, pageSize: 50, startIso, endIso, signal });
 
-  // OJO: batch ya viene normalizado => jurisdiction será "TCS" o "OTROS"
+  const target = (jurisdiction || "").toUpperCase().trim();
+
+  // nos quedamos con el más nuevo del target
   const filtered = batch
-    .filter((x) => x.jurisdiction === jurisdiction)
+    .filter((x) => String(x.jurisdiction || "").toUpperCase() === target)
     .sort((a, b) => {
       const da = a.startTime ? new Date(a.startTime).getTime() : 0;
       const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -271,7 +280,8 @@ export async function fetchLatestSignature({
 }
 
 
--------
+
+------
 
 
 // src/pages/Tcs.jsx
@@ -307,22 +317,20 @@ export default function Tcs() {
   const [statusFilter, setStatusFilter] = useState(null);
 
   const abortRef = useRef(null);
-
-  // ✅ evita refrescos duplicados
   const inFlightRef = useRef(false);
 
   const load = async () => {
-    // ✅ Si ya está cargando, NO vuelvas a lanzar otra carga
+    // ✅ evita refrescos duplicados
     if (inFlightRef.current) return;
     inFlightRef.current = true;
 
-    // corta cualquier carga anterior (por seguridad)
+    // corta cualquier carga anterior
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
 
     setLoading(true);
-    setBase([]); // igual que tu versión anterior (no mezcla cargas)
+    setBase([]);
 
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
@@ -336,11 +344,10 @@ export default function Tcs() {
         maxPages: 60,
         signal: controller.signal,
 
-        // pintamos incremental (igual que antes)
+        // pintamos incremental
         onBatch: (batch) => {
           for (const x of batch) {
-            // ✅ CLAVE: jurisdiction YA VIENE NORMALIZADO => "TCS" / "OTROS"
-            if (x.jurisdiction === "TCS") {
+            if (String(x.jurisdiction || "").toUpperCase() === "TCS") {
               tcsAccum.push(x);
             }
           }
@@ -359,10 +366,7 @@ export default function Tcs() {
 
   useEffect(() => {
     load();
-
-    // Auto refresh (sin duplicar gracias a inFlightRef)
     const t = setInterval(load, 60000);
-
     return () => {
       clearInterval(t);
       if (abortRef.current) abortRef.current.abort();
@@ -457,3 +461,180 @@ export default function Tcs() {
   );
 }
 
+
+------
+
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+    setBase([]);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const otrosAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        pageSize: 1000,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) {
+            if (String(x.jurisdiction || "").toUpperCase() === "OTROS") {
+              otrosAccum.push(x);
+            }
+          }
+          setBase([...otrosAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
