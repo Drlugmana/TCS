@@ -1,3 +1,600 @@
+// src/api/problems.js
+
+const BASE_URL =
+  import.meta?.env?.VITE_API_BASE_URL ||
+  process.env?.REACT_APP_API_BASE_URL ||
+  "";
+
+function qs(obj) {
+  const p = new URLSearchParams();
+  Object.entries(obj || {}).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    p.append(k, String(v));
+  });
+  return p.toString();
+}
+
+// ============================
+// RANGO "AYER 00:00" -> AHORA
+// (equivalente a tu SQL):
+// StartTime >= CONVERT(DATE, GETDATE()-1)
+// StartTime < GETDATE()
+// ============================
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+
+  // ayer a las 00:00:00 (hora local)
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+
+  // fin = ahora
+  const end = now;
+
+  // IMPORTANTE: mandamos formato ISO sin "Z" para evitar desfases por UTC
+  const toLocalIsoNoZ = (d) => {
+    const pad = (n) => String(n).padStart(2, "0");
+    return (
+      d.getFullYear() +
+      "-" +
+      pad(d.getMonth() + 1) +
+      "-" +
+      pad(d.getDate()) +
+      "T" +
+      pad(d.getHours()) +
+      ":" +
+      pad(d.getMinutes()) +
+      ":" +
+      pad(d.getSeconds())
+    );
+  };
+
+  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(end) };
+}
+
+function normalizeEnvironment(raw) {
+  const v = String(raw ?? "").trim();
+  if (!v) return "";
+  // tu BD/servicio a veces manda "NoProductivo" (sin espacio)
+  if (v.toLowerCase() === "noproductivo") return "No Productivo";
+  if (v.toLowerCase() === "no productivo") return "No Productivo";
+  if (v.toLowerCase() === "productivo") return "Productivo";
+  return v;
+}
+
+function normalizeStatus(raw, endTime) {
+  const s = String(raw ?? "").trim().toUpperCase();
+  if (s.includes("OPEN")) return "OPEN";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+  // fallback solo si no vino status
+  return endTime ? "CLOSED" : "OPEN";
+}
+
+function normalizeProblem(p) {
+  const problemId = p?.problemId ?? p?.ProblemId ?? p?.id ?? p?.Id ?? "";
+  const displayId = p?.displayId ?? p?.DisplayId ?? p?.problemDisplayId ?? p?.ProblemDisplayId ?? "";
+  const title = p?.title ?? p?.Title ?? "";
+  const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? "";
+  const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? "";
+  const startTime = p?.startTime ?? p?.StartTime ?? "";
+  const endTime = p?.endTime ?? p?.EndTime ?? null;
+  const tenant = p?.tenant ?? p?.Tenant ?? "";
+  const jurisdiction = p?.jurisdiction ?? p?.Jurisdiction ?? "";
+  const environment = normalizeEnvironment(p?.environment ?? p?.Environment ?? "");
+
+  const rawStatus = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.ProblemStatus ?? p?.problemState ?? p?.ProblemState ?? "";
+  const status = normalizeStatus(rawStatus, endTime);
+
+  // affectedCI: tolera varias formas
+  const affectedCI =
+    Array.isArray(p?.affectedCI) ? p.affectedCI :
+    Array.isArray(p?.AffectedCI) ? p.AffectedCI :
+    Array.isArray(p?.affectedCi) ? p.affectedCi :
+    [];
+
+  return {
+    ...p,
+    problemId,
+    displayId,
+    title,
+    impactLevel,
+    severityLevel,
+    startTime,
+    endTime,
+    tenant,
+    jurisdiction,
+    environment,
+    status,
+    affectedCI,
+  };
+}
+
+async function httpGetJson(url, { signal } = {}) {
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} - ${text}`);
+  }
+  return res.json();
+}
+
+// =====================================================
+// LEE PAGINADO: /Problems?pageNumber=1&pageSize=200&...
+// =====================================================
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  jurisdiction, // "TCS" | "OTROS" | null
+  pageSize = 200,
+  maxPages = 60,
+  signal,
+  onBatch,
+}) {
+  // endpoint base (tu backend normalmente expone /Problems)
+  const endpoint = `${BASE_URL}/Problems`;
+
+  let pageNumber = 1;
+
+  for (let i = 0; i < maxPages; i++) {
+    const url =
+      endpoint +
+      "?" +
+      qs({
+        pageNumber,
+        pageSize,
+        start: startIso,
+        end: endIso,
+        jurisdiction: jurisdiction || undefined,
+      });
+
+    const data = await httpGetJson(url, { signal });
+
+    // soporta backends que devuelven array directo o { items: [] } o { data: [] }
+    const itemsRaw =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.items) ? data.items :
+      Array.isArray(data?.data) ? data.data :
+      Array.isArray(data?.results) ? data.results :
+      [];
+
+    const items = itemsRaw.map(normalizeProblem);
+
+    if (typeof onBatch === "function") onBatch(items);
+
+    // si ya no hay más, paramos
+    if (!itemsRaw || itemsRaw.length === 0) break;
+    if (itemsRaw.length < pageSize) break;
+
+    pageNumber++;
+  }
+}
+
+// =====================================================
+// FIRMA: para polling (sin cambiar tu UI)
+// Toma el más reciente (page 1 size 1) y arma una firma
+// =====================================================
+export async function fetchLatestSignature({ startIso, endIso, jurisdiction }) {
+  const endpoint = `${BASE_URL}/Problems`;
+
+  const url =
+    endpoint +
+    "?" +
+    qs({
+      pageNumber: 1,
+      pageSize: 1,
+      start: startIso,
+      end: endIso,
+      jurisdiction: jurisdiction || undefined,
+    });
+
+  try {
+    const data = await httpGetJson(url);
+    const itemsRaw =
+      Array.isArray(data) ? data :
+      Array.isArray(data?.items) ? data.items :
+      Array.isArray(data?.data) ? data.data :
+      Array.isArray(data?.results) ? data.results :
+      [];
+
+    const first = itemsRaw?.[0] ? normalizeProblem(itemsRaw[0]) : null;
+    if (!first) return null;
+
+    // firma simple pero estable
+    return `${first.problemId || ""}|${first.displayId || ""}|${first.startTime || ""}|${first.status || ""}`;
+  } catch (e) {
+    return null;
+  }
+}
+
+
+--------
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function TCSProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "TCS",
+        pageSize: 200,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+-------
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "OTROS",
+        pageSize: 200,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+
+------
+
+
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import { useBiaCatalog } from "../context/BiaCatalogContext";
@@ -25,7 +622,7 @@ function towerToIconPath(towerKey) {
   if (!towerKey) return null;
   const key = String(towerKey).toLowerCase();
 
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wintel1.svg";
   if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
     return "/icons/towers/Base.svg";
   if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
@@ -97,11 +694,10 @@ export default function ProblemCard({ problem, username }) {
 
   const isDisabled = !username;
   const tenant = problem?.tenant || "";
-  const problemId = problem?.problemId || problem?.displayId || "";
+  const pid = problem?.displayId || problem?.problemId || "";
 
-  const dynatraceUrl = tenant && problemId
-    ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
-    : "#";
+  const dynatraceUrl =
+    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${pid}` : "#";
 
   const environment = problem?.environment || "";
 
@@ -190,9 +786,7 @@ export default function ProblemCard({ problem, username }) {
 
       {/* DERECHA: TIMER + BOTÓN */}
       <div style={{ textAlign: "center", minWidth: "160px" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
-          {formatTime(remainingMinutes)}
-        </div>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>{formatTime(remainingMinutes)}</div>
 
         <button
           disabled={isDisabled || dynatraceUrl === "#"}
@@ -203,11 +797,7 @@ export default function ProblemCard({ problem, username }) {
             fontSize: ".9rem",
             fontWeight: "bold",
             color: "#fff",
-            backgroundColor: isDisabled
-              ? "#b0b0b0"
-              : status === "CLOSED"
-              ? "#6b7280"
-              : buttonColor,
+            backgroundColor: isDisabled ? "#b0b0b0" : status === "CLOSED" ? "#6b7280" : buttonColor,
             border: "none",
             borderRadius: "8px",
             cursor: isDisabled ? "not-allowed" : "pointer",
