@@ -1,35 +1,784 @@
-import React from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+// src/api/problems.js
 
-import TCSProblems from "./pages/TCSProblems";
-import OtherProblems from "./pages/OtherProblems";
+// Base URL del backend (Swagger lo tienes en https://localhost:44334)
+// En Vite se usa import.meta.env (NO process.env)
+export const API_BASE_URL =
+  (import.meta?.env?.VITE_API_BASE_URL && String(import.meta.env.VITE_API_BASE_URL).trim()) ||
+  "https://localhost:44334";
 
-export default function App() {
+// Rango: desde AYER 00:00:00 hasta AHORA (como tu SQL)
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(start.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+
+  return {
+    startIso: start.toISOString(),
+    endIso: now.toISOString(),
+  };
+}
+
+function buildProblemsUrl({
+  pageNumber = 1,
+  pageSize = 200,
+  startIso,
+  endIso,
+  jurisdiction,
+  status,
+}) {
+  const url = new URL(`${API_BASE_URL}/Problems`);
+
+  url.searchParams.set("pageNumber", String(pageNumber));
+  url.searchParams.set("pageSize", String(pageSize));
+
+  // tu backend ya acepta startTime/endTime (según tus screenshots)
+  if (startIso) url.searchParams.set("startTime", startIso);
+  if (endIso) url.searchParams.set("endTime", endIso);
+
+  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
+  if (status) url.searchParams.set("status", status);
+
+  return url.toString();
+}
+
+// Trae 1 página
+export async function fetchProblemsPage({
+  pageNumber = 1,
+  pageSize = 200,
+  startIso,
+  endIso,
+  jurisdiction,
+  status,
+  signal,
+}) {
+  const url = buildProblemsUrl({ pageNumber, pageSize, startIso, endIso, jurisdiction, status });
+
+  const res = await fetch(url, { signal });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} - ${res.statusText} - ${text}`);
+  }
+
+  const data = await res.json();
+
+  // Soportar varias formas de respuesta:
+  // - array directo
+  // - { items: [...] }
+  // - { data: [...] }
+  // - { problems: [...] }
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.data)) return data.data;
+  if (Array.isArray(data?.problems)) return data.problems;
+
+  return [];
+}
+
+// Trae rango paginando hasta que no venga data o hasta maxPages
+export async function fetchProblemsRange({
+  startIso,
+  endIso,
+  jurisdiction,
+  status,
+  pageSize = 200,
+  maxPages = 60,
+  signal,
+  onBatch,
+}) {
+  let pageNumber = 1;
+
+  while (pageNumber <= maxPages) {
+    const batch = await fetchProblemsPage({
+      pageNumber,
+      pageSize,
+      startIso,
+      endIso,
+      jurisdiction,
+      status,
+      signal,
+    });
+
+    if (onBatch) onBatch(batch);
+
+    // Si ya no hay más registros, cortamos
+    if (!batch || batch.length === 0) break;
+
+    // Si la última página vino incompleta, normalmente es el final
+    if (batch.length < pageSize) break;
+
+    pageNumber++;
+  }
+}
+
+// Firma para “polling” SIN endpoint /latest (evita 404)
+// Se obtiene trayendo solo 1 registro (el más reciente según el orden del backend)
+export async function fetchLatestSignature({
+  startIso,
+  endIso,
+  jurisdiction,
+  status,
+  signal,
+}) {
+  const list = await fetchProblemsPage({
+    pageNumber: 1,
+    pageSize: 1,
+    startIso,
+    endIso,
+    jurisdiction,
+    status,
+    signal,
+  });
+
+  const p = list?.[0];
+  if (!p) return null;
+
+  // Firma robusta (si cambia algo, cambia la firma)
+  const pid = p?.displayId || p?.problemId || "";
+  const st = p?.startTime || "";
+  const ed = p?.endTime || "";
+  const s = p?.status || "";
+  return `${pid}|${st}|${ed}|${s}`;
+}
+
+-------
+
+
+// src/pages/TCSProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
   return (
-    <BrowserRouter>
-      <Routes>
-        {/* Redirección inicial */}
-        <Route path="/" element={<Navigate to="/tcs" replace />} />
-
-        {/* TABS */}
-        <Route path="/tcs" element={<TCSProblems />} />
-        <Route path="/otros" element={<OtherProblems />} />
-
-        {/* fallback */}
-        <Route path="*" element={<Navigate to="/tcs" replace />} />
-      </Routes>
-    </BrowserRouter>
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
   );
 }
 
-----
+export default function TCSProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
 
-import React from "react";
-import ReactDOM from "react-dom/client";
-import App from "./App";
+  const [base, setBase] = useState([]);
 
-ReactDOM.createRoot(document.getElementById("root")).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>
-);
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "TCS",
+        status: "OPEN", // tal y cual tu SQL: Status='OPEN'
+        pageSize: 200,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // firma SOLO con /Problems (sin /latest para evitar 404)
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "TCS",
+          status: "OPEN",
+        });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+
+    // OJO: aunque pedimos status=OPEN al backend, igual dejamos filtros por si tu backend envía mezclado
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      {/* Tabs (sin cambiar estilo general) */}
+      <div style={{ display: "flex", gap: "12px", marginBottom: "12px" }}>
+        <a href="/tcs" style={{ fontWeight: 800, textDecoration: "none", color: "#111" }}>
+          TCS
+        </a>
+        <a href="/otros" style={{ fontWeight: 800, textDecoration: "none", color: "#555" }}>
+          Otros
+        </a>
+      </div>
+
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+--------
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "OTROS",
+        status: "OPEN",
+        pageSize: 200,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "OTROS",
+          status: "OPEN",
+        });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      {/* Tabs */}
+      <div style={{ display: "flex", gap: "12px", marginBottom: "12px" }}>
+        <a href="/tcs" style={{ fontWeight: 800, textDecoration: "none", color: "#555" }}>
+          TCS
+        </a>
+        <a href="/otros" style={{ fontWeight: 800, textDecoration: "none", color: "#111" }}>
+          Otros
+        </a>
+      </div>
+
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+
+--------
+
+// src/components/ProblemCard.jsx
+import React, { useEffect, useMemo, useState } from "react";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
+import {
+  getSlaMinutes,
+  getColorByPercent,
+  calcularCriticidadDetallada,
+  getButtonColorByPercent,
+} from "../utils/slaUtils";
+
+// Normaliza estado OPEN/CLOSED (sin inventar OPEN si viene CLOSED)
+function normalizeStatus(p) {
+  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
+  const s = String(raw || "").trim().toUpperCase();
+
+  if (s.includes("OPEN")) return "OPEN";
+  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
+
+  // fallback solo si no vino status
+  return p?.endTime ? "CLOSED" : "OPEN";
+}
+
+// Iconos por tower
+function towerToIconPath(towerKey) {
+  if (!towerKey) return null;
+  const key = String(towerKey).toLowerCase();
+
+  // FIX: era "wiltel1.svg" (typo). No cambia diseño, solo corrige icono.
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wintel1.svg";
+  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
+    return "/icons/towers/Base.svg";
+  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
+
+  return null;
+}
+
+export default function ProblemCard({ problem, username }) {
+  const { get: catalogGet } = useBiaCatalog();
+
+  const status = useMemo(() => normalizeStatus(problem), [problem]);
+  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
+
+  // Buscar coincidencia con catálogo
+  const hitFromCatalog = useMemo(() => {
+    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+    for (const ci of arr) {
+      const name = ci?.name || ci?.Nombre;
+      const hit = name ? catalogGet(name) : null;
+      if (hit) return hit;
+    }
+    return null;
+  }, [problem, catalogGet]);
+
+  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
+
+  const { criticidad } = calcularCriticidadDetallada(problem, {
+    catalogLookup: (ciName) => catalogGet(ciName),
+  });
+
+  // SLA
+  const slaMinutes = getSlaMinutes(criticidad);
+
+  // Timer: SOLO si está OPEN
+  const [now, setNow] = useState(new Date());
+
+  useEffect(() => {
+    if (status === "CLOSED") return; // NO corre en CLOSED
+    const interval = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(interval);
+  }, [status]);
+
+  const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
+  const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
+    slaMinutes,
+    elapsedMinutes,
+    status,
+  ]);
+
+  const percentRemaining = useMemo(() => {
+    if (status === "CLOSED") return 100;
+    return Math.max((remainingMinutes / slaMinutes) * 100, 0);
+  }, [remainingMinutes, slaMinutes, status]);
+
+  const bgColor = getColorByPercent(percentRemaining);
+  const buttonColor = getButtonColorByPercent(percentRemaining);
+
+  const formatTime = (minutes) => {
+    const totalSeconds = Math.floor(minutes * 60);
+    const hrs = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
+  };
+
+  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+  const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
+  const equipos = uniqueNames.join(", ");
+
+  const isDisabled = !username;
+
+  const tenant = problem?.tenant || "";
+  // Mejor para Dynatrace: displayId (P-xxxxx) primero
+  const pid = problem?.displayId || problem?.problemId || "";
+
+  const dynatraceUrl =
+    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${encodeURIComponent(pid)}` : "#";
+
+  const environment = problem?.environment || "";
+
+  return (
+    <div
+      style={{
+        display: "flex",
+        justifyContent: "space-between",
+        alignItems: "center",
+        borderRadius: "12px",
+        padding: "1rem 1.5rem",
+        marginBottom: "1rem",
+        backgroundColor: bgColor,
+        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+      }}
+    >
+      {/* IZQUIERDA: INFO */}
+      <div style={{ flex: 1, paddingRight: "1rem" }}>
+        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
+        </p>
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Impacto:</strong> {problem?.impactLevel}
+        </p>
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Inicio:</strong> {start.toLocaleString()}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Estado:</strong> {status}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Criticidad (BIA):</strong> {criticidad}
+        </p>
+
+        <p style={{ fontSize: "1.2rem" }}>
+          <strong>Equipos afectados:</strong> <small>{equipos}</small>
+        </p>
+      </div>
+
+      {/* CENTRO: ICONOS */}
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          alignItems: "center",
+          gap: "1rem",
+          flexShrink: 0,
+          minWidth: "220px",
+        }}
+      >
+        {(() => {
+          const size = 110;
+          return (
+            <>
+              <img
+                src={`/severidad${criticidad}.svg`}
+                width={size}
+                height={size}
+                title={`Criticidad ${criticidad}`}
+                alt={`Criticidad ${criticidad}`}
+              />
+              <img
+                src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
+                width={size}
+                height={size}
+                title={environment}
+                alt={environment}
+              />
+              {towerIcon && (
+                <img
+                  src={towerIcon}
+                  alt="tower"
+                  width={size}
+                  height={size}
+                  title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+                />
+              )}
+            </>
+          );
+        })()}
+      </div>
+
+      {/* DERECHA: TIMER + BOTÓN */}
+      <div style={{ textAlign: "center", minWidth: "160px" }}>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>{formatTime(remainingMinutes)}</div>
+
+        <button
+          disabled={isDisabled || dynatraceUrl === "#"}
+          onClick={() => window.open(dynatraceUrl, "_blank")}
+          style={{
+            marginTop: ".5rem",
+            padding: ".4rem 1rem",
+            fontSize: ".9rem",
+            fontWeight: "bold",
+            color: "#fff",
+            backgroundColor: isDisabled ? "#b0b0b0" : status === "CLOSED" ? "#6b7280" : buttonColor,
+            border: "none",
+            borderRadius: "8px",
+            cursor: isDisabled ? "not-allowed" : "pointer",
+          }}
+        >
+          Revisar problema
+        </button>
+      </div>
+    </div>
+  );
+}
