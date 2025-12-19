@@ -43,8 +43,10 @@ function parseDateToISO(v) {
 
   if (typeof v === "string") {
     let s = v.trim();
+
     // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
     if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
+
     const d = new Date(s);
     return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
@@ -54,11 +56,16 @@ function parseDateToISO(v) {
 
 function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
-  const up = typeof s === "string" ? s.trim().toUpperCase() : "";
+
+  // Si viene como no-string (boolean/number/etc)
+  if (typeof s !== "string") return endTimeISO ? "CLOSED" : "OPEN";
+
+  const up = s.trim().toUpperCase();
 
   if (up.includes("OPEN")) return "OPEN";
   if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
+  // fallback
   return endTimeISO ? "CLOSED" : "OPEN";
 }
 
@@ -73,27 +80,17 @@ function normalizeEnvironment(envRaw) {
 }
 
 /**
- * ✅ FIX CLAVE:
- * - Si Jurisdiction viene NULL/vacío => NO lo mandamos a OTROS.
- * - Primero detectamos NO TCS (porque contiene "TCS").
- * - Luego TCS.
- * - Si no coincide, devolvemos "" (vacío).
+ * IMPORTANTÍSIMO:
+ * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
+ * En BD el campo es Jurisdiction: 'TCS' y 'NO TCS'
+ * Nosotros lo normalizamos a: 'TCS' y 'OTROS'
  */
 function normalizeJurisdiction(jRaw) {
   const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
-
-  // ✅ Si viene NULL/vacío, NO lo mandes a OTROS (para que no se mezcle)
-  if (!s) return "";
-
-  // ✅ primero NO TCS (porque contiene "TCS")
-  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS") || s.includes("NO  TCS")) return "OTROS";
-
-  // ✅ luego TCS
+  if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS")) return "OTROS";
   if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS") || s.endsWith("TCS")) return "TCS";
   if (s.includes("TCS")) return "TCS";
-
-  // ✅ si no coincide, lo dejamos vacío (no OTROS)
-  return "";
+  return "OTROS";
 }
 
 function normalize(list) {
@@ -126,7 +123,13 @@ function normalize(list) {
       [];
 
     const status = normalizeStatus(
-      p?.status ?? p?.Status ?? p?.state ?? p?.problemStatus ?? p?.problemState,
+      p?.status ??
+        p?.Status ??
+        p?.state ??
+        p?.problemStatus ??
+        p?.ProblemStatus ??
+        p?.problemState ??
+        p?.ProblemState,
       endTime
     );
 
@@ -152,6 +155,15 @@ export function getYesterdayToNowRangeIso() {
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
+
+  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
+}
+
+// Para "OTROS" pesado: ventana por horas (ej: última 1 hora)
+export function getLastHoursRangeIso(hoursBack = 1) {
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(now.getHours() - hoursBack, 0, 0, 0);
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
@@ -182,12 +194,14 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
 
 /**
  * Paginación segura:
- * - Avanza page=1..maxPages (NO salta a 200, 400, etc.)
+ * - Avanza page=1..maxPages
  * - Corta si ya no hay nuevos o si el batch viene vacío
+ * - (NUEVO) filtra por jurisdiction normalizado: "TCS" o "OTROS"
  */
 export async function fetchProblemsRange({
   startIso,
   endIso,
+  jurisdiction = null, // "TCS" o "OTROS" (null => todos)
   pageSize = 1000,
   maxPages = 60,
   onBatch,
@@ -196,9 +210,11 @@ export async function fetchProblemsRange({
   let all = [];
   const seen = new Set();
 
-  // Filtrado por rango en cliente (por si backend ignora start/end)
+  // rango (por si backend ignora start/end)
   const startMs = startIso ? new Date(startIso).getTime() : null;
   const endMs = endIso ? new Date(endIso).getTime() : null;
+
+  const targetJ = (jurisdiction || "").toUpperCase().trim() || null;
 
   let noNewStreak = 0;
 
@@ -208,7 +224,7 @@ export async function fetchProblemsRange({
     if (!batch.length) break;
 
     // filtro rango
-    const inRange = batch.filter((x) => {
+    let inRange = batch.filter((x) => {
       const t = x.startTime ? new Date(x.startTime).getTime() : null;
       if (!t || !Number.isFinite(t)) return true;
       if (startMs && t < startMs) return false;
@@ -216,9 +232,14 @@ export async function fetchProblemsRange({
       return true;
     });
 
+    // filtro jurisdiction
+    if (targetJ) {
+      inRange = inRange.filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === targetJ);
+    }
+
     let newCount = 0;
     for (const x of inRange) {
-      const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}`;
+      const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}|${x.jurisdiction || ""}`;
       if (!seen.has(key)) {
         seen.add(key);
         all.push(x);
@@ -228,13 +249,10 @@ export async function fetchProblemsRange({
 
     if (onBatch) onBatch(inRange, page);
 
-    // si 3 páginas seguidas no agregan nuevos, cortamos
     if (newCount === 0) noNewStreak++;
     else noNewStreak = 0;
 
     if (noNewStreak >= 3) break;
-
-    // si backend pagina bien, última página suele venir < pageSize
     if (batch.length < pageSize) break;
   }
 
@@ -258,14 +276,13 @@ export async function fetchLatestSignature({
   jurisdiction = "TCS", // "TCS" o "OTROS"
   signal,
 } = {}) {
-  // pedimos poco (para NO traer 10k)
-  const batch = await fetchPage({ pageNumber: 1, pageSize: 50, startIso, endIso, signal });
+  // pedimos poco
+  const batch = await fetchPage({ pageNumber: 1, pageSize: 80, startIso, endIso, signal });
 
   const target = (jurisdiction || "").toUpperCase().trim();
 
-  // nos quedamos con el más nuevo del target
   const filtered = batch
-    .filter((x) => String(x.jurisdiction || "").toUpperCase() === target)
+    .filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target)
     .sort((a, b) => {
       const da = a.startTime ? new Date(a.startTime).getTime() : 0;
       const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -275,19 +292,16 @@ export async function fetchLatestSignature({
   const top = filtered[0];
   if (!top) return null;
 
-  // firma: si cambia algo importante, cambia el string
-  return `${top.problemId || ""}|${top.status || ""}|${top.startTime || ""}|${top.endTime || ""}`;
+  return `${top.problemId || ""}|${top.status || ""}|${top.startTime || ""}|${top.endTime || ""}|${top.jurisdiction || ""}`;
 }
 
-
-
-------
+-------
 
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchLatestSignature, fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -317,14 +331,17 @@ export default function Tcs() {
   const [statusFilter, setStatusFilter] = useState(null);
 
   const abortRef = useRef(null);
+
+  // evita dobles cargas
   const inFlightRef = useRef(false);
 
+  // firma para refrescar solo si cambió la BD
+  const lastSigRef = useRef(null);
+
   const load = async () => {
-    // ✅ evita refrescos duplicados
     if (inFlightRef.current) return;
     inFlightRef.current = true;
 
-    // corta cualquier carga anterior
     if (abortRef.current) abortRef.current.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -340,17 +357,13 @@ export default function Tcs() {
       await fetchProblemsRange({
         startIso,
         endIso,
+        jurisdiction: "TCS",
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
 
-        // pintamos incremental
         onBatch: (batch) => {
-          for (const x of batch) {
-            if (String(x.jurisdiction || "").toUpperCase() === "TCS") {
-              tcsAccum.push(x);
-            }
-          }
+          for (const x of batch) tcsAccum.push(x);
           setBase([...tcsAccum]);
         },
       });
@@ -366,9 +379,31 @@ export default function Tcs() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
+
+    // ✅ Poll liviano: si cambió algo en BD => recarga
+    const poll = setInterval(async () => {
+      if (inFlightRef.current) return;
+
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "TCS",
+        });
+
+        if (sig && lastSigRef.current && sig !== lastSigRef.current) {
+          await load();
+        }
+
+        if (sig) lastSigRef.current = sig;
+      } catch (e) {
+        // silencioso
+      }
+    }, 15000); // cada 15s (liviano)
+
     return () => {
-      clearInterval(t);
+      clearInterval(poll);
       if (abortRef.current) abortRef.current.abort();
     };
   }, []);
@@ -376,15 +411,15 @@ export default function Tcs() {
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase().trim() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase().trim() === "CLOSED").length;
     return { total: base.length, prod, nprod, open, closed };
   }, [base]);
 
   const visible = useMemo(() => {
     let list = base;
     if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase().trim() === statusFilter);
     return list;
   }, [base, envFilter, statusFilter]);
 
@@ -461,14 +496,13 @@ export default function Tcs() {
   );
 }
 
-
-------
+--------
 
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchLatestSignature, fetchProblemsRange, getLastHoursRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -489,6 +523,8 @@ function Chip({ active, onClick, children, color }) {
 }
 
 export default function OtherProblems() {
+  const OTHER_HOURS_BACK = 1; // ✅ para que "Otros" sea liviano (cambia a 2 si quieres)
+
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -499,6 +535,7 @@ export default function OtherProblems() {
 
   const abortRef = useRef(null);
   const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
 
   const load = async () => {
     if (inFlightRef.current) return;
@@ -512,24 +549,21 @@ export default function OtherProblems() {
     setBase([]);
 
     try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
+      const { startIso, endIso } = getLastHoursRangeIso(OTHER_HOURS_BACK);
 
-      const otrosAccum = [];
+      const otherAccum = [];
 
       await fetchProblemsRange({
         startIso,
         endIso,
-        pageSize: 1000,
-        maxPages: 60,
+        jurisdiction: "OTROS",
+        pageSize: 500,     // OTROS pesado => más chico
+        maxPages: 30,      // OTROS pesado => menos páginas
         signal: controller.signal,
 
         onBatch: (batch) => {
-          for (const x of batch) {
-            if (String(x.jurisdiction || "").toUpperCase() === "OTROS") {
-              otrosAccum.push(x);
-            }
-          }
-          setBase([...otrosAccum]);
+          for (const x of batch) otherAccum.push(x);
+          setBase([...otherAccum]);
         },
       });
     } catch (e) {
@@ -544,9 +578,32 @@ export default function OtherProblems() {
 
   useEffect(() => {
     load();
-    const t = setInterval(load, 60000);
+
+    // ✅ Poll liviano: si cambió algo en BD => recarga
+    const poll = setInterval(async () => {
+      if (inFlightRef.current) return;
+
+      try {
+        const { startIso, endIso } = getLastHoursRangeIso(OTHER_HOURS_BACK);
+
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "OTROS",
+        });
+
+        if (sig && lastSigRef.current && sig !== lastSigRef.current) {
+          await load();
+        }
+
+        if (sig) lastSigRef.current = sig;
+      } catch (e) {
+        // silencioso
+      }
+    }, 20000); // cada 20s
+
     return () => {
-      clearInterval(t);
+      clearInterval(poll);
       if (abortRef.current) abortRef.current.abort();
     };
   }, []);
@@ -554,15 +611,15 @@ export default function OtherProblems() {
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase().trim() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase().trim() === "CLOSED").length;
     return { total: base.length, prod, nprod, open, closed };
   }, [base]);
 
   const visible = useMemo(() => {
     let list = base;
     if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase().trim() === statusFilter);
     return list;
   }, [base, envFilter, statusFilter]);
 
