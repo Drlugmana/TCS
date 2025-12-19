@@ -1,3 +1,5 @@
+
+
 // src/api/problems.js
 
 const API_BASE =
@@ -149,6 +151,82 @@ export default function TCSProblems() {
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1 style={{ textAlign: "center" }}>
         Problemas TCS ({list.length})
+      </h1>
+
+      <div style={{ textAlign: "center", marginBottom: 10 }}>
+        Usuario:{" "}
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+        />
+      </div>
+
+      {loading && <div style={{ textAlign: "center" }}>Cargando...</div>}
+
+      {list.map((p) => (
+        <ProblemCard
+          key={`${p.problemId}-${p.startTime}`}
+          problem={p}
+          username={username}
+        />
+      ))}
+    </div>
+  );
+}
+
+
+------
+
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [list, setList] = useState([]);
+  const [loading, setLoading] = useState(false);
+
+  const abortRef = useRef(null);
+
+  useEffect(() => {
+    const load = async () => {
+      if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setLoading(true);
+      setList([]);
+
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+      const acc = [];
+
+      try {
+        await fetchProblemsRange({
+          startIso,
+          endIso,
+          jurisdiction: "OTROS",
+          pageSize: 200,
+          signal: controller.signal,
+          onBatch: (batch) => {
+            acc.push(...batch);
+            setList([...acc]);
+          },
+        });
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    load();
+    return () => abortRef.current?.abort();
+  }, []);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center" }}>
+        Otros Problemas ({list.length})
       </h1>
 
       <div style={{ textAlign: "center", marginBottom: 10 }}>
