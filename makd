@@ -1,47 +1,33 @@
 // src/api/problems.js
 
-// ✅ Vite: usa import.meta.env (NO process.env)
 const API_BASE =
   (import.meta?.env?.VITE_API_BASE_URL || "").trim() ||
-  "https://localhost:44334"; // <-- tu backend (según Swagger)
+  "https://localhost:44334"; // backend según Swagger
 
-// ✅ Endpoint real que ya estás usando en Network: /Problems
-// (si tu backend lo tiene como /api/Problems, cámbialo aquí)
+// ⚠️ CAMBIA SOLO SI TU SWAGGER USA /api/Problems
 const PROBLEMS_PATH = "/Problems";
 
+// =========================
+// Helpers
+// =========================
 function buildUrl(path, params = {}) {
   const url = new URL(API_BASE + path);
-
   Object.entries(params).forEach(([k, v]) => {
     if (v === undefined || v === null || v === "") return;
     url.searchParams.set(k, String(v));
   });
-
   return url.toString();
-}
-
-// ✅ Rango: desde AYER 00:00:00 hasta AHORA
-export function getYesterdayToNowRangeIso() {
-  const now = new Date();
-  const start = new Date(now);
-  start.setDate(now.getDate() - 1);
-  start.setHours(0, 0, 0, 0);
-
-  return { startIso: start.toISOString(), endIso: now.toISOString() };
 }
 
 async function fetchJson(url, { signal } = {}) {
   const res = await fetch(url, { method: "GET", signal });
-
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
     throw new Error(`HTTP ${res.status} ${res.statusText} - ${txt}`);
   }
-
   return res.json();
 }
 
-// ✅ Normaliza respuesta (por si backend devuelve {items:[]} o directamente [])
 function normalizeList(data) {
   if (Array.isArray(data)) return data;
   if (Array.isArray(data?.items)) return data.items;
@@ -49,19 +35,34 @@ function normalizeList(data) {
   return [];
 }
 
-// ✅ 1 página
+// =========================
+// Rango fechas (IGUAL a tu SQL)
+// =========================
+export function getYesterdayToNowRangeIso() {
+  const now = new Date();
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
+  start.setHours(0, 0, 0, 0);
+  return {
+    startIso: start.toISOString(),
+    endIso: now.toISOString(),
+  };
+}
+
+// =========================
+// Fetch paginado
+// =========================
 export async function fetchProblemsPage({
   pageNumber = 1,
   pageSize = 200,
   startIso,
   endIso,
-  jurisdiction, // "TCS" | "OTROS" | null
+  jurisdiction,
   signal,
 }) {
   const url = buildUrl(PROBLEMS_PATH, {
     pageNumber,
     pageSize,
-    // ✅ estos son los parámetros que se ven en tu Network: start / end
     start: startIso,
     end: endIso,
     jurisdiction,
@@ -71,19 +72,18 @@ export async function fetchProblemsPage({
   return normalizeList(data);
 }
 
-// ✅ Traer varias páginas acumulando (sin romper UI)
 export async function fetchProblemsRange({
   startIso,
   endIso,
   jurisdiction,
   pageSize = 200,
-  maxPages = 60,
+  maxPages = 50,
   signal,
   onBatch,
 }) {
-  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber++) {
+  for (let page = 1; page <= maxPages; page++) {
     const batch = await fetchProblemsPage({
-      pageNumber,
+      pageNumber: page,
       pageSize,
       startIso,
       endIso,
@@ -93,365 +93,81 @@ export async function fetchProblemsRange({
 
     if (onBatch) onBatch(batch);
 
-    // ✅ Si no hay más datos, corta
     if (!batch || batch.length === 0) break;
-
-    // ✅ Si vino menos que pageSize, ya no hay más páginas
     if (batch.length < pageSize) break;
   }
 }
 
----------
+----
 
 // src/pages/TCSProblems.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
 
 export default function TCSProblems() {
   const [username, setUsername] = useState("");
+  const [list, setList] = useState([]);
   const [loading, setLoading] = useState(false);
 
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
   const abortRef = useRef(null);
-  const inFlightRef = useRef(false);
-
-  const load = async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
-
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const allAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        jurisdiction: "TCS",
-        pageSize: 200,
-        maxPages: 60,
-        signal: controller.signal,
-        onBatch: (batch) => {
-          for (const x of batch) allAccum.push(x);
-          setBase([...allAccum]);
-        },
-      });
-    } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
-    } finally {
-      setLoading(false);
-      inFlightRef.current = false;
-    }
-  };
 
   useEffect(() => {
-    load();
-
-    // ✅ refresca cada 30s SIN /latest (evita 404)
-    const t = setInterval(() => {
-      load();
-    }, 30000);
-
-    return () => {
-      clearInterval(t);
+    const load = async () => {
       if (abortRef.current) abortRef.current.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      setLoading(true);
+      setList([]);
+
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+      const acc = [];
+
+      try {
+        await fetchProblemsRange({
+          startIso,
+          endIso,
+          jurisdiction: "TCS",
+          pageSize: 200,
+          signal: controller.signal,
+          onBatch: (batch) => {
+            acc.push(...batch);
+            setList([...acc]);
+          },
+        });
+      } finally {
+        setLoading(false);
+      }
     };
+
+    load();
+    return () => abortRef.current?.abort();
   }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas TCS ({counts.total})
+      <h1 style={{ textAlign: "center" }}>
+        Problemas TCS ({list.length})
       </h1>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
+      <div style={{ textAlign: "center", marginBottom: 10 }}>
+        Usuario:{" "}
         <input
           value={username}
           onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
         />
       </div>
 
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
+      {loading && <div style={{ textAlign: "center" }}>Cargando...</div>}
 
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
+      {list.map((p) => (
+        <ProblemCard
+          key={`${p.problemId}-${p.startTime}`}
+          problem={p}
+          username={username}
+        />
       ))}
     </div>
   );
 }
-
--------
-
-// src/pages/OtherProblems.jsx
-import React, { useEffect, useMemo, useRef, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
-
-function Chip({ active, onClick, children, color }) {
-  return (
-    <button
-      onClick={onClick}
-      style={{
-        border: "1px solid rgba(0,0,0,.12)",
-        background: active ? (color || "#e5e7eb") : "#f3f4f6",
-        padding: "6px 12px",
-        borderRadius: "999px",
-        cursor: "pointer",
-        fontWeight: 700,
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-export default function OtherProblems() {
-  const [username, setUsername] = useState("");
-  const [loading, setLoading] = useState(false);
-
-  const [base, setBase] = useState([]);
-
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
-
-  const abortRef = useRef(null);
-  const inFlightRef = useRef(false);
-
-  const load = async () => {
-    if (inFlightRef.current) return;
-    inFlightRef.current = true;
-
-    if (abortRef.current) abortRef.current.abort();
-    const controller = new AbortController();
-    abortRef.current = controller;
-
-    setLoading(true);
-
-    try {
-      const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-      const allAccum = [];
-
-      await fetchProblemsRange({
-        startIso,
-        endIso,
-        jurisdiction: "OTROS",
-        pageSize: 200,
-        maxPages: 60,
-        signal: controller.signal,
-        onBatch: (batch) => {
-          for (const x of batch) allAccum.push(x);
-          setBase([...allAccum]);
-        },
-      });
-    } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
-    } finally {
-      setLoading(false);
-      inFlightRef.current = false;
-    }
-  };
-
-  useEffect(() => {
-    load();
-
-    const t = setInterval(() => {
-      load();
-    }, 30000);
-
-    return () => {
-      clearInterval(t);
-      if (abortRef.current) abortRef.current.abort();
-    };
-  }, []);
-
-  const counts = useMemo(() => {
-    const prod = base.filter((x) => x.environment === "Productivo").length;
-    const nprod = base.filter((x) => x.environment === "No Productivo").length;
-    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
-    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-    return { total: base.length, prod, nprod, open, closed };
-  }, [base]);
-
-  const visible = useMemo(() => {
-    let list = base;
-    if (envFilter) list = list.filter((x) => x.environment === envFilter);
-    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
-    return list;
-  }, [base, envFilter, statusFilter]);
-
-  return (
-    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas OTROS ({counts.total})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
-        <div style={{ fontWeight: 700 }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
-          placeholder="Tu usuario"
-        />
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
-        <Chip
-          active={envFilter === "Productivo"}
-          color="#93c5fd"
-          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
-        >
-          Productivo ({counts.prod})
-        </Chip>
-
-        <Chip
-          active={envFilter === "No Productivo"}
-          color="#e5e7eb"
-          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
-        >
-          No Productivo ({counts.nprod})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "OPEN"}
-          color="#fde68a"
-          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
-        >
-          Abiertas ({counts.open})
-        </Chip>
-
-        <Chip
-          active={statusFilter === "CLOSED"}
-          color="#86efac"
-          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
-        >
-          Cerradas ({counts.closed})
-        </Chip>
-
-        <Chip
-          active={!envFilter && !statusFilter}
-          onClick={() => {
-            setEnvFilter(null);
-            setStatusFilter(null);
-          }}
-        >
-          Todos
-        </Chip>
-      </div>
-
-      {loading && (
-        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
-          Cargando problemas...
-        </div>
-      )}
-
-      {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
-      ))}
-    </div>
-  );
-}
-
--------
-
-
