@@ -1,159 +1,86 @@
 // src/api/problems.js
 
-// ✅ VITE: aquí NO existe process.env
-const BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
+// ✅ Vite usa import.meta.env (NO process.env)
+const API_BASE =
+  import.meta.env.VITE_API_BASE_URL ||
+  "https://localhost:44334/api"; // tu Swagger está en 44334
 
-function buildUrl(path, params = {}) {
-  const url = new URL(`${BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`);
-  Object.entries(params).forEach(([k, v]) => {
-    if (v === null || v === undefined || v === "") return;
-    url.searchParams.set(k, String(v));
-  });
-  return url.toString();
-}
-
-// ISO local SIN "Z" (para que se parezca a tu query de SQL Server)
-function toLocalIsoNoZ(d) {
-  const pad = (n) => String(n).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const mm = pad(d.getMonth() + 1);
-  const dd = pad(d.getDate());
-  const hh = pad(d.getHours());
-  const mi = pad(d.getMinutes());
-  const ss = pad(d.getSeconds());
-  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
-}
-
-// ✅ Igual que tu SQL:
-// StartTime >= CONVERT(DATE, GETDATE()-1)  (ayer 00:00)
-// StartTime < GETDATE()                   (ahora)
+// 🔹 Rango EXACTO como tu SQL:
+// StartTime >= CONVERT(date, GETDATE()-1)  (ayer 00:00)
+// StartTime < GETDATE()                   (hasta ahora)
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
-  const start = new Date(now);
+  const start = new Date();
   start.setDate(start.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
-  return {
-    startIso: toLocalIsoNoZ(start),
-    endIso: toLocalIsoNoZ(now),
-  };
+  return { startIso: start.toISOString(), endIso: now.toISOString() };
 }
 
-// Lee JSON de forma segura (para no reventar si el backend devuelve texto)
-async function safeJson(res) {
-  const text = await res.text();
-  try {
-    return JSON.parse(text);
-  } catch {
-    return text;
-  }
-}
-
-/**
- * Trae problemas paginados y los va acumulando.
- * Espera backend tipo:
- *   GET /Problems?pageNumber=1&pageSize=200&start=...&end=...&jurisdiction=TCS
- */
+// 🔹 Trae problemas con paginación
+// ✅ NO inventa filtros; solo aplica lo que le pases.
 export async function fetchProblemsRange({
   startIso,
   endIso,
   jurisdiction = null,
+  status = null, // "OPEN" si quieres igual que SQL
+  environment = null, // "Productivo" / "No Productivo" opcional
   pageSize = 200,
   maxPages = 60,
   signal,
   onBatch,
 }) {
-  if (!BASE_URL) throw new Error("VITE_API_BASE_URL no está configurado.");
-
   let pageNumber = 1;
 
-  for (let i = 0; i < maxPages; i++) {
-    const url = buildUrl("/Problems", {
-      pageNumber,
-      pageSize,
-      start: startIso,
-      end: endIso,
-      jurisdiction: jurisdiction,
-    });
+  while (pageNumber <= maxPages) {
+    const url = new URL(`${API_BASE}/Problems`);
+    url.searchParams.set("pageNumber", String(pageNumber));
+    url.searchParams.set("pageSize", String(pageSize));
+    url.searchParams.set("startTime", startIso);
+    url.searchParams.set("endTime", endIso);
 
-    const res = await fetch(url, { signal });
+    // ✅ filtros como tu BD
+    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
+    if (status) url.searchParams.set("status", status);
+    if (environment) url.searchParams.set("environment", environment);
+
+    const res = await fetch(url.toString(), { signal });
 
     if (!res.ok) {
-      const body = await safeJson(res);
-      throw new Error(`HTTP ${res.status} en /Problems: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+      // Para que veas el error exacto (404/500)
+      const text = await res.text().catch(() => "");
+      throw new Error(`HTTP ${res.status} ${res.statusText} - ${text}`);
     }
 
     const data = await res.json();
 
-    // Soporta varios formatos: array directo o { items: [...] } o { data: [...] }
-    const batch =
-      Array.isArray(data) ? data :
-      Array.isArray(data?.items) ? data.items :
-      Array.isArray(data?.data) ? data.data :
-      [];
-
-    if (typeof onBatch === "function") onBatch(batch);
+    // backend puede devolver array directo o {items:[]}
+    const batch = Array.isArray(data) ? data : data?.items || [];
 
     if (!batch.length) break;
-    if (batch.length < pageSize) break;
+
+    if (typeof onBatch === "function") onBatch(batch);
 
     pageNumber++;
   }
 }
 
-/**
- * Firma para polling (si tu backend la tiene).
- * Si NO existe el endpoint, devuelve null y NO rompe nada.
- */
-export async function fetchLatestSignature({ startIso, endIso, jurisdiction = null }) {
-  if (!BASE_URL) return null;
+// ✅ Firma para polling (para que NO te salga el error de export)
+export async function fetchLatestSignature({ startIso, endIso, jurisdiction }) {
+  const url = new URL(`${API_BASE}/Problems/latest`);
+  url.searchParams.set("startTime", startIso);
+  url.searchParams.set("endTime", endIso);
+  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
 
-  // Intento 1: /Problems/latest-signature
-  try {
-    const url = buildUrl("/Problems/latest-signature", {
-      start: startIso,
-      end: endIso,
-      jurisdiction,
-    });
-    const res = await fetch(url);
-    if (res.ok) {
-      const data = await res.json();
-      return data?.signature || data?.sig || data?.value || null;
-    }
-  } catch {}
+  const res = await fetch(url.toString());
+  if (!res.ok) return null;
 
-  // Intento 2: fallback: lee la primera página y arma una firma simple
-  try {
-    const url = buildUrl("/Problems", {
-      pageNumber: 1,
-      pageSize: 1,
-      start: startIso,
-      end: endIso,
-      jurisdiction,
-    });
-    const res = await fetch(url);
-    if (!res.ok) return null;
-
-    const data = await res.json();
-    const first =
-      Array.isArray(data) ? data[0] :
-      Array.isArray(data?.items) ? data.items[0] :
-      Array.isArray(data?.data) ? data.data[0] :
-      null;
-
-    if (!first) return null;
-
-    const pid = first.problemId || first.pid || first.displayId || "";
-    const st = first.startTime || first.StartTime || "";
-    const status = first.status || first.Status || "";
-    return `${pid}|${st}|${status}`;
-  } catch {
-    return null;
-  }
+  const data = await res.json().catch(() => null);
+  return data?.signature || null;
 }
 
------
 
+-------1
 
 // src/pages/TCSProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -184,8 +111,8 @@ export default function TCSProblems() {
 
   const [base, setBase] = useState([]);
 
-  const [envFilter, setEnvFilter] = useState(null);
-  const [statusFilter, setStatusFilter] = useState(null);
+  const [envFilter, setEnvFilter] = useState(null); // Productivo / No Productivo
+  const [statusFilter, setStatusFilter] = useState(null); // OPEN / CLOSED
 
   const abortRef = useRef(null);
   const inFlightRef = useRef(false);
@@ -209,19 +136,23 @@ export default function TCSProblems() {
       await fetchProblemsRange({
         startIso,
         endIso,
+
+        // ✅ MISMO filtro de tu SQL
         jurisdiction: "TCS",
+        status: "OPEN",
+
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
 
         onBatch: (batch) => {
-          for (const x of batch) allAccum.push(x);
+          allAccum.push(...batch);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
+        console.error("ERROR load TCS:", e);
       }
     } finally {
       setLoading(false);
@@ -339,15 +270,15 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime || p.StartTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
------
+------
 
-// src/pages/Otherproblems.jsx
+// src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
@@ -370,7 +301,7 @@ function Chip({ active, onClick, children, color }) {
   );
 }
 
-export default function Otherproblems() {
+export default function OtherProblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -401,19 +332,23 @@ export default function Otherproblems() {
       await fetchProblemsRange({
         startIso,
         endIso,
+
+        // ✅ OTROS
         jurisdiction: "OTROS",
+        status: "OPEN",
+
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
 
         onBatch: (batch) => {
-          for (const x of batch) allAccum.push(x);
+          allAccum.push(...batch);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
+        console.error("ERROR load OTROS:", e);
       }
     } finally {
       setLoading(false);
@@ -467,7 +402,7 @@ export default function Otherproblems() {
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas Otros ({counts.total})
+        Problemas OTROS ({counts.total})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
@@ -531,14 +466,13 @@ export default function Otherproblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime || p.StartTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
-------
-
+-------
 
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -639,13 +573,11 @@ export default function ProblemCard({ problem, username }) {
 
   const isDisabled = !username;
   const tenant = problem?.tenant || "";
+  const problemId = problem?.problemId || problem?.displayId || "";
 
-  // ✅ Dynatrace normalmente usa pid=problemId (si tu backend lo trae).
-  // Fallback: displayId (P-xxxx) si no viene problemId.
-  const pid = problem?.problemId || problem?.pid || problem?.displayId || "";
-
-  const dynatraceUrl =
-    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${pid}` : "#";
+  const dynatraceUrl = tenant && problemId
+    ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
+    : "#";
 
   const environment = problem?.environment || "";
 
@@ -734,7 +666,9 @@ export default function ProblemCard({ problem, username }) {
 
       {/* DERECHA: TIMER + BOTÓN */}
       <div style={{ textAlign: "center", minWidth: "160px" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>{formatTime(remainingMinutes)}</div>
+        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
+          {formatTime(remainingMinutes)}
+        </div>
 
         <button
           disabled={isDisabled || dynatraceUrl === "#"}
@@ -745,7 +679,11 @@ export default function ProblemCard({ problem, username }) {
             fontSize: ".9rem",
             fontWeight: "bold",
             color: "#fff",
-            backgroundColor: isDisabled ? "#b0b0b0" : status === "CLOSED" ? "#6b7280" : buttonColor,
+            backgroundColor: isDisabled
+              ? "#b0b0b0"
+              : status === "CLOSED"
+              ? "#6b7280"
+              : buttonColor,
             border: "none",
             borderRadius: "8px",
             cursor: isDisabled ? "not-allowed" : "pointer",
