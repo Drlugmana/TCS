@@ -43,8 +43,10 @@ function parseDateToISO(v) {
 
   if (typeof v === "string") {
     let s = v.trim();
+
     // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
     if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
+
     const d = new Date(s);
     return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
@@ -140,6 +142,7 @@ export function getYesterdayToNowRangeIso() {
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
+
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
@@ -184,6 +187,7 @@ export async function fetchProblemsRange({
   let all = [];
   const seen = new Set();
 
+  // Filtrado por rango en cliente (por si backend ignora start/end)
   const startMs = startIso ? new Date(startIso).getTime() : null;
   const endMs = endIso ? new Date(endIso).getTime() : null;
 
@@ -194,6 +198,7 @@ export async function fetchProblemsRange({
 
     if (!batch.length) break;
 
+    // filtro rango
     const inRange = batch.filter((x) => {
       const t = x.startTime ? new Date(x.startTime).getTime() : null;
       if (!t || !Number.isFinite(t)) return true;
@@ -214,10 +219,13 @@ export async function fetchProblemsRange({
 
     if (onBatch) onBatch(inRange, page);
 
+    // si 3 páginas seguidas no agregan nuevos, cortamos
     if (newCount === 0) noNewStreak++;
     else noNewStreak = 0;
 
     if (noNewStreak >= 3) break;
+
+    // si backend pagina bien, última página suele venir < pageSize
     if (batch.length < pageSize) break;
   }
 
@@ -234,6 +242,8 @@ export async function fetchProblemsRange({
  * ✅ LIGERO:
  * Trae una “firma” del último registro del rango para saber si cambió algo en BD.
  * Si la firma cambia => el Front refresca.
+ *
+ * IMPORTANTE: aquí filtramos usando el campo YA NORMALIZADO: x.jurisdiction === "TCS" / "OTROS"
  */
 export async function fetchLatestSignature({
   startIso,
@@ -244,11 +254,9 @@ export async function fetchLatestSignature({
   // pedimos poco (para NO traer 10k)
   const batch = await fetchPage({ pageNumber: 1, pageSize: 50, startIso, endIso, signal });
 
-  const target = (jurisdiction || "").toUpperCase().trim();
-
-  // nos quedamos con el más nuevo del target
+  // OJO: batch ya viene normalizado => jurisdiction será "TCS" o "OTROS"
   const filtered = batch
-    .filter((x) => String(x.jurisdiction || "").toUpperCase() === target)
+    .filter((x) => x.jurisdiction === jurisdiction)
     .sort((a, b) => {
       const da = a.startTime ? new Date(a.startTime).getTime() : 0;
       const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -263,7 +271,8 @@ export async function fetchLatestSignature({
 }
 
 
---------
+-------
+
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -299,11 +308,11 @@ export default function Tcs() {
 
   const abortRef = useRef(null);
 
-  // ✅ NUEVO: evita refrescos duplicados
+  // ✅ evita refrescos duplicados
   const inFlightRef = useRef(false);
 
   const load = async () => {
-    // ✅ Si ya está cargando, NO vuelvas a lanzar otra carga (evita “refrescar” otra vez)
+    // ✅ Si ya está cargando, NO vuelvas a lanzar otra carga
     if (inFlightRef.current) return;
     inFlightRef.current = true;
 
@@ -313,6 +322,7 @@ export default function Tcs() {
     abortRef.current = controller;
 
     setLoading(true);
+    setBase([]); // igual que tu versión anterior (no mezcla cargas)
 
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
@@ -322,14 +332,18 @@ export default function Tcs() {
       await fetchProblemsRange({
         startIso,
         endIso,
-        jurisdiction: "TCS",
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
 
         // pintamos incremental (igual que antes)
         onBatch: (batch) => {
-          for (const x of batch) tcsAccum.push(x);
+          for (const x of batch) {
+            // ✅ CLAVE: jurisdiction YA VIENE NORMALIZADO => "TCS" / "OTROS"
+            if (x.jurisdiction === "TCS") {
+              tcsAccum.push(x);
+            }
+          }
           setBase([...tcsAccum]);
         },
       });
@@ -346,7 +360,7 @@ export default function Tcs() {
   useEffect(() => {
     load();
 
-    // ✅ Auto refresh, pero sin duplicar cargas (gracias a inFlightRef)
+    // Auto refresh (sin duplicar gracias a inFlightRef)
     const t = setInterval(load, 60000);
 
     return () => {
@@ -386,15 +400,7 @@ export default function Tcs() {
         />
       </div>
 
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          gap: "10px",
-          flexWrap: "wrap",
-          marginBottom: "18px",
-        }}
-      >
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
         <Chip
           active={envFilter === "Productivo"}
           color="#93c5fd"
@@ -450,3 +456,4 @@ export default function Tcs() {
     </div>
   );
 }
+
