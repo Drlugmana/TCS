@@ -1,213 +1,159 @@
 // src/api/problems.js
 
-const BASE_URL =
-  import.meta?.env?.VITE_API_BASE_URL ||
-  process.env?.REACT_APP_API_BASE_URL ||
-  "";
+// ✅ VITE: aquí NO existe process.env
+const BASE_URL = (import.meta.env.VITE_API_BASE_URL || "").replace(/\/$/, "");
 
-function qs(obj) {
-  const p = new URLSearchParams();
-  Object.entries(obj || {}).forEach(([k, v]) => {
-    if (v === undefined || v === null || v === "") return;
-    p.append(k, String(v));
+function buildUrl(path, params = {}) {
+  const url = new URL(`${BASE_URL}${path.startsWith("/") ? "" : "/"}${path}`);
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === null || v === undefined || v === "") return;
+    url.searchParams.set(k, String(v));
   });
-  return p.toString();
+  return url.toString();
 }
 
-// ============================
-// RANGO "AYER 00:00" -> AHORA
-// (equivalente a tu SQL):
-// StartTime >= CONVERT(DATE, GETDATE()-1)
-// StartTime < GETDATE()
-// ============================
+// ISO local SIN "Z" (para que se parezca a tu query de SQL Server)
+function toLocalIsoNoZ(d) {
+  const pad = (n) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  const ss = pad(d.getSeconds());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}:${ss}`;
+}
+
+// ✅ Igual que tu SQL:
+// StartTime >= CONVERT(DATE, GETDATE()-1)  (ayer 00:00)
+// StartTime < GETDATE()                   (ahora)
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
-
-  // ayer a las 00:00:00 (hora local)
   const start = new Date(now);
-  start.setDate(now.getDate() - 1);
+  start.setDate(start.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
-  // fin = ahora
-  const end = now;
-
-  // IMPORTANTE: mandamos formato ISO sin "Z" para evitar desfases por UTC
-  const toLocalIsoNoZ = (d) => {
-    const pad = (n) => String(n).padStart(2, "0");
-    return (
-      d.getFullYear() +
-      "-" +
-      pad(d.getMonth() + 1) +
-      "-" +
-      pad(d.getDate()) +
-      "T" +
-      pad(d.getHours()) +
-      ":" +
-      pad(d.getMinutes()) +
-      ":" +
-      pad(d.getSeconds())
-    );
-  };
-
-  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(end) };
-}
-
-function normalizeEnvironment(raw) {
-  const v = String(raw ?? "").trim();
-  if (!v) return "";
-  // tu BD/servicio a veces manda "NoProductivo" (sin espacio)
-  if (v.toLowerCase() === "noproductivo") return "No Productivo";
-  if (v.toLowerCase() === "no productivo") return "No Productivo";
-  if (v.toLowerCase() === "productivo") return "Productivo";
-  return v;
-}
-
-function normalizeStatus(raw, endTime) {
-  const s = String(raw ?? "").trim().toUpperCase();
-  if (s.includes("OPEN")) return "OPEN";
-  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
-  // fallback solo si no vino status
-  return endTime ? "CLOSED" : "OPEN";
-}
-
-function normalizeProblem(p) {
-  const problemId = p?.problemId ?? p?.ProblemId ?? p?.id ?? p?.Id ?? "";
-  const displayId = p?.displayId ?? p?.DisplayId ?? p?.problemDisplayId ?? p?.ProblemDisplayId ?? "";
-  const title = p?.title ?? p?.Title ?? "";
-  const impactLevel = p?.impactLevel ?? p?.ImpactLevel ?? "";
-  const severityLevel = p?.severityLevel ?? p?.SeverityLevel ?? "";
-  const startTime = p?.startTime ?? p?.StartTime ?? "";
-  const endTime = p?.endTime ?? p?.EndTime ?? null;
-  const tenant = p?.tenant ?? p?.Tenant ?? "";
-  const jurisdiction = p?.jurisdiction ?? p?.Jurisdiction ?? "";
-  const environment = normalizeEnvironment(p?.environment ?? p?.Environment ?? "");
-
-  const rawStatus = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.ProblemStatus ?? p?.problemState ?? p?.ProblemState ?? "";
-  const status = normalizeStatus(rawStatus, endTime);
-
-  // affectedCI: tolera varias formas
-  const affectedCI =
-    Array.isArray(p?.affectedCI) ? p.affectedCI :
-    Array.isArray(p?.AffectedCI) ? p.AffectedCI :
-    Array.isArray(p?.affectedCi) ? p.affectedCi :
-    [];
-
   return {
-    ...p,
-    problemId,
-    displayId,
-    title,
-    impactLevel,
-    severityLevel,
-    startTime,
-    endTime,
-    tenant,
-    jurisdiction,
-    environment,
-    status,
-    affectedCI,
+    startIso: toLocalIsoNoZ(start),
+    endIso: toLocalIsoNoZ(now),
   };
 }
 
-async function httpGetJson(url, { signal } = {}) {
-  const res = await fetch(url, { signal });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} - ${text}`);
+// Lee JSON de forma segura (para no reventar si el backend devuelve texto)
+async function safeJson(res) {
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
-  return res.json();
 }
 
-// =====================================================
-// LEE PAGINADO: /Problems?pageNumber=1&pageSize=200&...
-// =====================================================
+/**
+ * Trae problemas paginados y los va acumulando.
+ * Espera backend tipo:
+ *   GET /Problems?pageNumber=1&pageSize=200&start=...&end=...&jurisdiction=TCS
+ */
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction, // "TCS" | "OTROS" | null
+  jurisdiction = null,
   pageSize = 200,
   maxPages = 60,
   signal,
   onBatch,
 }) {
-  // endpoint base (tu backend normalmente expone /Problems)
-  const endpoint = `${BASE_URL}/Problems`;
+  if (!BASE_URL) throw new Error("VITE_API_BASE_URL no está configurado.");
 
   let pageNumber = 1;
 
   for (let i = 0; i < maxPages; i++) {
-    const url =
-      endpoint +
-      "?" +
-      qs({
-        pageNumber,
-        pageSize,
-        start: startIso,
-        end: endIso,
-        jurisdiction: jurisdiction || undefined,
-      });
+    const url = buildUrl("/Problems", {
+      pageNumber,
+      pageSize,
+      start: startIso,
+      end: endIso,
+      jurisdiction: jurisdiction,
+    });
 
-    const data = await httpGetJson(url, { signal });
+    const res = await fetch(url, { signal });
 
-    // soporta backends que devuelven array directo o { items: [] } o { data: [] }
-    const itemsRaw =
+    if (!res.ok) {
+      const body = await safeJson(res);
+      throw new Error(`HTTP ${res.status} en /Problems: ${typeof body === "string" ? body : JSON.stringify(body)}`);
+    }
+
+    const data = await res.json();
+
+    // Soporta varios formatos: array directo o { items: [...] } o { data: [...] }
+    const batch =
       Array.isArray(data) ? data :
       Array.isArray(data?.items) ? data.items :
       Array.isArray(data?.data) ? data.data :
-      Array.isArray(data?.results) ? data.results :
       [];
 
-    const items = itemsRaw.map(normalizeProblem);
+    if (typeof onBatch === "function") onBatch(batch);
 
-    if (typeof onBatch === "function") onBatch(items);
-
-    // si ya no hay más, paramos
-    if (!itemsRaw || itemsRaw.length === 0) break;
-    if (itemsRaw.length < pageSize) break;
+    if (!batch.length) break;
+    if (batch.length < pageSize) break;
 
     pageNumber++;
   }
 }
 
-// =====================================================
-// FIRMA: para polling (sin cambiar tu UI)
-// Toma el más reciente (page 1 size 1) y arma una firma
-// =====================================================
-export async function fetchLatestSignature({ startIso, endIso, jurisdiction }) {
-  const endpoint = `${BASE_URL}/Problems`;
+/**
+ * Firma para polling (si tu backend la tiene).
+ * Si NO existe el endpoint, devuelve null y NO rompe nada.
+ */
+export async function fetchLatestSignature({ startIso, endIso, jurisdiction = null }) {
+  if (!BASE_URL) return null;
 
-  const url =
-    endpoint +
-    "?" +
-    qs({
+  // Intento 1: /Problems/latest-signature
+  try {
+    const url = buildUrl("/Problems/latest-signature", {
+      start: startIso,
+      end: endIso,
+      jurisdiction,
+    });
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      return data?.signature || data?.sig || data?.value || null;
+    }
+  } catch {}
+
+  // Intento 2: fallback: lee la primera página y arma una firma simple
+  try {
+    const url = buildUrl("/Problems", {
       pageNumber: 1,
       pageSize: 1,
       start: startIso,
       end: endIso,
-      jurisdiction: jurisdiction || undefined,
+      jurisdiction,
     });
+    const res = await fetch(url);
+    if (!res.ok) return null;
 
-  try {
-    const data = await httpGetJson(url);
-    const itemsRaw =
-      Array.isArray(data) ? data :
-      Array.isArray(data?.items) ? data.items :
-      Array.isArray(data?.data) ? data.data :
-      Array.isArray(data?.results) ? data.results :
-      [];
+    const data = await res.json();
+    const first =
+      Array.isArray(data) ? data[0] :
+      Array.isArray(data?.items) ? data.items[0] :
+      Array.isArray(data?.data) ? data.data[0] :
+      null;
 
-    const first = itemsRaw?.[0] ? normalizeProblem(itemsRaw[0]) : null;
     if (!first) return null;
 
-    // firma simple pero estable
-    return `${first.problemId || ""}|${first.displayId || ""}|${first.startTime || ""}|${first.status || ""}`;
-  } catch (e) {
+    const pid = first.problemId || first.pid || first.displayId || "";
+    const st = first.startTime || first.StartTime || "";
+    const status = first.status || first.Status || "";
+    return `${pid}|${st}|${status}`;
+  } catch {
     return null;
   }
 }
 
+-----
 
---------
 
 // src/pages/TCSProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -393,15 +339,15 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime || p.StartTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
--------
+-----
 
-// src/pages/OtherProblems.jsx
+// src/pages/Otherproblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
@@ -424,7 +370,7 @@ function Chip({ active, onClick, children, color }) {
   );
 }
 
-export default function OtherProblems() {
+export default function Otherproblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -585,12 +531,11 @@ export default function OtherProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime || p.StartTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
-
 
 ------
 
@@ -622,7 +567,7 @@ function towerToIconPath(towerKey) {
   if (!towerKey) return null;
   const key = String(towerKey).toLowerCase();
 
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wintel1.svg";
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
   if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
     return "/icons/towers/Base.svg";
   if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
@@ -694,7 +639,10 @@ export default function ProblemCard({ problem, username }) {
 
   const isDisabled = !username;
   const tenant = problem?.tenant || "";
-  const pid = problem?.displayId || problem?.problemId || "";
+
+  // ✅ Dynatrace normalmente usa pid=problemId (si tu backend lo trae).
+  // Fallback: displayId (P-xxxx) si no viene problemId.
+  const pid = problem?.problemId || problem?.pid || problem?.displayId || "";
 
   const dynatraceUrl =
     tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${pid}` : "#";
