@@ -1,0 +1,193 @@
+// src/pages/AllProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function AllProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: null,
+        pageSize: 1000,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // firma “general”: miramos TCS primero; si no hay, OTROS
+        const sigTcs = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
+        const sigOtros = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
+        const sig = sigTcs || sigOtros || null;
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas (Todos) ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
