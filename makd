@@ -1,91 +1,112 @@
 // src/api/problems.js
 
-// ✅ Vite usa import.meta.env (NO process.env)
+// ✅ Vite: usa import.meta.env (NO process.env)
 const API_BASE =
-  import.meta.env.VITE_API_BASE_URL ||
-  "https://localhost:44334/api"; // tu Swagger está en 44334
+  (import.meta?.env?.VITE_API_BASE_URL || "").trim() ||
+  "https://localhost:44334"; // <-- tu backend (según Swagger)
 
-// 🔹 Rango EXACTO como tu SQL:
-// StartTime >= CONVERT(date, GETDATE()-1)  (ayer 00:00)
-// StartTime < GETDATE()                   (hasta ahora)
+// ✅ Endpoint real que ya estás usando en Network: /Problems
+// (si tu backend lo tiene como /api/Problems, cámbialo aquí)
+const PROBLEMS_PATH = "/Problems";
+
+function buildUrl(path, params = {}) {
+  const url = new URL(API_BASE + path);
+
+  Object.entries(params).forEach(([k, v]) => {
+    if (v === undefined || v === null || v === "") return;
+    url.searchParams.set(k, String(v));
+  });
+
+  return url.toString();
+}
+
+// ✅ Rango: desde AYER 00:00:00 hasta AHORA
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
-  const start = new Date();
-  start.setDate(start.getDate() - 1);
+  const start = new Date(now);
+  start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
   return { startIso: start.toISOString(), endIso: now.toISOString() };
 }
 
-// 🔹 Trae problemas con paginación
-// ✅ NO inventa filtros; solo aplica lo que le pases.
+async function fetchJson(url, { signal } = {}) {
+  const res = await fetch(url, { method: "GET", signal });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} - ${txt}`);
+  }
+
+  return res.json();
+}
+
+// ✅ Normaliza respuesta (por si backend devuelve {items:[]} o directamente [])
+function normalizeList(data) {
+  if (Array.isArray(data)) return data;
+  if (Array.isArray(data?.items)) return data.items;
+  if (Array.isArray(data?.data)) return data.data;
+  return [];
+}
+
+// ✅ 1 página
+export async function fetchProblemsPage({
+  pageNumber = 1,
+  pageSize = 200,
+  startIso,
+  endIso,
+  jurisdiction, // "TCS" | "OTROS" | null
+  signal,
+}) {
+  const url = buildUrl(PROBLEMS_PATH, {
+    pageNumber,
+    pageSize,
+    // ✅ estos son los parámetros que se ven en tu Network: start / end
+    start: startIso,
+    end: endIso,
+    jurisdiction,
+  });
+
+  const data = await fetchJson(url, { signal });
+  return normalizeList(data);
+}
+
+// ✅ Traer varias páginas acumulando (sin romper UI)
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction = null,
-  status = null, // "OPEN" si quieres igual que SQL
-  environment = null, // "Productivo" / "No Productivo" opcional
+  jurisdiction,
   pageSize = 200,
   maxPages = 60,
   signal,
   onBatch,
 }) {
-  let pageNumber = 1;
+  for (let pageNumber = 1; pageNumber <= maxPages; pageNumber++) {
+    const batch = await fetchProblemsPage({
+      pageNumber,
+      pageSize,
+      startIso,
+      endIso,
+      jurisdiction,
+      signal,
+    });
 
-  while (pageNumber <= maxPages) {
-    const url = new URL(`${API_BASE}/Problems`);
-    url.searchParams.set("pageNumber", String(pageNumber));
-    url.searchParams.set("pageSize", String(pageSize));
-    url.searchParams.set("startTime", startIso);
-    url.searchParams.set("endTime", endIso);
+    if (onBatch) onBatch(batch);
 
-    // ✅ filtros como tu BD
-    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-    if (status) url.searchParams.set("status", status);
-    if (environment) url.searchParams.set("environment", environment);
+    // ✅ Si no hay más datos, corta
+    if (!batch || batch.length === 0) break;
 
-    const res = await fetch(url.toString(), { signal });
-
-    if (!res.ok) {
-      // Para que veas el error exacto (404/500)
-      const text = await res.text().catch(() => "");
-      throw new Error(`HTTP ${res.status} ${res.statusText} - ${text}`);
-    }
-
-    const data = await res.json();
-
-    // backend puede devolver array directo o {items:[]}
-    const batch = Array.isArray(data) ? data : data?.items || [];
-
-    if (!batch.length) break;
-
-    if (typeof onBatch === "function") onBatch(batch);
-
-    pageNumber++;
+    // ✅ Si vino menos que pageSize, ya no hay más páginas
+    if (batch.length < pageSize) break;
   }
 }
 
-// ✅ Firma para polling (para que NO te salga el error de export)
-export async function fetchLatestSignature({ startIso, endIso, jurisdiction }) {
-  const url = new URL(`${API_BASE}/Problems/latest`);
-  url.searchParams.set("startTime", startIso);
-  url.searchParams.set("endTime", endIso);
-  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-
-  const res = await fetch(url.toString());
-  if (!res.ok) return null;
-
-  const data = await res.json().catch(() => null);
-  return data?.signature || null;
-}
-
-
--------1
+---------
 
 // src/pages/TCSProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -111,12 +132,11 @@ export default function TCSProblems() {
 
   const [base, setBase] = useState([]);
 
-  const [envFilter, setEnvFilter] = useState(null); // Productivo / No Productivo
-  const [statusFilter, setStatusFilter] = useState(null); // OPEN / CLOSED
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
 
   const abortRef = useRef(null);
   const inFlightRef = useRef(false);
-  const lastSigRef = useRef(null);
 
   const load = async () => {
     if (inFlightRef.current) return;
@@ -136,23 +156,18 @@ export default function TCSProblems() {
       await fetchProblemsRange({
         startIso,
         endIso,
-
-        // ✅ MISMO filtro de tu SQL
         jurisdiction: "TCS",
-        status: "OPEN",
-
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
-          allAccum.push(...batch);
+          for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error("ERROR load TCS:", e);
+        console.error(e);
       }
     } finally {
       setLoading(false);
@@ -163,24 +178,10 @@ export default function TCSProblems() {
   useEffect(() => {
     load();
 
-    const poll = async () => {
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
-
-        if (lastSigRef.current === null) {
-          lastSigRef.current = sig;
-          return;
-        }
-
-        if (sig && sig !== lastSigRef.current) {
-          lastSigRef.current = sig;
-          load();
-        }
-      } catch (e) {}
-    };
-
-    const t = setInterval(poll, 20000);
+    // ✅ refresca cada 30s SIN /latest (evita 404)
+    const t = setInterval(() => {
+      load();
+    }, 30000);
 
     return () => {
       clearInterval(t);
@@ -270,18 +271,18 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
-------
+-------
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -312,7 +313,6 @@ export default function OtherProblems() {
 
   const abortRef = useRef(null);
   const inFlightRef = useRef(false);
-  const lastSigRef = useRef(null);
 
   const load = async () => {
     if (inFlightRef.current) return;
@@ -332,23 +332,18 @@ export default function OtherProblems() {
       await fetchProblemsRange({
         startIso,
         endIso,
-
-        // ✅ OTROS
         jurisdiction: "OTROS",
-        status: "OPEN",
-
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
-          allAccum.push(...batch);
+          for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
       if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error("ERROR load OTROS:", e);
+        console.error(e);
       }
     } finally {
       setLoading(false);
@@ -359,24 +354,9 @@ export default function OtherProblems() {
   useEffect(() => {
     load();
 
-    const poll = async () => {
-      try {
-        const { startIso, endIso } = getYesterdayToNowRangeIso();
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
-
-        if (lastSigRef.current === null) {
-          lastSigRef.current = sig;
-          return;
-        }
-
-        if (sig && sig !== lastSigRef.current) {
-          lastSigRef.current = sig;
-          load();
-        }
-      } catch (e) {}
-    };
-
-    const t = setInterval(poll, 20000);
+    const t = setInterval(() => {
+      load();
+    }, 30000);
 
     return () => {
       clearInterval(t);
@@ -466,7 +446,7 @@ export default function OtherProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
@@ -474,224 +454,4 @@ export default function OtherProblems() {
 
 -------
 
-// src/components/ProblemCard.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useBiaCatalog } from "../context/BiaCatalogContext";
-import {
-  getSlaMinutes,
-  getColorByPercent,
-  calcularCriticidadDetallada,
-  getButtonColorByPercent,
-} from "../utils/slaUtils";
 
-// Normaliza estado OPEN/CLOSED (sin inventar OPEN si viene CLOSED)
-function normalizeStatus(p) {
-  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
-  const s = String(raw || "").trim().toUpperCase();
-
-  if (s.includes("OPEN")) return "OPEN";
-  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
-
-  // fallback solo si no vino status
-  return p?.endTime ? "CLOSED" : "OPEN";
-}
-
-// Iconos por tower
-function towerToIconPath(towerKey) {
-  if (!towerKey) return null;
-  const key = String(towerKey).toLowerCase();
-
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
-  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
-    return "/icons/towers/Base.svg";
-  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
-
-  return null;
-}
-
-export default function ProblemCard({ problem, username }) {
-  const { get: catalogGet } = useBiaCatalog();
-
-  const status = useMemo(() => normalizeStatus(problem), [problem]);
-  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
-
-  // Buscar coincidencia con catálogo
-  const hitFromCatalog = useMemo(() => {
-    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-    for (const ci of arr) {
-      const name = ci?.name || ci?.Nombre;
-      const hit = name ? catalogGet(name) : null;
-      if (hit) return hit;
-    }
-    return null;
-  }, [problem, catalogGet]);
-
-  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
-
-  const { criticidad } = calcularCriticidadDetallada(problem, {
-    catalogLookup: (ciName) => catalogGet(ciName),
-  });
-
-  // SLA
-  const slaMinutes = getSlaMinutes(criticidad);
-
-  // Timer: SOLO si está OPEN
-  const [now, setNow] = useState(new Date());
-
-  useEffect(() => {
-    if (status === "CLOSED") return; // NO corre en CLOSED
-    const interval = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(interval);
-  }, [status]);
-
-  const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
-  const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
-    slaMinutes,
-    elapsedMinutes,
-    status,
-  ]);
-
-  const percentRemaining = useMemo(() => {
-    if (status === "CLOSED") return 100;
-    return Math.max((remainingMinutes / slaMinutes) * 100, 0);
-  }, [remainingMinutes, slaMinutes, status]);
-
-  const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor = getButtonColorByPercent(percentRemaining);
-
-  const formatTime = (minutes) => {
-    const totalSeconds = Math.floor(minutes * 60);
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  };
-
-  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-  const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
-  const equipos = uniqueNames.join(", ");
-
-  const isDisabled = !username;
-  const tenant = problem?.tenant || "";
-  const problemId = problem?.problemId || problem?.displayId || "";
-
-  const dynatraceUrl = tenant && problemId
-    ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
-    : "#";
-
-  const environment = problem?.environment || "";
-
-  return (
-    <div
-      style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem 1.5rem",
-        marginBottom: "1rem",
-        backgroundColor: bgColor,
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
-      }}
-    >
-      {/* IZQUIERDA: INFO */}
-      <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {problem?.impactLevel}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Inicio:</strong> {start.toLocaleString()}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Estado:</strong> {status}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Criticidad (BIA):</strong> {criticidad}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Equipos afectados:</strong> <small>{equipos}</small>
-        </p>
-      </div>
-
-      {/* CENTRO: ICONOS */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          gap: "1rem",
-          flexShrink: 0,
-          minWidth: "220px",
-        }}
-      >
-        {(() => {
-          const size = 110;
-          return (
-            <>
-              <img
-                src={`/severidad${criticidad}.svg`}
-                width={size}
-                height={size}
-                title={`Criticidad ${criticidad}`}
-                alt={`Criticidad ${criticidad}`}
-              />
-              <img
-                src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-                width={size}
-                height={size}
-                title={environment}
-                alt={environment}
-              />
-              {towerIcon && (
-                <img
-                  src={towerIcon}
-                  alt="tower"
-                  width={size}
-                  height={size}
-                  title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-                />
-              )}
-            </>
-          );
-        })()}
-      </div>
-
-      {/* DERECHA: TIMER + BOTÓN */}
-      <div style={{ textAlign: "center", minWidth: "160px" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
-          {formatTime(remainingMinutes)}
-        </div>
-
-        <button
-          disabled={isDisabled || dynatraceUrl === "#"}
-          onClick={() => window.open(dynatraceUrl, "_blank")}
-          style={{
-            marginTop: ".5rem",
-            padding: ".4rem 1rem",
-            fontSize: ".9rem",
-            fontWeight: "bold",
-            color: "#fff",
-            backgroundColor: isDisabled
-              ? "#b0b0b0"
-              : status === "CLOSED"
-              ? "#6b7280"
-              : buttonColor,
-            border: "none",
-            borderRadius: "8px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
-          }}
-        >
-          Revisar problema
-        </button>
-      </div>
-    </div>
-  );
-}
