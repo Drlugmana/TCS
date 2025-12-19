@@ -1,7 +1,6 @@
 // src/api/problems.js
 
 export const DEFAULT_RECENT_DAYS = 1;
-export const OTHER_RECENT_HOURS = 1;
 
 const BASE = (import.meta.env.VITE_API_URL || "").replace(/\/+$/, "");
 if (!BASE) throw new Error("Falta VITE_API_URL en .env (ej: https://xxxxx.brs.devtunnels.ms)");
@@ -57,7 +56,6 @@ function normalizeStatus(rawStatus, endTimeISO) {
   const s = cleanNull(rawStatus);
   const up = typeof s === "string" ? s.trim().toUpperCase() : "";
 
-  // ✅ prioridad al status real de la BD
   if (up.includes("OPEN")) return "OPEN";
   if (up.includes("CLOSED") || up.includes("RESOLVED")) return "CLOSED";
 
@@ -77,19 +75,13 @@ function normalizeEnvironment(envRaw) {
 /**
  * IMPORTANTÍSIMO:
  * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
+ * En BD el campo se llama Jurisdiction.
  */
 function normalizeJurisdiction(jRaw) {
   const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
-
-  // ✅ primero NO TCS
   if (s.includes("NO TCS") || s === "NOTCS" || s.includes("NO-TCS")) return "OTROS";
-
-  // ✅ luego TCS exacto / claro
   if (s === "TCS" || s.includes(" TCS") || s.startsWith("TCS") || s.endsWith("TCS")) return "TCS";
-
-  // fallback: si trae "TCS" suelto
   if (s.includes("TCS")) return "TCS";
-
   return "OTROS";
 }
 
@@ -146,9 +138,9 @@ function normalize(list) {
       severityLevel,
       impactLevel,
       environment: env,
-      jurisdiction: juris, // "TCS" | "OTROS"
+      jurisdiction: juris,
       affectedCI,
-      status, // "OPEN" | "CLOSED"
+      status,
       tenant: p?.tenant ?? p?.Tenant ?? p?.domain ?? "",
       startTime,
       endTime,
@@ -156,20 +148,14 @@ function normalize(list) {
   });
 }
 
-// ✅ AYER 00:00 local -> AHORA (local sin Z)
+// ✅ Query: StartTime >= CONVERT(DATE,GETDATE()-1)  AND StartTime < GETDATE()
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
+
   const start = new Date(now);
   start.setDate(now.getDate() - 1);
   start.setHours(0, 0, 0, 0);
-  return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
-}
 
-// ✅ Últimas N horas (para OTROS / liviano)
-export function getLastHoursRangeIso(hours = OTHER_RECENT_HOURS) {
-  const now = new Date();
-  const start = new Date(now);
-  start.setHours(now.getHours() - Number(hours || 1));
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
@@ -199,13 +185,14 @@ async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
 }
 
 /**
- * Paginación segura + filtro por jurisdicción (para NO mezclar)
- * OJO: NO filtramos por rango en cliente (eso te estaba botando OPEN por TZ)
+ * Paginación segura:
+ * - Avanza page=1..maxPages (NO salta a 200, 400, etc.)
+ * - Corta si ya no hay nuevos o si el batch viene vacío
  */
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction = null, // "TCS" | "OTROS" | null
+  jurisdiction = null, // "TCS" o "OTROS" (opcional)
   pageSize = 1000,
   maxPages = 60,
   onBatch,
@@ -214,19 +201,33 @@ export async function fetchProblemsRange({
   let all = [];
   const seen = new Set();
 
-  const target = jurisdiction ? String(jurisdiction).toUpperCase().trim() : null;
+  const startMs = startIso ? new Date(startIso).getTime() : null;
+  const endMs = endIso ? new Date(endIso).getTime() : null;
+
+  const target = (jurisdiction || "").toUpperCase().trim();
+
   let noNewStreak = 0;
 
   for (let page = 1; page <= maxPages; page++) {
     const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
     if (!batch.length) break;
 
-    const filtered = target
-      ? batch.filter((x) => String(x.jurisdiction || "").toUpperCase() === target)
-      : batch;
+    // ✅ filtra rango (igual que query)
+    const inRange = batch.filter((x) => {
+      const t = x.startTime ? new Date(x.startTime).getTime() : null;
+      if (!t || !Number.isFinite(t)) return true;
+      if (startMs && t < startMs) return false;
+      if (endMs && t >= endMs) return false; // < GETDATE()
+      return true;
+    });
+
+    // ✅ filtra jurisdicción como en BD
+    const inScope = !target
+      ? inRange
+      : inRange.filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target);
 
     let newCount = 0;
-    for (const x of filtered) {
+    for (const x of inScope) {
       const key = `${x.problemId || ""}|${x.startTime || ""}|${x.status || ""}`;
       if (!seen.has(key)) {
         seen.add(key);
@@ -235,7 +236,7 @@ export async function fetchProblemsRange({
       }
     }
 
-    if (onBatch) onBatch(filtered, page);
+    if (onBatch) onBatch(inScope, page);
 
     if (newCount === 0) noNewStreak++;
     else noNewStreak = 0;
@@ -255,20 +256,30 @@ export async function fetchProblemsRange({
 
 /**
  * ✅ LIGERO:
- * Firma del más reciente (por jurisdicción) para refrescar SOLO si cambió BD
+ * Trae una “firma” del último registro del rango para saber si cambió algo en BD.
+ * Si la firma cambia => el Front refresca.
  */
 export async function fetchLatestSignature({
   startIso,
   endIso,
-  jurisdiction = "TCS",
+  jurisdiction = "TCS", // "TCS" o "OTROS"
   signal,
 } = {}) {
-  const target = String(jurisdiction || "").toUpperCase().trim();
-
   const batch = await fetchPage({ pageNumber: 1, pageSize: 80, startIso, endIso, signal });
 
+  const target = (jurisdiction || "").toUpperCase().trim();
+
   const filtered = batch
-    .filter((x) => String(x.jurisdiction || "").toUpperCase() === target)
+    .filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target)
+    .filter((x) => {
+      const t = x.startTime ? new Date(x.startTime).getTime() : null;
+      if (!t || !Number.isFinite(t)) return true;
+      const startMs = startIso ? new Date(startIso).getTime() : null;
+      const endMs = endIso ? new Date(endIso).getTime() : null;
+      if (startMs && t < startMs) return false;
+      if (endMs && t >= endMs) return false;
+      return true;
+    })
     .sort((a, b) => {
       const da = a.startTime ? new Date(a.startTime).getTime() : 0;
       const db = b.startTime ? new Date(b.startTime).getTime() : 0;
@@ -282,13 +293,13 @@ export async function fetchLatestSignature({
 }
 
 
-------
+-----1
 
 
 // src/pages/Tcs.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchLatestSignature, fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -343,13 +354,16 @@ export default function Tcs() {
         pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
+
         onBatch: (batch) => {
           for (const x of batch) tcsAccum.push(x);
           setBase([...tcsAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -359,17 +373,30 @@ export default function Tcs() {
   useEffect(() => {
     load();
 
-    // ✅ Revisar cambios en BD (firma) y recargar solo si cambió
-    const t = setInterval(async () => {
+    // ✅ refresca SOLO si cambió BD (AYER->HOY)
+    const poll = async () => {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
+
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "TCS",
+        });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
         if (sig && sig !== lastSigRef.current) {
           lastSigRef.current = sig;
           load();
         }
       } catch (e) {}
-    }, 15000);
+    };
+
+    const t = setInterval(poll, 20000);
 
     return () => {
       clearInterval(t);
@@ -465,13 +492,14 @@ export default function Tcs() {
   );
 }
 
--------
+
+--------
 
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
-import { fetchLatestSignature, fetchProblemsRange, getLastHoursRangeIso } from "../api/problems";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
 
 function Chip({ active, onClick, children, color }) {
   return (
@@ -515,8 +543,7 @@ export default function OtherProblems() {
     setLoading(true);
 
     try {
-      // ✅ OTROS liviano: últimas 1 hora (cambia a 2 si quieres)
-      const { startIso, endIso } = getLastHoursRangeIso(1);
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
 
       const otherAccum = [];
 
@@ -524,16 +551,19 @@ export default function OtherProblems() {
         startIso,
         endIso,
         jurisdiction: "OTROS",
-        pageSize: 500,
-        maxPages: 15,
+        pageSize: 1000,
+        maxPages: 60,
         signal: controller.signal,
+
         onBatch: (batch) => {
           for (const x of batch) otherAccum.push(x);
           setBase([...otherAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -543,16 +573,29 @@ export default function OtherProblems() {
   useEffect(() => {
     load();
 
-    const t = setInterval(async () => {
+    const poll = async () => {
       try {
-        const { startIso, endIso } = getLastHoursRangeIso(1);
-        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        const sig = await fetchLatestSignature({
+          startIso,
+          endIso,
+          jurisdiction: "OTROS",
+        });
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
         if (sig && sig !== lastSigRef.current) {
           lastSigRef.current = sig;
           load();
         }
       } catch (e) {}
-    }, 20000);
+    };
+
+    const t = setInterval(poll, 20000);
 
     return () => {
       clearInterval(t);
@@ -578,7 +621,7 @@ export default function OtherProblems() {
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
-        Problemas OTROS ({counts.total})
+        Problemas Otros ({counts.total})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
@@ -649,225 +692,199 @@ export default function OtherProblems() {
 }
 
 
--------
+------
 
 
-// src/components/ProblemCard.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import { useBiaCatalog } from "../context/BiaCatalogContext";
-import {
-  getSlaMinutes,
-  getColorByPercent,
-  calcularCriticidadDetallada,
-  getButtonColorByPercent,
-} from "../utils/slaUtils";
+// src/pages/AllProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, fetchLatestSignature, getYesterdayToNowRangeIso } from "../api/problems";
 
-function normalizeStatus(p) {
-  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
-  const s = String(raw || "").trim().toUpperCase();
-
-  if (s.includes("OPEN")) return "OPEN";
-  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
-
-  return p?.endTime ? "CLOSED" : "OPEN";
-}
-
-function towerToIconPath(towerKey) {
-  if (!towerKey) return null;
-  const key = String(towerKey).toLowerCase();
-
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
-  if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
-    return "/icons/towers/Base.svg";
-  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
-
-  return null;
-}
-
-export default function ProblemCard({ problem, username }) {
-  const { get: catalogGet } = useBiaCatalog();
-
-  const status = useMemo(() => normalizeStatus(problem), [problem]);
-  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
-
-  const hitFromCatalog = useMemo(() => {
-    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-    for (const ci of arr) {
-      const name = ci?.name || ci?.Nombre;
-      const hit = name ? catalogGet(name) : null;
-      if (hit) return hit;
-    }
-    return null;
-  }, [problem, catalogGet]);
-
-  const towerIcon = towerToIconPath(hitFromCatalog?.tower);
-
-  const { criticidad } = calcularCriticidadDetallada(problem, {
-    catalogLookup: (ciName) => catalogGet(ciName),
-  });
-
-  const slaMinutes = getSlaMinutes(criticidad);
-
-  // ✅ Timer SOLO si está OPEN
-  const [now, setNow] = useState(new Date());
-  useEffect(() => {
-    if (status === "CLOSED") return;
-    const interval = setInterval(() => setNow(new Date()), 1000);
-    return () => clearInterval(interval);
-  }, [status]);
-
-  const elapsedMinutes = useMemo(() => {
-    if (status === "CLOSED") return 0;
-    return (now - start) / 60000;
-  }, [now, start, status]);
-
-  const remainingMinutes = useMemo(() => {
-    if (status === "CLOSED") return 0;
-    return Math.max(slaMinutes - elapsedMinutes, 0);
-  }, [slaMinutes, elapsedMinutes, status]);
-
-  const percentRemaining = useMemo(() => {
-    if (status === "CLOSED") return 100;
-    return Math.max((remainingMinutes / slaMinutes) * 100, 0);
-  }, [remainingMinutes, slaMinutes, status]);
-
-  const bgColor = getColorByPercent(percentRemaining);
-  const buttonColor = getButtonColorByPercent(percentRemaining);
-
-  const formatTime = (minutes) => {
-    const totalSeconds = Math.floor(minutes * 60);
-    const hrs = Math.floor(totalSeconds / 3600);
-    const mins = Math.floor((totalSeconds % 3600) / 60);
-    const secs = totalSeconds % 60;
-    return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
-  };
-
-  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
-  const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
-  const equipos = uniqueNames.join(", ");
-
-  const isDisabled = !username;
-  const tenant = problem?.tenant || "";
-  const problemId = problem?.problemId || problem?.displayId || "";
-
-  const dynatraceUrl =
-    tenant && problemId ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}` : "#";
-
-  const environment = problem?.environment || "";
-
+function Chip({ active, onClick, children, color }) {
   return (
-    <div
+    <button
+      onClick={onClick}
       style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem 1.5rem",
-        marginBottom: "1rem",
-        backgroundColor: bgColor,
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
       }}
     >
-      {/* IZQUIERDA: INFO */}
-      <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
-          {problem?.title || "(sin título)"}
-        </h3>
+      {children}
+    </button>
+  );
+}
 
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {problem?.impactLevel}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Inicio:</strong> {start.toLocaleString()}
-        </p>
+export default function AllProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
 
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Estado:</strong> {status}
-        </p>
+  const [base, setBase] = useState([]);
 
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Criticidad (BIA):</strong> {criticidad}
-        </p>
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
 
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Equipos afectados:</strong> <small>{equipos}</small>
-        </p>
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+  const lastSigRef = useRef(null);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const allAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: null,
+        pageSize: 1000,
+        maxPages: 60,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) allAccum.push(x);
+          setBase([...allAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const poll = async () => {
+      try {
+        const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // firma “general”: miramos TCS primero; si no hay, OTROS
+        const sigTcs = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
+        const sigOtros = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
+        const sig = sigTcs || sigOtros || null;
+
+        if (lastSigRef.current === null) {
+          lastSigRef.current = sig;
+          return;
+        }
+
+        if (sig && sig !== lastSigRef.current) {
+          lastSigRef.current = sig;
+          load();
+        }
+      } catch (e) {}
+    };
+
+    const t = setInterval(poll, 20000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas (Todos) ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
       </div>
 
-      {/* CENTRO: ICONOS */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          gap: "1rem",
-          flexShrink: 0,
-          minWidth: "220px",
-        }}
-      >
-        {(() => {
-          const size = 110;
-          return (
-            <>
-              <img
-                src={`/severidad${criticidad}.svg`}
-                width={size}
-                height={size}
-                title={`Criticidad ${criticidad}`}
-                alt={`Criticidad ${criticidad}`}
-              />
-              <img
-                src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-                width={size}
-                height={size}
-                title={environment}
-                alt={environment}
-              />
-              {towerIcon && (
-                <img
-                  src={towerIcon}
-                  alt="tower"
-                  width={size}
-                  height={size}
-                  title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-                />
-              )}
-            </>
-          );
-        })()}
-      </div>
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
 
-      {/* DERECHA: TIMER + BOTÓN */}
-      <div style={{ textAlign: "center", minWidth: "160px" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>
-          {formatTime(remainingMinutes)}
-        </div>
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
 
-        <button
-          disabled={isDisabled || dynatraceUrl === "#"}
-          onClick={() => window.open(dynatraceUrl, "_blank")}
-          style={{
-            marginTop: ".5rem",
-            padding: ".4rem 1rem",
-            fontSize: ".9rem",
-            fontWeight: "bold",
-            color: "#fff",
-            backgroundColor: isDisabled
-              ? "#b0b0b0"
-              : status === "CLOSED"
-              ? "#6b7280"
-              : buttonColor,
-            border: "none",
-            borderRadius: "8px",
-            cursor: isDisabled ? "not-allowed" : "pointer",
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
           }}
         >
-          Revisar problema
-        </button>
+          Todos
+        </Chip>
       </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
     </div>
   );
 }
