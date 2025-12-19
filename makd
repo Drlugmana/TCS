@@ -1,204 +1,180 @@
 // src/api/problems.js
 
-// ✅ Vite: se usa import.meta.env (NO process.env)
-const API_BASE_URL =
-  (import.meta?.env && import.meta.env.VITE_API_BASE_URL) ||
-  "https://localhost:44334"; // fallback por si no hay .env
+function getApiBase() {
+  // Vite: usa import.meta.env (NO process.env)
+  const fromVite = (import.meta?.env?.VITE_API_BASE_URL || "").trim();
+  if (fromVite) return fromVite.replace(/\/+$/, "");
 
-function joinUrl(base, path) {
-  const b = String(base || "").replace(/\/+$/, "");
-  const p = String(path || "").replace(/^\/+/, "");
-  return `${b}/${p}`;
+  // Opcional: si algún día quieres inyectarlo desde index.html
+  const fromWindow = (window.__API_BASE_URL__ || "").trim();
+  if (fromWindow) return fromWindow.replace(/\/+$/, "");
+
+  // Fallback: tu backend local (según tus screenshots)
+  return "https://localhost:44334";
 }
 
-function toIso(d) {
-  try {
-    return new Date(d).toISOString();
-  } catch {
-    return "";
-  }
+const API_BASE = getApiBase();
+
+// Normaliza ambiente a lo que tu UI ya usa
+export function normalizeEnvironment(env) {
+  const e = String(env || "").trim();
+  if (!e) return "";
+  if (e.toLowerCase() === "noproductivo") return "No Productivo";
+  if (e.toLowerCase() === "productivo") return "Productivo";
+  return e; // por si viene ya con espacio u otro valor
 }
 
-// Rango: desde ayer 00:00 hasta ahora (como tu query SQL)
+// Rango ISO: desde ayer (00:00) hasta ahora
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
+
   const start = new Date(now);
   start.setDate(start.getDate() - 1);
   start.setHours(0, 0, 0, 0);
 
+  // backend suele aceptar ISO; si el tuyo acepta otro formato, avísame
+  const startIso = start.toISOString();
+  const endIso = now.toISOString();
+
+  return { startIso, endIso };
+}
+
+// Convierte el objeto del backend a tu forma esperada por el Front
+function mapProblem(p) {
   return {
-    startIso: toIso(start),
-    endIso: toIso(now),
+    ...p,
+    // Normalizaciones para que tu UI cuente bien Productivo/No Productivo:
+    environment: normalizeEnvironment(p.environment || p.Environment),
+
+    // Normalizaciones para que ProblemCard encuentre datos:
+    startTime: p.startTime || p.StartTime,
+    endTime: p.endTime || p.EndTime,
+    status: p.status || p.Status,
+    severityLevel: p.severityLevel || p.SeverityLevel,
+    impactLevel: p.impactLevel || p.ImpactLevel,
+    title: p.title || p.Title,
+
+    // IDs:
+    displayId: p.displayId || p.DisplayId,
+    problemId: p.problemId || p.ProblemId,
+
+    // Tenant:
+    tenant: p.tenant || p.Tenant,
+
+    // Affected:
+    affectedCI: p.affectedCI || p.AffectedCI || p.affectedCi || [],
   };
 }
 
-// Normaliza respuesta del API (por si a veces viene {data: []} o directo [])
-function normalizeListResponse(json) {
-  if (Array.isArray(json)) return json;
-  if (Array.isArray(json?.data)) return json.data;
-  if (Array.isArray(json?.items)) return json.items;
-  if (Array.isArray(json?.results)) return json.results;
-  return [];
-}
+// Trae 1 página desde /api/problems (tu endpoint real)
+export async function fetchProblemsPage({
+  pageNumber = 1,
+  pageSize = 50,
+  startIso = null,
+  endIso = null,
+  jurisdiction = null,
+  status = null, // "OPEN" o "CLOSED" opcional
+  signal,
+} = {}) {
+  const url = new URL(`${API_BASE}/api/problems`);
 
-// Mapea filas de backend/SQL a la forma que usa tu UI (ProblemCard)
-function mapProblemRow(row) {
-  const r = row || {};
-
-  // soporta nombres que has mostrado en SQL: DisplayId, Title, ImpactLevel, SeverityLevel, Status, StartTime, Environment, Tenant
-  const problemId = r.problemId || r.ProblemId || r.displayId || r.DisplayId || r.pid || r.Pid || "";
-  const title = r.title || r.Title || "(sin título)";
-  const impactLevel = r.impactLevel || r.ImpactLevel || r.impact || r.Impact || "";
-  const severityLevel = r.severityLevel || r.SeverityLevel || r.severity || r.Severity || "";
-  const status = r.status || r.Status || "";
-  const startTime = r.startTime || r.StartTime || r.start || r.Start || null;
-  const endTime = r.endTime || r.EndTime || r.end || r.End || null;
-  const environment = r.environment || r.Environment || "";
-  const tenant = r.tenant || r.Tenant || "";
-
-  // Jurisdicción
-  const jurisdiction = r.jurisdiction || r.Jurisdiction || r.Jurisdiccion || r.Jurisdicción || "";
-
-  // Affected CI si existe en tu JSON (si no, queda vacío)
-  const affectedCI = Array.isArray(r.affectedCI)
-    ? r.affectedCI
-    : Array.isArray(r.AffectedCI)
-    ? r.AffectedCI
-    : [];
-
-  return {
-    ...r,
-    problemId,
-    displayId: problemId,
-    title,
-    impactLevel,
-    severityLevel,
-    status,
-    startTime,
-    endTime,
-    environment,
-    tenant,
-    jurisdiction,
-    affectedCI,
-  };
-}
-
-// GET lista paginada: /Problems?pageNumber=1&pageSize=200&startTime=...&endTime=...&jurisdiction=TCS
-async function fetchProblemsPage({ startIso, endIso, jurisdiction, pageNumber, pageSize, signal }) {
-  const url = new URL(joinUrl(API_BASE_URL, "Problems"));
   url.searchParams.set("pageNumber", String(pageNumber));
   url.searchParams.set("pageSize", String(pageSize));
 
+  // Estos nombres de filtros dependen de tu backend.
+  // Si tu backend NO los soporta, igual funcionará sin filtrar.
   if (startIso) url.searchParams.set("startTime", startIso);
   if (endIso) url.searchParams.set("endTime", endIso);
   if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
+  if (status) url.searchParams.set("status", status);
 
-  const res = await fetch(url.toString(), { signal });
+  const res = await fetch(url.toString(), {
+    method: "GET",
+    headers: {
+      Accept: "application/json",
+    },
+    signal,
+  });
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Problems fetch failed: ${res.status} ${res.statusText} ${text}`);
+    throw new Error(`fetchProblemsPage failed ${res.status}: ${text}`);
   }
 
   const json = await res.json();
-  const list = normalizeListResponse(json).map(mapProblemRow);
-  return list;
+
+  const data = Array.isArray(json?.data) ? json.data.map(mapProblem) : [];
+  const totalPages = Number(json?.totalPages || 0);
+  const totalRecords = Number(json?.totalRecords || 0);
+
+  return { data, totalPages, totalRecords };
 }
 
-// ✅ Paginación completa (trae “todas” dentro del rango)
+// Trae varias páginas (para llenar tu lista)
 export async function fetchProblemsRange({
   startIso,
   endIso,
   jurisdiction = null,
-  pageSize = 200,
+  status = null,
+  pageSize = 1000,
   maxPages = 60,
   signal,
   onBatch,
-}) {
-  let pageNumber = 1;
-  let total = 0;
+} = {}) {
+  let page = 1;
+  let pagesSeen = 0;
 
-  for (let i = 0; i < maxPages; i++) {
-    const batch = await fetchProblemsPage({
-      startIso,
-      endIso,
-      jurisdiction,
-      pageNumber,
+  while (pagesSeen < maxPages) {
+    const { data, totalPages } = await fetchProblemsPage({
+      pageNumber: page,
       pageSize,
-      signal,
-    });
-
-    if (!batch.length) break;
-
-    total += batch.length;
-    if (typeof onBatch === "function") onBatch(batch);
-
-    // si vino menos que pageSize, ya no hay más
-    if (batch.length < pageSize) break;
-
-    pageNumber++;
-  }
-
-  return total;
-}
-
-// ✅ Firma “latest”: primero intenta latestSignature, si no existe intenta latest, si no existe => usa la primera fila del listado
-export async function fetchLatestSignature({ startIso, endIso, jurisdiction = null, signal }) {
-  // 1) /Problems/latestSignature
-  {
-    const url = new URL(joinUrl(API_BASE_URL, "Problems/latestSignature"));
-    if (startIso) url.searchParams.set("startTime", startIso);
-    if (endIso) url.searchParams.set("endTime", endIso);
-    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-
-    const res = await fetch(url.toString(), { signal }).catch(() => null);
-    if (res && res.ok) {
-      const json = await res.json().catch(() => null);
-      if (typeof json === "string") return json;
-      if (typeof json?.signature === "string") return json.signature;
-      if (typeof json?.latestSignature === "string") return json.latestSignature;
-    }
-    // si 404, seguimos al fallback
-  }
-
-  // 2) /Problems/latest
-  {
-    const url = new URL(joinUrl(API_BASE_URL, "Problems/latest"));
-    if (startIso) url.searchParams.set("startTime", startIso);
-    if (endIso) url.searchParams.set("endTime", endIso);
-    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-
-    const res = await fetch(url.toString(), { signal }).catch(() => null);
-    if (res && res.ok) {
-      const json = await res.json().catch(() => null);
-      // puede venir objeto o string
-      if (typeof json === "string") return json;
-      if (json?.problemId) return String(json.problemId);
-      if (json?.displayId) return String(json.displayId);
-      if (json?.StartTime || json?.startTime) return `${json?.displayId || json?.problemId || "latest"}-${json?.StartTime || json?.startTime}`;
-    }
-  }
-
-  // 3) fallback final: trae 1 página y arma firma con primer registro
-  try {
-    const firstPage = await fetchProblemsPage({
       startIso,
       endIso,
       jurisdiction,
-      pageNumber: 1,
-      pageSize: 1,
+      status,
       signal,
     });
-    if (firstPage.length) {
-      const p = firstPage[0];
-      return `${p.problemId || ""}-${p.startTime || ""}-${p.status || ""}`;
-    }
-  } catch {}
 
-  return null;
+    if (onBatch) onBatch(data);
+
+    pagesSeen += 1;
+
+    // si no hay más data, corta
+    if (!data.length) break;
+
+    // si el backend reporta totalPages, respétalo
+    if (totalPages && page >= totalPages) break;
+
+    page += 1;
+  }
 }
 
-------
+// ✅ “Firma” sin endpoint extra: trae 1 registro y construye una firma estable
+export async function fetchLatestSignature({
+  startIso,
+  endIso,
+  jurisdiction = null,
+  signal,
+} = {}) {
+  const { data } = await fetchProblemsPage({
+    pageNumber: 1,
+    pageSize: 1,
+    startIso,
+    endIso,
+    jurisdiction,
+    signal,
+  });
+
+  const first = data?.[0];
+  if (!first) return null;
+
+  const id = first.displayId || first.problemId || "";
+  const st = first.startTime || "";
+  const status = first.status || "";
+  return `${id}|${st}|${status}`;
+}
+
+-----
 
 
 // src/pages/TCSProblems.jsx
@@ -227,6 +203,7 @@ function Chip({ active, onClick, children, color }) {
 export default function TCSProblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
+
   const [base, setBase] = useState([]);
 
   const [envFilter, setEnvFilter] = useState(null);
@@ -248,22 +225,26 @@ export default function TCSProblems() {
 
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
+
       const allAccum = [];
 
       await fetchProblemsRange({
         startIso,
         endIso,
         jurisdiction: "TCS",
-        pageSize: 200,
+        pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
+
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -276,6 +257,8 @@ export default function TCSProblems() {
     const poll = async () => {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // ✅ ya NO llama /Problems/latestSignature (evita 404)
         const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
 
         if (lastSigRef.current === null) {
@@ -287,7 +270,7 @@ export default function TCSProblems() {
           lastSigRef.current = sig;
           load();
         }
-      } catch {}
+      } catch (e) {}
     };
 
     const t = setInterval(poll, 20000);
@@ -380,14 +363,13 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.displayId || p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
------
-
+-------
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -415,6 +397,7 @@ function Chip({ active, onClick, children, color }) {
 export default function OtherProblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
+
   const [base, setBase] = useState([]);
 
   const [envFilter, setEnvFilter] = useState(null);
@@ -436,22 +419,26 @@ export default function OtherProblems() {
 
     try {
       const { startIso, endIso } = getYesterdayToNowRangeIso();
+
       const allAccum = [];
 
       await fetchProblemsRange({
         startIso,
         endIso,
         jurisdiction: "OTROS",
-        pageSize: 200,
+        pageSize: 1000,
         maxPages: 60,
         signal: controller.signal,
+
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -464,6 +451,8 @@ export default function OtherProblems() {
     const poll = async () => {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+        // ✅ evita 404
         const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
 
         if (lastSigRef.current === null) {
@@ -475,7 +464,7 @@ export default function OtherProblems() {
           lastSigRef.current = sig;
           load();
         }
-      } catch {}
+      } catch (e) {}
     };
 
     const t = setInterval(poll, 20000);
@@ -568,11 +557,12 @@ export default function OtherProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.displayId || p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
+
 
 -------
 
@@ -598,6 +588,25 @@ function normalizeStatus(p) {
   return p?.endTime || p?.EndTime ? "CLOSED" : "OPEN";
 }
 
+// Fechas robustas (por si viene "YYYY-MM-DD HH:mm:ss.fffffff")
+function safeDate(v) {
+  if (!v) return new Date();
+  if (v instanceof Date) return v;
+
+  const s = String(v).trim();
+  // Si viene con espacio, lo pasamos a formato tipo ISO parcial
+  // Ej: "2025-12-19 12:39:00.0000000" -> "2025-12-19T12:39:00.0000000"
+  const normalized = s.includes(" ") ? s.replace(" ", "T") : s;
+
+  const d = new Date(normalized);
+  if (!isNaN(d.getTime())) return d;
+
+  // último intento: sin fracciones largas
+  const cut = normalized.split(".")[0];
+  const d2 = new Date(cut);
+  return isNaN(d2.getTime()) ? new Date() : d2;
+}
+
 // Iconos por tower
 function towerToIconPath(towerKey) {
   if (!towerKey) return null;
@@ -616,18 +625,11 @@ export default function ProblemCard({ problem, username }) {
 
   const status = useMemo(() => normalizeStatus(problem), [problem]);
 
-  const start = useMemo(() => {
-    const raw = problem?.startTime ?? problem?.StartTime ?? problem?.start ?? problem?.Start;
-    return raw ? new Date(raw) : new Date();
-  }, [problem]);
+  const start = useMemo(() => safeDate(problem?.startTime || problem?.StartTime), [problem]);
 
   // Buscar coincidencia con catálogo
   const hitFromCatalog = useMemo(() => {
-    const arr = Array.isArray(problem?.affectedCI)
-      ? problem.affectedCI
-      : Array.isArray(problem?.AffectedCI)
-      ? problem.AffectedCI
-      : [];
+    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
     for (const ci of arr) {
       const name = ci?.name || ci?.Nombre;
       const hit = name ? catalogGet(name) : null;
@@ -655,7 +657,6 @@ export default function ProblemCard({ problem, username }) {
   }, [status]);
 
   const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
-
   const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
     slaMinutes,
     elapsedMinutes,
@@ -678,23 +679,23 @@ export default function ProblemCard({ problem, username }) {
     return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   };
 
-  const affected = Array.isArray(problem?.affectedCI)
-    ? problem.affectedCI
-    : Array.isArray(problem?.AffectedCI)
-    ? problem.AffectedCI
-    : [];
+  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
   const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
   const equipos = uniqueNames.join(", ");
 
   const isDisabled = !username;
-
   const tenant = problem?.tenant || problem?.Tenant || "";
-  const problemId = problem?.problemId || problem?.ProblemId || problem?.displayId || problem?.DisplayId || "";
+
+  // ✅ Dynatrace suele usar el displayId tipo "P-xxxx"
+  const pid = problem?.displayId || problem?.DisplayId || problem?.problemId || problem?.ProblemId || "";
 
   const dynatraceUrl =
-    tenant && problemId ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}` : "#";
+    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${pid}` : "#";
 
-  const environment = problem?.environment || problem?.Environment || "";
+  // Ambiente (tu UI usa Productivo / No Productivo)
+  const environmentRaw = problem?.environment || problem?.Environment || "";
+  const environment =
+    String(environmentRaw).toLowerCase() === "noproductivo" ? "No Productivo" : environmentRaw;
 
   return (
     <div
@@ -711,15 +712,13 @@ export default function ProblemCard({ problem, username }) {
     >
       {/* IZQUIERDA: INFO */}
       <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
-          {problem?.title || problem?.Title || "(sin título)"}
-        </h3>
+        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
 
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel || problem?.SeverityLevel || ""}
+          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {problem?.impactLevel || problem?.ImpactLevel || ""}
+          <strong>Impacto:</strong> {problem?.impactLevel}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
           <strong>Inicio:</strong> {start.toLocaleString()}
