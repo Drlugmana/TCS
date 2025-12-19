@@ -1,12 +1,25 @@
 // src/api/problems.js
 
-// Base URL del backend (Swagger lo tienes en https://localhost:44334)
-// En Vite se usa import.meta.env (NO process.env)
-export const API_BASE_URL =
-  (import.meta?.env?.VITE_API_BASE_URL && String(import.meta.env.VITE_API_BASE_URL).trim()) ||
-  "https://localhost:44334";
+// ✅ Vite: se usa import.meta.env (NO process.env)
+const API_BASE_URL =
+  (import.meta?.env && import.meta.env.VITE_API_BASE_URL) ||
+  "https://localhost:44334"; // fallback por si no hay .env
 
-// Rango: desde AYER 00:00:00 hasta AHORA (como tu SQL)
+function joinUrl(base, path) {
+  const b = String(base || "").replace(/\/+$/, "");
+  const p = String(path || "").replace(/^\/+/, "");
+  return `${b}/${p}`;
+}
+
+function toIso(d) {
+  try {
+    return new Date(d).toISOString();
+  } catch {
+    return "";
+  }
+}
+
+// Rango: desde ayer 00:00 hasta ahora (como tu query SQL)
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
   const start = new Date(now);
@@ -14,134 +27,178 @@ export function getYesterdayToNowRangeIso() {
   start.setHours(0, 0, 0, 0);
 
   return {
-    startIso: start.toISOString(),
-    endIso: now.toISOString(),
+    startIso: toIso(start),
+    endIso: toIso(now),
   };
 }
 
-function buildProblemsUrl({
-  pageNumber = 1,
-  pageSize = 200,
-  startIso,
-  endIso,
-  jurisdiction,
-  status,
-}) {
-  const url = new URL(`${API_BASE_URL}/Problems`);
-
-  url.searchParams.set("pageNumber", String(pageNumber));
-  url.searchParams.set("pageSize", String(pageSize));
-
-  // tu backend ya acepta startTime/endTime (según tus screenshots)
-  if (startIso) url.searchParams.set("startTime", startIso);
-  if (endIso) url.searchParams.set("endTime", endIso);
-
-  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
-  if (status) url.searchParams.set("status", status);
-
-  return url.toString();
-}
-
-// Trae 1 página
-export async function fetchProblemsPage({
-  pageNumber = 1,
-  pageSize = 200,
-  startIso,
-  endIso,
-  jurisdiction,
-  status,
-  signal,
-}) {
-  const url = buildProblemsUrl({ pageNumber, pageSize, startIso, endIso, jurisdiction, status });
-
-  const res = await fetch(url, { signal });
-  if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`HTTP ${res.status} - ${res.statusText} - ${text}`);
-  }
-
-  const data = await res.json();
-
-  // Soportar varias formas de respuesta:
-  // - array directo
-  // - { items: [...] }
-  // - { data: [...] }
-  // - { problems: [...] }
-  if (Array.isArray(data)) return data;
-  if (Array.isArray(data?.items)) return data.items;
-  if (Array.isArray(data?.data)) return data.data;
-  if (Array.isArray(data?.problems)) return data.problems;
-
+// Normaliza respuesta del API (por si a veces viene {data: []} o directo [])
+function normalizeListResponse(json) {
+  if (Array.isArray(json)) return json;
+  if (Array.isArray(json?.data)) return json.data;
+  if (Array.isArray(json?.items)) return json.items;
+  if (Array.isArray(json?.results)) return json.results;
   return [];
 }
 
-// Trae rango paginando hasta que no venga data o hasta maxPages
+// Mapea filas de backend/SQL a la forma que usa tu UI (ProblemCard)
+function mapProblemRow(row) {
+  const r = row || {};
+
+  // soporta nombres que has mostrado en SQL: DisplayId, Title, ImpactLevel, SeverityLevel, Status, StartTime, Environment, Tenant
+  const problemId = r.problemId || r.ProblemId || r.displayId || r.DisplayId || r.pid || r.Pid || "";
+  const title = r.title || r.Title || "(sin título)";
+  const impactLevel = r.impactLevel || r.ImpactLevel || r.impact || r.Impact || "";
+  const severityLevel = r.severityLevel || r.SeverityLevel || r.severity || r.Severity || "";
+  const status = r.status || r.Status || "";
+  const startTime = r.startTime || r.StartTime || r.start || r.Start || null;
+  const endTime = r.endTime || r.EndTime || r.end || r.End || null;
+  const environment = r.environment || r.Environment || "";
+  const tenant = r.tenant || r.Tenant || "";
+
+  // Jurisdicción
+  const jurisdiction = r.jurisdiction || r.Jurisdiction || r.Jurisdiccion || r.Jurisdicción || "";
+
+  // Affected CI si existe en tu JSON (si no, queda vacío)
+  const affectedCI = Array.isArray(r.affectedCI)
+    ? r.affectedCI
+    : Array.isArray(r.AffectedCI)
+    ? r.AffectedCI
+    : [];
+
+  return {
+    ...r,
+    problemId,
+    displayId: problemId,
+    title,
+    impactLevel,
+    severityLevel,
+    status,
+    startTime,
+    endTime,
+    environment,
+    tenant,
+    jurisdiction,
+    affectedCI,
+  };
+}
+
+// GET lista paginada: /Problems?pageNumber=1&pageSize=200&startTime=...&endTime=...&jurisdiction=TCS
+async function fetchProblemsPage({ startIso, endIso, jurisdiction, pageNumber, pageSize, signal }) {
+  const url = new URL(joinUrl(API_BASE_URL, "Problems"));
+  url.searchParams.set("pageNumber", String(pageNumber));
+  url.searchParams.set("pageSize", String(pageSize));
+
+  if (startIso) url.searchParams.set("startTime", startIso);
+  if (endIso) url.searchParams.set("endTime", endIso);
+  if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
+
+  const res = await fetch(url.toString(), { signal });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Problems fetch failed: ${res.status} ${res.statusText} ${text}`);
+  }
+
+  const json = await res.json();
+  const list = normalizeListResponse(json).map(mapProblemRow);
+  return list;
+}
+
+// ✅ Paginación completa (trae “todas” dentro del rango)
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction,
-  status,
+  jurisdiction = null,
   pageSize = 200,
   maxPages = 60,
   signal,
   onBatch,
 }) {
   let pageNumber = 1;
+  let total = 0;
 
-  while (pageNumber <= maxPages) {
+  for (let i = 0; i < maxPages; i++) {
     const batch = await fetchProblemsPage({
-      pageNumber,
-      pageSize,
       startIso,
       endIso,
       jurisdiction,
-      status,
+      pageNumber,
+      pageSize,
       signal,
     });
 
-    if (onBatch) onBatch(batch);
+    if (!batch.length) break;
 
-    // Si ya no hay más registros, cortamos
-    if (!batch || batch.length === 0) break;
+    total += batch.length;
+    if (typeof onBatch === "function") onBatch(batch);
 
-    // Si la última página vino incompleta, normalmente es el final
+    // si vino menos que pageSize, ya no hay más
     if (batch.length < pageSize) break;
 
     pageNumber++;
   }
+
+  return total;
 }
 
-// Firma para “polling” SIN endpoint /latest (evita 404)
-// Se obtiene trayendo solo 1 registro (el más reciente según el orden del backend)
-export async function fetchLatestSignature({
-  startIso,
-  endIso,
-  jurisdiction,
-  status,
-  signal,
-}) {
-  const list = await fetchProblemsPage({
-    pageNumber: 1,
-    pageSize: 1,
-    startIso,
-    endIso,
-    jurisdiction,
-    status,
-    signal,
-  });
+// ✅ Firma “latest”: primero intenta latestSignature, si no existe intenta latest, si no existe => usa la primera fila del listado
+export async function fetchLatestSignature({ startIso, endIso, jurisdiction = null, signal }) {
+  // 1) /Problems/latestSignature
+  {
+    const url = new URL(joinUrl(API_BASE_URL, "Problems/latestSignature"));
+    if (startIso) url.searchParams.set("startTime", startIso);
+    if (endIso) url.searchParams.set("endTime", endIso);
+    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
 
-  const p = list?.[0];
-  if (!p) return null;
+    const res = await fetch(url.toString(), { signal }).catch(() => null);
+    if (res && res.ok) {
+      const json = await res.json().catch(() => null);
+      if (typeof json === "string") return json;
+      if (typeof json?.signature === "string") return json.signature;
+      if (typeof json?.latestSignature === "string") return json.latestSignature;
+    }
+    // si 404, seguimos al fallback
+  }
 
-  // Firma robusta (si cambia algo, cambia la firma)
-  const pid = p?.displayId || p?.problemId || "";
-  const st = p?.startTime || "";
-  const ed = p?.endTime || "";
-  const s = p?.status || "";
-  return `${pid}|${st}|${ed}|${s}`;
+  // 2) /Problems/latest
+  {
+    const url = new URL(joinUrl(API_BASE_URL, "Problems/latest"));
+    if (startIso) url.searchParams.set("startTime", startIso);
+    if (endIso) url.searchParams.set("endTime", endIso);
+    if (jurisdiction) url.searchParams.set("jurisdiction", jurisdiction);
+
+    const res = await fetch(url.toString(), { signal }).catch(() => null);
+    if (res && res.ok) {
+      const json = await res.json().catch(() => null);
+      // puede venir objeto o string
+      if (typeof json === "string") return json;
+      if (json?.problemId) return String(json.problemId);
+      if (json?.displayId) return String(json.displayId);
+      if (json?.StartTime || json?.startTime) return `${json?.displayId || json?.problemId || "latest"}-${json?.StartTime || json?.startTime}`;
+    }
+  }
+
+  // 3) fallback final: trae 1 página y arma firma con primer registro
+  try {
+    const firstPage = await fetchProblemsPage({
+      startIso,
+      endIso,
+      jurisdiction,
+      pageNumber: 1,
+      pageSize: 1,
+      signal,
+    });
+    if (firstPage.length) {
+      const p = firstPage[0];
+      return `${p.problemId || ""}-${p.startTime || ""}-${p.status || ""}`;
+    }
+  } catch {}
+
+  return null;
 }
 
--------
+------
 
 
 // src/pages/TCSProblems.jsx
@@ -170,7 +227,6 @@ function Chip({ active, onClick, children, color }) {
 export default function TCSProblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
-
   const [base, setBase] = useState([]);
 
   const [envFilter, setEnvFilter] = useState(null);
@@ -198,20 +254,16 @@ export default function TCSProblems() {
         startIso,
         endIso,
         jurisdiction: "TCS",
-        status: "OPEN", // tal y cual tu SQL: Status='OPEN'
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
+      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -224,14 +276,7 @@ export default function TCSProblems() {
     const poll = async () => {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-        // firma SOLO con /Problems (sin /latest para evitar 404)
-        const sig = await fetchLatestSignature({
-          startIso,
-          endIso,
-          jurisdiction: "TCS",
-          status: "OPEN",
-        });
+        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "TCS" });
 
         if (lastSigRef.current === null) {
           lastSigRef.current = sig;
@@ -242,7 +287,7 @@ export default function TCSProblems() {
           lastSigRef.current = sig;
           load();
         }
-      } catch (e) {}
+      } catch {}
     };
 
     const t = setInterval(poll, 20000);
@@ -256,11 +301,8 @@ export default function TCSProblems() {
   const counts = useMemo(() => {
     const prod = base.filter((x) => x.environment === "Productivo").length;
     const nprod = base.filter((x) => x.environment === "No Productivo").length;
-
-    // OJO: aunque pedimos status=OPEN al backend, igual dejamos filtros por si tu backend envía mezclado
     const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
     const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
-
     return { total: base.length, prod, nprod, open, closed };
   }, [base]);
 
@@ -273,16 +315,6 @@ export default function TCSProblems() {
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      {/* Tabs (sin cambiar estilo general) */}
-      <div style={{ display: "flex", gap: "12px", marginBottom: "12px" }}>
-        <a href="/tcs" style={{ fontWeight: 800, textDecoration: "none", color: "#111" }}>
-          TCS
-        </a>
-        <a href="/otros" style={{ fontWeight: 800, textDecoration: "none", color: "#555" }}>
-          Otros
-        </a>
-      </div>
-
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
         Problemas TCS ({counts.total})
       </h1>
@@ -348,13 +380,14 @@ export default function TCSProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
---------
+-----
+
 
 // src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -382,7 +415,6 @@ function Chip({ active, onClick, children, color }) {
 export default function OtherProblems() {
   const [username, setUsername] = useState("");
   const [loading, setLoading] = useState(false);
-
   const [base, setBase] = useState([]);
 
   const [envFilter, setEnvFilter] = useState(null);
@@ -410,20 +442,16 @@ export default function OtherProblems() {
         startIso,
         endIso,
         jurisdiction: "OTROS",
-        status: "OPEN",
         pageSize: 200,
         maxPages: 60,
         signal: controller.signal,
-
         onBatch: (batch) => {
           for (const x of batch) allAccum.push(x);
           setBase([...allAccum]);
         },
       });
     } catch (e) {
-      if (String(e?.name || "").toLowerCase() !== "aborterror") {
-        console.error(e);
-      }
+      if (String(e?.name || "").toLowerCase() !== "aborterror") console.error(e);
     } finally {
       setLoading(false);
       inFlightRef.current = false;
@@ -436,13 +464,7 @@ export default function OtherProblems() {
     const poll = async () => {
       try {
         const { startIso, endIso } = getYesterdayToNowRangeIso();
-
-        const sig = await fetchLatestSignature({
-          startIso,
-          endIso,
-          jurisdiction: "OTROS",
-          status: "OPEN",
-        });
+        const sig = await fetchLatestSignature({ startIso, endIso, jurisdiction: "OTROS" });
 
         if (lastSigRef.current === null) {
           lastSigRef.current = sig;
@@ -453,7 +475,7 @@ export default function OtherProblems() {
           lastSigRef.current = sig;
           load();
         }
-      } catch (e) {}
+      } catch {}
     };
 
     const t = setInterval(poll, 20000);
@@ -481,16 +503,6 @@ export default function OtherProblems() {
 
   return (
     <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
-      {/* Tabs */}
-      <div style={{ display: "flex", gap: "12px", marginBottom: "12px" }}>
-        <a href="/tcs" style={{ fontWeight: 800, textDecoration: "none", color: "#555" }}>
-          TCS
-        </a>
-        <a href="/otros" style={{ fontWeight: 800, textDecoration: "none", color: "#111" }}>
-          Otros
-        </a>
-      </div>
-
       <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
         Problemas Otros ({counts.total})
       </h1>
@@ -556,14 +568,13 @@ export default function OtherProblems() {
       )}
 
       {visible.map((p) => (
-        <ProblemCard key={`${p.problemId || p.displayId}-${p.startTime}`} problem={p} username={username} />
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
       ))}
     </div>
   );
 }
 
-
---------
+-------
 
 // src/components/ProblemCard.jsx
 import React, { useEffect, useMemo, useState } from "react";
@@ -584,7 +595,7 @@ function normalizeStatus(p) {
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
 
   // fallback solo si no vino status
-  return p?.endTime ? "CLOSED" : "OPEN";
+  return p?.endTime || p?.EndTime ? "CLOSED" : "OPEN";
 }
 
 // Iconos por tower
@@ -592,8 +603,7 @@ function towerToIconPath(towerKey) {
   if (!towerKey) return null;
   const key = String(towerKey).toLowerCase();
 
-  // FIX: era "wiltel1.svg" (typo). No cambia diseño, solo corrige icono.
-  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wintel1.svg";
+  if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
   if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
     return "/icons/towers/Base.svg";
   if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
@@ -605,11 +615,19 @@ export default function ProblemCard({ problem, username }) {
   const { get: catalogGet } = useBiaCatalog();
 
   const status = useMemo(() => normalizeStatus(problem), [problem]);
-  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
+
+  const start = useMemo(() => {
+    const raw = problem?.startTime ?? problem?.StartTime ?? problem?.start ?? problem?.Start;
+    return raw ? new Date(raw) : new Date();
+  }, [problem]);
 
   // Buscar coincidencia con catálogo
   const hitFromCatalog = useMemo(() => {
-    const arr = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+    const arr = Array.isArray(problem?.affectedCI)
+      ? problem.affectedCI
+      : Array.isArray(problem?.AffectedCI)
+      ? problem.AffectedCI
+      : [];
     for (const ci of arr) {
       const name = ci?.name || ci?.Nombre;
       const hit = name ? catalogGet(name) : null;
@@ -637,6 +655,7 @@ export default function ProblemCard({ problem, username }) {
   }, [status]);
 
   const elapsedMinutes = useMemo(() => (status === "CLOSED" ? 0 : (now - start) / 60000), [now, start, status]);
+
   const remainingMinutes = useMemo(() => (status === "CLOSED" ? 0 : Math.max(slaMinutes - elapsedMinutes, 0)), [
     slaMinutes,
     elapsedMinutes,
@@ -659,20 +678,23 @@ export default function ProblemCard({ problem, username }) {
     return `${String(hrs).padStart(2, "0")}:${String(mins).padStart(2, "0")}:${String(secs).padStart(2, "0")}`;
   };
 
-  const affected = Array.isArray(problem?.affectedCI) ? problem.affectedCI : [];
+  const affected = Array.isArray(problem?.affectedCI)
+    ? problem.affectedCI
+    : Array.isArray(problem?.AffectedCI)
+    ? problem.AffectedCI
+    : [];
   const uniqueNames = [...new Set(affected.map((ci) => ci?.name).filter(Boolean))];
   const equipos = uniqueNames.join(", ");
 
   const isDisabled = !username;
 
-  const tenant = problem?.tenant || "";
-  // Mejor para Dynatrace: displayId (P-xxxxx) primero
-  const pid = problem?.displayId || problem?.problemId || "";
+  const tenant = problem?.tenant || problem?.Tenant || "";
+  const problemId = problem?.problemId || problem?.ProblemId || problem?.displayId || problem?.DisplayId || "";
 
   const dynatraceUrl =
-    tenant && pid ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${encodeURIComponent(pid)}` : "#";
+    tenant && problemId ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}` : "#";
 
-  const environment = problem?.environment || "";
+  const environment = problem?.environment || problem?.Environment || "";
 
   return (
     <div
@@ -689,13 +711,15 @@ export default function ProblemCard({ problem, username }) {
     >
       {/* IZQUIERDA: INFO */}
       <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
+        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
+          {problem?.title || problem?.Title || "(sin título)"}
+        </h3>
 
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
+          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel || problem?.SeverityLevel || ""}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {problem?.impactLevel}
+          <strong>Impacto:</strong> {problem?.impactLevel || problem?.ImpactLevel || ""}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
           <strong>Inicio:</strong> {start.toLocaleString()}
