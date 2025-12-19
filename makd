@@ -29,8 +29,7 @@ function toLocalIsoNoZ(d) {
 
 function parseAmPmToken(tok) {
   if (!tok) return null;
-  const t = tok.toLowerCase().replace(/\s+/g, "");
-  // soporta: am, pm, a.m., p.m., a.m, p.m, a. m., p. m.
+  const t = String(tok).toLowerCase().replace(/\s+/g, "");
   if (t.includes("a.m") || t === "am") return "AM";
   if (t.includes("p.m") || t === "pm") return "PM";
   return null;
@@ -56,8 +55,7 @@ function parseDateToISO(v) {
     // SQL "YYYY-MM-DD HH:mm:ss" -> ISO friendly
     if (/^\d{4}-\d{2}-\d{2}\s+\d/.test(s)) s = s.replace(" ", "T");
 
-    // ✅ Formato latino: "dd/MM/yyyy" o "dd/MM/yyyy, h:mm:ss a.m./p.m."
-    // Ej: "17/12/2025, 6:45:00 p.m."
+    // ✅ "dd/MM/yyyy, h:mm:ss a.m./p.m."
     const mLat = s.match(
       /^(\d{2})\/(\d{2})\/(\d{4})(?:\s*,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?)?$/i
     );
@@ -71,30 +69,6 @@ function parseDateToISO(v) {
       const ss = mLat[6] != null ? Number(mLat[6]) : 0;
 
       const ampm = parseAmPmToken(mLat[7]);
-
-      // convierte a 24h si viene AM/PM
-      if (ampm === "PM" && hh < 12) hh += 12;
-      if (ampm === "AM" && hh === 12) hh = 0;
-
-      const d = new Date(yyyy, mm - 1, dd, hh, mi, ss); // local
-      return Number.isFinite(d.getTime()) ? d.toISOString() : null;
-    }
-
-    // ✅ Formato: "dd-MM-yyyy ..."
-    const mLat2 = s.match(
-      /^(\d{2})-(\d{2})-(\d{4})(?:\s*,\s*(\d{1,2}):(\d{2})(?::(\d{2}))?\s*([ap]\.?\s*m\.?|am|pm)?)?$/i
-    );
-    if (mLat2) {
-      const dd = Number(mLat2[1]);
-      const mm = Number(mLat2[2]);
-      const yyyy = Number(mLat2[3]);
-
-      let hh = mLat2[4] != null ? Number(mLat2[4]) : 0;
-      const mi = mLat2[5] != null ? Number(mLat2[5]) : 0;
-      const ss = mLat2[6] != null ? Number(mLat2[6]) : 0;
-
-      const ampm = parseAmPmToken(mLat2[7]);
-
       if (ampm === "PM" && hh < 12) hh += 12;
       if (ampm === "AM" && hh === 12) hh = 0;
 
@@ -102,7 +76,6 @@ function parseDateToISO(v) {
       return Number.isFinite(d.getTime()) ? d.toISOString() : null;
     }
 
-    // fallback nativo
     const d = new Date(s);
     return Number.isFinite(d.getTime()) ? d.toISOString() : null;
   }
@@ -133,7 +106,7 @@ function normalizeEnvironment(envRaw) {
 /**
  * IMPORTANTÍSIMO:
  * "NO TCS" contiene "TCS" -> primero detectamos NO TCS.
- * En BD el campo se llama Jurisdiction.
+ * En BD el campo es Jurisdiction.
  */
 function normalizeJurisdiction(jRaw) {
   const s = (cleanNull(jRaw) || "").toString().trim().toUpperCase().replace(/\s+/g, " ");
@@ -206,7 +179,8 @@ function normalize(list) {
   });
 }
 
-// ✅ Query: StartTime >= CONVERT(DATE,GETDATE()-1)  AND StartTime < GETDATE()
+// ✅ Igual que tu query:
+// StartTime >= CONVERT(DATE,GETDATE()-1)  AND StartTime < GETDATE()
 export function getYesterdayToNowRangeIso() {
   const now = new Date();
   const start = new Date(now);
@@ -215,13 +189,13 @@ export function getYesterdayToNowRangeIso() {
   return { startIso: toLocalIsoNoZ(start), endIso: toLocalIsoNoZ(now) };
 }
 
-/**
- * ✅ FIX: NO enviamos start/end al backend (para que no devuelva 0 por parsing del server)
- */
-async function fetchPage({ pageNumber, pageSize, signal }) {
+// ✅ VOLVEMOS a mandar start/end al backend (este es el fix que te faltaba)
+async function fetchPage({ pageNumber, pageSize, startIso, endIso, signal }) {
   const params = new URLSearchParams();
   params.set("pageNumber", String(pageNumber));
   params.set("pageSize", String(pageSize));
+  if (startIso) params.set("start", startIso);
+  if (endIso) params.set("end", endIso);
 
   const url = `${API}?${params.toString()}`;
 
@@ -241,42 +215,32 @@ async function fetchPage({ pageNumber, pageSize, signal }) {
   return normalize(items);
 }
 
+/**
+ * Paginación segura + filtro EXACTO “ayer 00:00 -> ahora”
+ * (pero ahora ya viene filtrado por backend).
+ */
 export async function fetchProblemsRange({
   startIso,
   endIso,
-  jurisdiction = null, // "TCS" o "OTROS" (opcional)
-  pageSize = 500,
-  maxPages = 60,
+  jurisdiction = null, // "TCS" o "OTROS"
+  pageSize = 200,
+  maxPages = 20, // ✅ ya no necesitas 80 si el backend filtra por fechas
   onBatch,
   signal,
 } = {}) {
   let all = [];
   const seen = new Set();
 
-  const startMs = startIso ? new Date(startIso).getTime() : null;
-  const endMs = endIso ? new Date(endIso).getTime() : null;
-
   const target = (jurisdiction || "").toUpperCase().trim();
-
   let noNewStreak = 0;
 
   for (let page = 1; page <= maxPages; page++) {
-    const batch = await fetchPage({ pageNumber: page, pageSize, signal });
+    const batch = await fetchPage({ pageNumber: page, pageSize, startIso, endIso, signal });
     if (!batch.length) break;
 
-    // ✅ filtro rango exacto: start <= t < end
-    // ✅ si NO se puede parsear fecha, NO lo botan (para no quedar en 0)
-    const inRange = batch.filter((x) => {
-      const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return true; // <-- clave para que no muera la pantalla
-      if (startMs && t < startMs) return false;
-      if (endMs && t >= endMs) return false;
-      return true;
-    });
-
-    let inScope = inRange;
+    let inScope = batch;
     if (target) {
-      inScope = inRange.filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target);
+      inScope = batch.filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target);
     }
 
     let newCount = 0;
@@ -294,7 +258,7 @@ export async function fetchProblemsRange({
     if (newCount === 0) noNewStreak++;
     else noNewStreak = 0;
 
-    if (noNewStreak >= 3) break;
+    if (noNewStreak >= 2) break;
     if (batch.length < pageSize) break;
   }
 
@@ -307,39 +271,360 @@ export async function fetchProblemsRange({
   return all;
 }
 
-export async function fetchLatestSignature({
-  startIso,
-  endIso,
-  jurisdiction = "TCS",
-  signal,
-} = {}) {
-  const batch = await fetchPage({ pageNumber: 1, pageSize: 200, signal });
 
-  const startMs = startIso ? new Date(startIso).getTime() : null;
-  const endMs = endIso ? new Date(endIso).getTime() : null;
-  const target = (jurisdiction || "").toUpperCase().trim();
+-----
 
-  const filtered = batch
-    .filter((x) => {
-      const t = x.startTime ? new Date(x.startTime).getTime() : null;
-      if (!t || !Number.isFinite(t)) return true;
-      if (startMs && t < startMs) return false;
-      if (endMs && t >= endMs) return false;
-      return true;
-    })
-    .filter((x) => String(x.jurisdiction || "").toUpperCase().trim() === target)
-    .sort((a, b) => {
-      const da = a.startTime ? new Date(a.startTime).getTime() : 0;
-      const db = b.startTime ? new Date(b.startTime).getTime() : 0;
-      return db - da;
-    });
 
-  const top = filtered[0];
-  if (!top) return null;
+// src/pages/Tcs.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
 
-  return `${top.problemId || ""}|${top.status || ""}|${top.startTime || ""}|${top.endTime || ""}`;
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
-----
+export default function Tcs() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
 
+  const [base, setBase] = useState([]);
 
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+
+  // ✅ evita doble carga
+  const inFlightRef = useRef(false);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const tcsAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "TCS",
+        pageSize: 200,
+        maxPages: 20,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) tcsAccum.push(x);
+          setBase([...tcsAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+
+    const t = setInterval(load, 60000);
+
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas TCS ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "center",
+          gap: "10px",
+          flexWrap: "wrap",
+          marginBottom: "18px",
+        }}
+      >
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
+
+------
+
+// src/pages/OtherProblems.jsx
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import ProblemCard from "../components/ProblemCard";
+import { fetchProblemsRange, getYesterdayToNowRangeIso } from "../api/problems";
+
+function Chip({ active, onClick, children, color }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border: "1px solid rgba(0,0,0,.12)",
+        background: active ? (color || "#e5e7eb") : "#f3f4f6",
+        padding: "6px 12px",
+        borderRadius: "999px",
+        cursor: "pointer",
+        fontWeight: 700,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+export default function OtherProblems() {
+  const [username, setUsername] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  const [base, setBase] = useState([]);
+
+  const [envFilter, setEnvFilter] = useState(null);
+  const [statusFilter, setStatusFilter] = useState(null);
+
+  const abortRef = useRef(null);
+  const inFlightRef = useRef(false);
+
+  const load = async () => {
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+
+    if (abortRef.current) abortRef.current.abort();
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    setLoading(true);
+
+    try {
+      const { startIso, endIso } = getYesterdayToNowRangeIso();
+
+      const otherAccum = [];
+
+      await fetchProblemsRange({
+        startIso,
+        endIso,
+        jurisdiction: "OTROS",
+        pageSize: 200,
+        maxPages: 20,
+        signal: controller.signal,
+
+        onBatch: (batch) => {
+          for (const x of batch) otherAccum.push(x);
+          setBase([...otherAccum]);
+        },
+      });
+    } catch (e) {
+      if (String(e?.name || "").toLowerCase() !== "aborterror") {
+        console.error(e);
+      }
+    } finally {
+      setLoading(false);
+      inFlightRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    load();
+    const t = setInterval(load, 60000);
+    return () => {
+      clearInterval(t);
+      if (abortRef.current) abortRef.current.abort();
+    };
+  }, []);
+
+  const counts = useMemo(() => {
+    const prod = base.filter((x) => x.environment === "Productivo").length;
+    const nprod = base.filter((x) => x.environment === "No Productivo").length;
+    const open = base.filter((x) => (x.status || "").toUpperCase() === "OPEN").length;
+    const closed = base.filter((x) => (x.status || "").toUpperCase() === "CLOSED").length;
+    return { total: base.length, prod, nprod, open, closed };
+  }, [base]);
+
+  const visible = useMemo(() => {
+    let list = base;
+    if (envFilter) list = list.filter((x) => x.environment === envFilter);
+    if (statusFilter) list = list.filter((x) => (x.status || "").toUpperCase() === statusFilter);
+    return list;
+  }, [base, envFilter, statusFilter]);
+
+  return (
+    <div style={{ maxWidth: 980, margin: "0 auto", padding: "2rem 1rem" }}>
+      <h1 style={{ textAlign: "center", marginBottom: ".5rem" }}>
+        Problemas Otros ({counts.total})
+      </h1>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", marginBottom: "10px" }}>
+        <div style={{ fontWeight: 700 }}>Usuario:</div>
+        <input
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          style={{ padding: "4px 8px", border: "1px solid #ccc", borderRadius: 4, width: 180 }}
+          placeholder="Tu usuario"
+        />
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "18px" }}>
+        <Chip
+          active={envFilter === "Productivo"}
+          color="#93c5fd"
+          onClick={() => setEnvFilter(envFilter === "Productivo" ? null : "Productivo")}
+        >
+          Productivo ({counts.prod})
+        </Chip>
+
+        <Chip
+          active={envFilter === "No Productivo"}
+          color="#e5e7eb"
+          onClick={() => setEnvFilter(envFilter === "No Productivo" ? null : "No Productivo")}
+        >
+          No Productivo ({counts.nprod})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "OPEN"}
+          color="#fde68a"
+          onClick={() => setStatusFilter(statusFilter === "OPEN" ? null : "OPEN")}
+        >
+          Abiertas ({counts.open})
+        </Chip>
+
+        <Chip
+          active={statusFilter === "CLOSED"}
+          color="#86efac"
+          onClick={() => setStatusFilter(statusFilter === "CLOSED" ? null : "CLOSED")}
+        >
+          Cerradas ({counts.closed})
+        </Chip>
+
+        <Chip
+          active={!envFilter && !statusFilter}
+          onClick={() => {
+            setEnvFilter(null);
+            setStatusFilter(null);
+          }}
+        >
+          Todos
+        </Chip>
+      </div>
+
+      {loading && (
+        <div style={{ textAlign: "center", marginBottom: "10px", fontWeight: 700 }}>
+          Cargando problemas...
+        </div>
+      )}
+
+      {visible.map((p) => (
+        <ProblemCard key={`${p.problemId}-${p.startTime}`} problem={p} username={username} />
+      ))}
+    </div>
+  );
+}
