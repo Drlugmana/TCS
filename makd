@@ -8,16 +8,36 @@ import {
   getButtonColorByPercent,
 } from "../utils/slaUtils";
 
+// Helpers para soportar campos con mayúsculas/minúsculas
+function pick(p, ...keys) {
+  for (const k of keys) {
+    if (p && p[k] !== undefined && p[k] !== null) return p[k];
+  }
+  return undefined;
+}
+
 // Normaliza estado OPEN/CLOSED (sin inventar OPEN si viene CLOSED)
 function normalizeStatus(p) {
-  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
+  const raw =
+    pick(p, "status", "Status", "problemStatus", "problemState", "ProblemStatus", "ProblemState") ?? "";
   const s = String(raw || "").trim().toUpperCase();
 
   if (s.includes("OPEN")) return "OPEN";
   if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
 
   // fallback solo si no vino status
-  return p?.endTime ? "CLOSED" : "OPEN";
+  const end = pick(p, "endTime", "EndTime");
+  return end ? "CLOSED" : "OPEN";
+}
+
+// Normaliza Environment (Productivo/No Productivo)
+function normalizeEnvironment(raw) {
+  const s = String(raw || "").trim().toUpperCase().replace(/\s+/g, "");
+  // si viene "Productivo"
+  if (s === "PRODUCTIVO") return "Productivo";
+  // si viene "NoProductivo", "No Productivo", etc.
+  if (s.includes("NOPRODUCTIVO") || s.includes("NO")) return "NoProductivo";
+  return raw || "";
 }
 
 // Iconos por tower
@@ -37,7 +57,12 @@ export default function ProblemCard({ problem, username }) {
   const { get: catalogGet } = useBiaCatalog();
 
   const status = useMemo(() => normalizeStatus(problem), [problem]);
-  const start = useMemo(() => (problem?.startTime ? new Date(problem.startTime) : new Date()), [problem]);
+
+  // ✅ soporta startTime / StartTime
+  const start = useMemo(() => {
+    const raw = pick(problem, "startTime", "StartTime");
+    return raw ? new Date(raw) : new Date();
+  }, [problem]);
 
   // Buscar coincidencia con catálogo
   const hitFromCatalog = useMemo(() => {
@@ -95,15 +120,19 @@ export default function ProblemCard({ problem, username }) {
   const equipos = uniqueNames.join(", ");
 
   const isDisabled = !username;
-  const tenant = problem?.tenant || "";
-  const problemId = problem?.problemId || problem?.displayId || "";
+
+  // ✅ soporta tenant/Tenant + problemId/displayId/ProblemId/DisplayId
+  const tenant = pick(problem, "tenant", "Tenant") || "";
+  const problemId = pick(problem, "problemId", "ProblemId", "displayId", "DisplayId") || "";
 
   const dynatraceUrl =
     tenant && problemId
       ? `https://${tenant}.live.dynatrace.com/#problems/problemdetails;pid=${problemId}`
       : "#";
 
-  const environment = problem?.environment || "";
+  // ✅ soporta environment/Environment y normaliza valores
+  const environmentRaw = pick(problem, "environment", "Environment") || "";
+  const environment = normalizeEnvironment(environmentRaw);
 
   return (
     <div
@@ -120,13 +149,15 @@ export default function ProblemCard({ problem, username }) {
     >
       {/* IZQUIERDA: INFO */}
       <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>{problem?.title || "(sin título)"}</h3>
+        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
+          {pick(problem, "title", "Title") || "(sin título)"}
+        </h3>
 
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {problem?.severityLevel}
+          <strong>Severidad Dynatrace:</strong> {pick(problem, "severityLevel", "SeverityLevel")}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {problem?.impactLevel}
+          <strong>Impacto:</strong> {pick(problem, "impactLevel", "ImpactLevel")}
         </p>
         <p style={{ fontSize: "1.2rem" }}>
           <strong>Inicio:</strong> {start.toLocaleString()}
@@ -171,8 +202,8 @@ export default function ProblemCard({ problem, username }) {
                 src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
                 width={size}
                 height={size}
-                title={environment}
-                alt={environment}
+                title={environmentRaw}
+                alt={environmentRaw}
               />
               {towerIcon && (
                 <img
