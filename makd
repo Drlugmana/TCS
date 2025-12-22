@@ -1,49 +1,88 @@
-// GET: api/Problems/by-range
-[HttpGet("by-range")]
-public async Task<ActionResult<PagedResponse<ProblemDynatraceResponse>>> GetProblemsByRange(
-    DateTime? startDate = null,
-    DateTime? endDate = null,
-    int pageNumber = 1,
-    int pageSize = 50)
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
+using Newtonsoft.Json;
+using RestAPIDynatraceReportes.Data; // <-- tu namespace de AppDbContext (ajústalo si cambia)
+using RestAPIDynatraceReportes.Models; // <-- donde estén tus modelos/DTOs (ajústalo si cambia)
+
+namespace RestAPIDynatraceReportes.Controllers
 {
-    // Default: ayer 00:00 hasta ahora
-    var from = startDate ?? DateTime.Today.AddDays(-1);
-    var to = endDate ?? DateTime.Now;
-
-    var baseQuery = _context.DynatraceProblems
-        .AsNoTracking()
-        .Where(p => p.StartTime >= from && p.StartTime < to);
-
-    var totalRecords = await baseQuery.CountAsync();
-
-    var problems = await baseQuery
-        .OrderByDescending(p => p.StartTime)
-        .Skip((pageNumber - 1) * pageSize)
-        .Take(pageSize)
-        .ToListAsync();
-
-    // MISMA lógica que tu GetProblems (misma estructura)
-    var deserializedProblems = problems
-        .Select(problem =>
-        {
-            try
-            {
-                return convertProblemJSON(problem);
-            }
-            catch
-            {
-                return null;
-            }
-        })
-        .Where(p => p != null)
-        .ToList();
-
-    return new PagedResponse<ProblemDynatraceResponse>
+    [Route("api/[controller]")]
+    [ApiController]
+    public class ProblemsController : ControllerBase
     {
-        TotalRecords = totalRecords,
-        TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
-        PageNumber = pageNumber,
-        PageSize = pageSize,
-        Data = deserializedProblems
-    };
+        private readonly AppDbContext _context;
+
+        public ProblemsController(AppDbContext context)
+        {
+            _context = context;
+        }
+
+        // ==========================================================
+        // ✅ NUEVO ENDPOINT: AYER 00:00 HASTA AHORA (MISMA ESTRUCTURA)
+        // GET: api/Problems/latest?pageNumber=1&pageSize=50&jurisdiction=TCS
+        // jurisdiction: "TCS" o "OT" (o el texto exacto que guardas en BD)
+        // ==========================================================
+        [HttpGet("latest")]
+        public async Task<ActionResult<PagedResponse<ProblemDynatraceResponse>>> GetProblemsLatest(
+            [FromQuery] int pageNumber = 1,
+            [FromQuery] int pageSize = 50,
+            [FromQuery] string? jurisdiction = null
+        )
+        {
+            // AYER 00:00 (local server time)
+            var startDate = DateTime.Today.AddDays(-1);
+
+            // AHORA
+            var endDate = DateTime.Now;
+
+            var baseQuery = _context.DynatraceProblems
+                .AsNoTracking()
+                .Where(p => p.StartTime >= startDate && p.StartTime <= endDate);
+
+            if (!string.IsNullOrWhiteSpace(jurisdiction))
+            {
+                baseQuery = baseQuery.Where(p => p.Jurisdiction == jurisdiction);
+            }
+
+            // orden: más recientes primero
+            baseQuery = baseQuery.OrderByDescending(p => p.StartTime);
+
+            var totalRecords = await baseQuery.CountAsync();
+
+            var problems = await baseQuery
+                .Skip((pageNumber - 1) * pageSize)
+                .Take(pageSize)
+                .ToListAsync();
+
+            // ✅ Mantener tu misma lógica de deserialización
+            var deserializedProblems = problems
+                .Select(problem =>
+                {
+                    try
+                    {
+                        return convertProblemJSON(problem); // <-- usa tu método existente
+                    }
+                    catch (JsonException)
+                    {
+                        return null;
+                    }
+                })
+                .Where(p => p != null)
+                .ToList()!;
+
+            var response = new PagedResponse<ProblemDynatraceResponse>
+            {
+                TotalRecords = totalRecords,
+                TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
+                PageNumber = pageNumber,
+                PageSize = pageSize,
+                Data = deserializedProblems
+            };
+
+            return response;
+        }
+
+        // ✅ OJO: aquí NO pongo convertProblemJSON porque tú ya lo tienes en tu controller.
+        // NO LO CAMBIES, solo asegúrate que este endpoint lo llame.
+    }
 }
