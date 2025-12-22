@@ -1,31 +1,74 @@
-<?xml version="1.0" encoding="utf-8"?>
-<configuration>
-  <system.webServer>
+// src/api/problems.js
 
-    <staticContent>
-      <remove fileExtension=".json" />
-      <mimeMap fileExtension=".json" mimeType="application/json" />
-    </staticContent>
+// Base relativa (mismo host del Front). Ideal para IIS + Reverse Proxy.
+// Puedes sobreescribirlo con VITE_API_URL=/api en .env
+const API_BASE =
+  import.meta?.env?.VITE_API_URL ||
+  import.meta?.env?.VITE_API_BASE_URL ||
+  import.meta?.env?.VITE_API ||
+  window?.API_BASE_URL ||
+  "/api";
 
-    <rewrite>
-      <rules>
-        <!-- Proxy /api -> backend -->
-        <rule name="ProxyApi" stopProcessing="true">
-          <match url="^api/(.*)" ignoreCase="true" />
-          <action type="Rewrite" url="http://10.70.144.250:5000/api/{R:1}" />
-        </rule>
+function buildUrl(path, params = {}) {
+  // Si API_BASE es relativo (/api), construimos contra el origin actual
+  const base = API_BASE.startsWith("http")
+    ? API_BASE
+    : `${window.location.origin}${API_BASE}`;
 
-        <!-- SPA fallback -->
-        <rule name="ReactSpa" stopProcessing="true">
-          <match url=".*" />
-          <conditions logicalGrouping="MatchAll">
-            <add input="{REQUEST_FILENAME}" matchType="IsFile" negate="true" />
-            <add input="{REQUEST_FILENAME}" matchType="IsDirectory" negate="true" />
-          </conditions>
-          <action type="Rewrite" url="/index.html" />
-        </rule>
-      </rules>
-    </rewrite>
+  // 🔥 CLAVE: asegurar que base termine en "/" y que path NO empiece con "/"
+  const normalizedBase = base.endsWith("/") ? base : `${base}/`;
+  const normalizedPath = String(path).replace(/^\/+/, ""); // quita "/" al inicio
 
-  </system.webServer>
-</configuration>
+  const url = new URL(normalizedPath, normalizedBase);
+
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      url.searchParams.set(k, String(v));
+    }
+  });
+
+  return url.toString();
+}
+
+async function safeReadJson(res) {
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return await res.json();
+
+  const txt = await res.text();
+  try {
+    return JSON.parse(txt);
+  } catch {
+    return { data: [], raw: txt };
+  }
+}
+
+/**
+ * GET /api/Problems/latest
+ * (En IIS realmente llamamos /api/... y el web.config lo manda al backend)
+ */
+export async function getLatestProblems({ pageNumber = 1, pageSize = 1000, jurisdiction } = {}) {
+  // 👇 puedes pasar "Problems/latest" o "/Problems/latest"
+  // con este fix ambos funcionan
+  const url = buildUrl("Problems/latest", { pageNumber, pageSize, jurisdiction });
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: { Accept: "application/json, text/plain, */*" },
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Error ${res.status} llamando ${url}\n${txt}`);
+  }
+
+  const json = await safeReadJson(res);
+
+  if (json && Array.isArray(json.data)) return json;
+
+  // fallback si viniera un array directo
+  if (Array.isArray(json)) {
+    return { totalRecords: json.length, totalPages: 1, pageNumber, pageSize, data: json };
+  }
+
+  return { totalRecords: 0, totalPages: 0, pageNumber, pageSize, data: [] };
+}
