@@ -1,30 +1,80 @@
 // src/api/problems.js
-// ✅ En IIS/producción debe ser RELATIVO para que funcione en otras máquinas.
-// ✅ Si existe VITE_API_BASE_URL lo usa, si no usa "/api".
 
-const API_BASE = (import.meta.env.VITE_API_BASE_URL || "/api").replace(/\/$/, "");
+// Base relativa (mismo host del Front). Ideal para IIS + Reverse Proxy.
+// Puedes sobreescribirlo con VITE_API_URL=/api en .env
+const API_BASE =
+  import.meta?.env?.VITE_API_URL ||
+  import.meta?.env?.VITE_API_BASE_URL ||
+  import.meta?.env?.VITE_API ||
+  window?.API_BASE_URL ||
+  "/api";
 
-export async function fetchProblemsLatest({
-  pageNumber = 1,
-  pageSize = 500,
-  jurisdiction = null, // "TCS" o "OTROS"
-} = {}) {
-  const params = new URLSearchParams();
-  params.set("pageNumber", String(pageNumber));
-  params.set("pageSize", String(pageSize));
-  if (jurisdiction) params.set("jurisdiction", jurisdiction);
+function buildUrl(path, params = {}) {
+  // Si API_BASE es relativo (/api), construimos contra el origin actual
+  const base = API_BASE.startsWith("http")
+    ? API_BASE
+    : `${window.location.origin}${API_BASE}`;
 
-  const url = `${API_BASE}/Problems/latest?${params.toString()}`;
+  const url = new URL(path, base);
+
+  Object.entries(params).forEach(([k, v]) => {
+    if (v !== undefined && v !== null && String(v).trim() !== "") {
+      url.searchParams.set(k, String(v));
+    }
+  });
+
+  return url.toString();
+}
+
+async function safeReadJson(res) {
+  const ct = res.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return await res.json();
+
+  const txt = await res.text();
+  try {
+    return JSON.parse(txt);
+  } catch {
+    return { data: [], raw: txt };
+  }
+}
+
+/**
+ * GET /api/Problems/latest
+ * params: pageNumber, pageSize, jurisdiction ("TCS" | "OTROS" | null)
+ */
+async function getLatestProblems({ pageNumber = 1, pageSize = 1000, jurisdiction } = {}) {
+  const url = buildUrl("/Problems/latest", { pageNumber, pageSize, jurisdiction });
+  // 👆 OJO: aquí NO ponemos "/api" porque API_BASE ya es "/api"
 
   const res = await fetch(url, {
     method: "GET",
-    headers: { Accept: "application/json" },
+    headers: { Accept: "application/json, text/plain, */*" },
   });
 
   if (!res.ok) {
-    const text = await res.text().catch(() => "");
-    throw new Error(`Error ${res.status} en ${url}. ${text}`);
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Error ${res.status} llamando ${url}\n${txt}`);
   }
 
-  return res.json();
+  const json = await safeReadJson(res);
+
+  // Caso 1: backend devuelve { data: [...] }
+  if (json && Array.isArray(json.data)) return json;
+
+  // Caso 2: backend devuelve array directo [...]
+  if (Array.isArray(json)) {
+    return {
+      totalRecords: json.length,
+      totalPages: 1,
+      pageNumber,
+      pageSize,
+      data: json,
+    };
+  }
+
+  // Caso 3: cualquier otra cosa
+  return { totalRecords: 0, totalPages: 0, pageNumber, pageSize, data: [] };
 }
+
+// ✅ EXPORT EXPLÍCITO (esto evita tu error al empaquetar)
+export { getLatestProblems };
