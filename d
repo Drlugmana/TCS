@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<configuration>
+  <system.webServer>
+    <handlers>
+      <add name="aspNetCore"
+           path="*"
+           verb="*"
+           modules="AspNetCoreModuleV2"
+           resourceType="Unspecified" />
+    </handlers>
+
+    <aspNetCore
+      processPath=".\RestAPIDynatraceReportes.exe"
+      arguments=""
+      stdoutLogEnabled="true"
+      stdoutLogFile=".\logs\stdout"
+      hostingModel="InProcess" />
+  </system.webServer>
+</configuration>
