@@ -1,86 +1,56 @@
-      [HttpGet("latest")]
-      public async Task<ActionResult<PagedResponse<ProblemDynatraceResponse>>> GetProblemsLatest(
-    [FromQuery] int pageNumber = 1,
-    [FromQuery] int pageSize = 50,
-    [FromQuery] string? jurisdiction = null
-)
-      {
-          // Ventana de tiempo para CLOSED recientes (ajústalo si quieres)
-          var closedStartDate = DateTime.Today.AddDays(-2);
-          var now = DateTime.Now;
+using Microsoft.EntityFrameworkCore;
+using RestAPIDynatrace.Context;
 
-          // 1) TODOS los OPEN (sin paginación aquí, para no "perder" ninguno)
-          var openQuery = _context.DynatraceProblems
-              .AsNoTracking()
-              .Where(p => p.Status == "OPEN");
+var builder = WebApplication.CreateBuilder(args);
+// Configurar CORS
 
-          // Si te mandan jurisdiction por querystring (ej: TCS), lo aplicamos.
-          if (!string.IsNullOrWhiteSpace(jurisdiction))
-              openQuery = openQuery.Where(p => p.Jurisdiction == jurisdiction);
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("AllowFrontend",
+        policy => policy
+        .WithOrigins(
+            "http://localhost:5173",
+            "https://localhost:5173",
+            "https://qsf8ln7q-44334.brs.devtunnels.ms"
+        )
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
 
-          // 2) POCOS CLOSED recientes (últimos 1-2 días) para que el Front tenga cerradas
-          //    Aquí sí limitamos cantidad (Top 50 por defecto)
-          var closedTop = 50;
 
-          var closedQuery = _context.DynatraceProblems
-              .AsNoTracking()
-              .Where(p => p.Status == "CLOSED"
-                       && p.StartTime >= closedStartDate
-                       && p.StartTime <= now);
+// Configurar Kestrel para aumentar el límite de tamaño de solicitud y el tiempo de espera
+builder.WebHost.ConfigureKestrel(serverOptions =>
+{
+    serverOptions.Limits.MaxRequestBodySize = 1048576000; // 100 MB
+    serverOptions.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(10); // Tiempo de espera de Keep-Alive
+    serverOptions.Limits.RequestHeadersTimeout = TimeSpan.FromMinutes(10); // Tiempo de espera para los encabezados de la solicitud
+});
 
-          if (!string.IsNullOrWhiteSpace(jurisdiction))
-              closedQuery = closedQuery.Where(p => p.Jurisdiction == jurisdiction);
+// Add services to the container.
+var connectionString = builder.Configuration.GetConnectionString("Connection");
+builder.Services.AddDbContext<AppDbContext>(options => options.UseSqlServer(connectionString));
 
-          // Traemos a memoria: todos los OPEN + top CLOSED recientes
-          var openList = await openQuery
-              .OrderByDescending(p => p.StartTime)
-              .ToListAsync();
+builder.Services.AddControllers();
+// Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 
-          var closedList = await closedQuery
-              .OrderByDescending(p => p.StartTime)
-              .Take(closedTop)
-              .ToListAsync();
+var app = builder.Build();
 
-          // 3) Unimos (sin duplicados por ProblemId) y ordenamos por StartTime desc
-          var merged = openList
-              .Concat(closedList)
-              .GroupBy(p => p.ProblemId)
-              .Select(g => g.First())
-              .OrderByDescending(p => p.StartTime)
-              .ToList();
+// Configure the HTTP request pipeline.
+app.UseCors("AllowFrontend");
 
-          // 4) Paginación sobre el MERGE final (así ya no se "pierden" OPEN)
-          var totalRecords = merged.Count;
 
-          var page = merged
-              .Skip((pageNumber - 1) * pageSize)
-              .Take(pageSize)
-              .ToList();
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
-          // 5) Tu misma lógica de deserialización (sin cambiar tu método)
-          var deserializedProblems = page
-              .Select(problem =>
-              {
-                  try
-                  {
-                      return convertProblemJSON(problem);
-                  }
-                  catch (JsonException)
-                  {
-                      return null;
-                  }
-              })
-              .Where(p => p != null)
-              .ToList()!;
+app.UseHttpsRedirection();
 
-          var response = new PagedResponse<ProblemDynatraceResponse>
-          {
-              TotalRecords = totalRecords,
-              TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
-              PageNumber = pageNumber,
-              PageSize = pageSize,
-              Data = deserializedProblems
-          };
+app.UseAuthorization();
 
-          return response;
-      }
+app.MapControllers();
+
+app.Run();
