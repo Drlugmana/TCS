@@ -1,1 +1,1 @@
-👉 https://dotnet.microsoft.com/en-us/download/dotnet/8.0
+netstat -ano | findstr :8081
