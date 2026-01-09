@@ -48,7 +48,7 @@ function towerToIconPath(towerKey) {
   if (key.includes("wintel") || key.includes("windows")) return "/icons/towers/wiltel1.svg";
   if (key.includes("bdd") || key.includes("base de datos") || key.includes("database") || key.includes("bd"))
     return "/icons/towers/Base.svg";
-  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";  
+  if (key.includes("unix") || key.includes("aix") || key.includes("linux")) return "/icons/towers/unix.svg";
   if (key.includes("storage") || key.includes("respaldo") || key.includes("backup")) return "/icons/towers/sto.svg";
 
   return null;
@@ -59,27 +59,28 @@ export default function ProblemCard({ problem, username }) {
 
   const status = useMemo(() => normalizeStatus(problem), [problem]);
 
-function formatDateTimeDMY(date) {
-  if (!date) return "--";
+  function formatDateTimeDMY(date) {
+    if (!date) return "--";
 
-  const d = new Date(date);
+    const d = new Date(date);
 
-  // ✅ Fecha fija: DD/MM/YYYY
-  const dd = String(d.getDate()).padStart(2, "0");
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const yyyy = d.getFullYear();
-  const fecha = `${dd}/${mm}/${yyyy}`;
+    // ✅ Fecha fija: DD/MM/YYYY
+    const dd = String(d.getDate()).padStart(2, "0");
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const yyyy = d.getFullYear();
+    const fecha = `${dd}/${mm}/${yyyy}`;
 
-  // ✅ Hora igual que antes (AM/PM)
-  const hora = d.toLocaleTimeString("en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: true,
-  });
+    // ✅ Hora igual que antes (AM/PM)
+    const hora = d.toLocaleTimeString("en-US", {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: true,
+    });
 
-  return `${fecha}, ${hora}`;
-}
+    return `${fecha}, ${hora}`;
+  }
+
   // ✅ soporta startTime / StartTime
   const start = useMemo(() => {
     const raw = pick(problem, "startTime", "StartTime");
@@ -156,108 +157,137 @@ function formatDateTimeDMY(date) {
   const environmentRaw = pick(problem, "environment", "Environment") || "";
   const environment = normalizeEnvironment(environmentRaw);
 
+  // ==========================
+  // ✅ SOLO CAMBIO DE ESTILO
+  // ==========================
+  const iconSize = 86; // más compacto tipo “tile”
+
   return (
     <div
       style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        borderRadius: "12px",
-        padding: "1rem 1.5rem",
-        marginBottom: "1rem",
         backgroundColor: bgColor,
-        boxShadow: "0 4px 10px rgba(0,0,0,.1)",
+        borderRadius: "18px",
+        padding: "16px",
+        boxShadow: "0 10px 25px rgba(0,0,0,.16)",
+        border: "1px solid rgba(255,255,255,.35)",
+        // ✅ clave para look de “tarjeta” (y que en grid se vea bien)
+        display: "grid",
+        gridTemplateColumns: "1fr auto",
+        gridTemplateRows: "auto 1fr auto",
+        gap: "12px",
+        // ✅ NO fuerza fila larga; se adapta a grid del contenedor
+        width: "100%",
+        minHeight: "230px",
+        marginBottom: "14px",
       }}
     >
-      {/* IZQUIERDA: INFO */}
-      <div style={{ flex: 1, paddingRight: "1rem" }}>
-        <h3 style={{ margin: 0, fontSize: "1.6rem", fontWeight: "bold" }}>
+      {/* TITULO (fila 1) */}
+      <div style={{ gridColumn: "1 / 3" }}>
+        <h3 style={{ margin: 0, fontSize: "1.35rem", fontWeight: 800, lineHeight: 1.2 }}>
           {pick(problem, "title", "Title") || "(sin título)"}
         </h3>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Severidad Dynatrace:</strong> {pick(problem, "severityLevel", "SeverityLevel")}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Impacto:</strong> {pick(problem, "impactLevel", "ImpactLevel")}
-        </p>
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Inicio:</strong> {formatDateTimeDMY(start)}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Estado:</strong> {status}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Criticidad (BIA):</strong> {criticidad}
-        </p>
-
-        <p style={{ fontSize: "1.2rem" }}>
-          <strong>Equipos afectados:</strong> <small>{equipos}</small>
-        </p>
       </div>
 
-      {/* CENTRO: ICONOS */}
+      {/* INFO (columna izquierda) */}
+      <div style={{ gridColumn: "1 / 2" }}>
+        <div style={{ fontSize: "1.02rem", lineHeight: 1.55 }}>
+          <div>
+            <strong>Severidad Dynatrace:</strong> {pick(problem, "severityLevel", "SeverityLevel")}
+          </div>
+          <div>
+            <strong>Impacto:</strong> {pick(problem, "impactLevel", "ImpactLevel")}
+          </div>
+          <div>
+            <strong>Inicio:</strong> {formatDateTimeDMY(start)}
+          </div>
+          <div>
+            <strong>Estado:</strong> {status}
+          </div>
+          <div>
+            <strong>Criticidad (BIA):</strong> {criticidad}
+          </div>
+          <div style={{ marginTop: 6 }}>
+            <strong>Equipos afectados:</strong>{" "}
+            <span style={{ fontSize: ".92rem", opacity: 0.95 }}>{equipos}</span>
+          </div>
+        </div>
+      </div>
+
+      {/* ICONOS (columna derecha) */}
       <div
         style={{
+          gridColumn: "2 / 3",
           display: "flex",
-          justifyContent: "center",
+          flexDirection: "column",
           alignItems: "center",
-          gap: "1rem",
-          flexShrink: 0,
-          minWidth: "220px",
+          gap: "10px",
+          paddingLeft: "6px",
+          minWidth: "110px",
         }}
       >
-        {(() => {
-          const size = 110;
-          return (
-            <>
-              <img
-                src={`/severidad${criticidad}.svg`}
-                width={size}
-                height={size}
-                title={`Criticidad ${criticidad}`}
-                alt={`Criticidad ${criticidad}`}
-              />
-              <img
-                src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
-                width={size}
-                height={size}
-                title={environmentRaw}
-                alt={environmentRaw}
-              />
-              {towerIcon && (
-                <img
-                  src={towerIcon}
-                  alt="tower"
-                  width={size}
-                  height={size}
-                  title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
-                />
-              )}
-            </>
-          );
-        })()}
+        <img
+          src={`/severidad${criticidad}.svg`}
+          width={iconSize}
+          height={iconSize}
+          title={`Criticidad ${criticidad}`}
+          alt={`Criticidad ${criticidad}`}
+          style={{ filter: "drop-shadow(0 8px 12px rgba(0,0,0,.18))" }}
+        />
+
+        <img
+          src={environment === "Productivo" ? "/icon-productivo.svg" : "/icon-noproductivo.svg"}
+          width={iconSize}
+          height={iconSize}
+          title={environmentRaw}
+          alt={environmentRaw}
+          style={{ filter: "drop-shadow(0 8px 12px rgba(0,0,0,.18))" }}
+        />
+
+        {towerIcon && (
+          <img
+            src={towerIcon}
+            alt="tower"
+            width={iconSize}
+            height={iconSize}
+            title={hitFromCatalog?.towerRaw || hitFromCatalog?.tower}
+            style={{ filter: "drop-shadow(0 8px 12px rgba(0,0,0,.18))" }}
+            onError={(e) => {
+              // evita ícono roto en UI
+              e.currentTarget.style.display = "none";
+            }}
+          />
+        )}
       </div>
 
-      {/* DERECHA: TIMER + BOTÓN */}
-      <div style={{ textAlign: "center", minWidth: "160px" }}>
-        <div style={{ fontSize: "2rem", fontWeight: "bold" }}>{formatTime(remainingMinutes)}</div>
+      {/* FOOTER (timer + botón) */}
+      <div
+        style={{
+          gridColumn: "1 / 3",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          gap: "12px",
+          marginTop: "6px",
+        }}
+      >
+        <div style={{ fontSize: "1.65rem", fontWeight: 900 }}>
+          {formatTime(remainingMinutes)}
+        </div>
 
         <button
           disabled={isDisabled || dynatraceUrl === "#"}
           onClick={() => window.open(dynatraceUrl, "_blank")}
           style={{
-            marginTop: ".5rem",
-            padding: ".4rem 1rem",
-            fontSize: ".9rem",
-            fontWeight: "bold",
+            padding: "10px 14px",
+            fontSize: ".95rem",
+            fontWeight: 800,
             color: "#fff",
             backgroundColor: isDisabled ? "#b0b0b0" : status === "CLOSED" ? "#6b7280" : buttonColor,
             border: "none",
-            borderRadius: "8px",
+            borderRadius: "12px",
             cursor: isDisabled ? "not-allowed" : "pointer",
+            boxShadow: "0 10px 20px rgba(0,0,0,.18)",
+            minWidth: "170px",
           }}
         >
           Revisar problema
