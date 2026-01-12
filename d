@@ -31,7 +31,7 @@ function normalizeJurisdiction(p) {
 }
 
 export default function OtherProblems() {
-  const [username, setUsername] = useState("");
+  // ✅ Eliminado: username
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -101,20 +101,7 @@ export default function OtherProblems() {
         Problemas Otros ({filtered.length})
       </h1>
 
-      <div style={{ textAlign: "center", marginBottom: "1rem" }}>
-        <div style={{ marginBottom: ".4rem" }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Tu usuario"
-          style={{
-            padding: "6px 10px",
-            borderRadius: 6,
-            border: "1px solid #cfcfcf",
-            width: 220,
-          }}
-        />
-      </div>
+      {/* ✅ Eliminado: ingreso de usuario */}
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
         <button
@@ -201,7 +188,7 @@ export default function OtherProblems() {
 
       <div style={{ maxWidth: 980, margin: "0 auto", padding: "0 12px" }}>
         {filtered.map((p, idx) => (
-          <ProblemCard key={p?.problemId || p?.displayId || idx} problem={p} username={username} />
+          <ProblemCard key={p?.problemId || p?.displayId || idx} problem={p} />
         ))}
       </div>
     </div>
