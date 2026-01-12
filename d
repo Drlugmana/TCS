@@ -32,7 +32,10 @@ function normalizeJurisdiction(p) {
 }
 
 export default function TCSProblems() {
-  const [username, setUsername] = useState("");
+  // ✅ username fijo para que "Revisar problema" funcione siempre
+  // (sin input, sin depender del usuario)
+  const ALWAYS_USERNAME = "SISTEMA";
+
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -107,20 +110,7 @@ export default function TCSProblems() {
         Problemas TCS ({filtered.length})
       </h1>
 
-      <div style={{ textAlign: "center", marginBottom: "1rem" }}>
-        <div style={{ marginBottom: ".4rem" }}>Usuario:</div>
-        <input
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          placeholder="Tu usuario"
-          style={{
-            padding: "6px 10px",
-            borderRadius: 6,
-            border: "1px solid #cfcfcf",
-            width: 220,
-          }}
-        />
-      </div>
+      {/* ✅ Eliminado el bloque de Usuario (ya no depende del usuario) */}
 
       {/* BOTONES FILTRO (misma idea y estructura) */}
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
@@ -206,10 +196,22 @@ export default function TCSProblems() {
       {loading && <div style={{ textAlign: "center" }}>Cargando...</div>}
       {!!err && <div style={{ textAlign: "center", color: "red" }}>{err}</div>}
 
-      <div style={{ maxWidth: 980, margin: "0 auto", padding: "0 12px" }}>
-        {filtered.map((p, idx) => (
-          <ProblemCard key={p?.problemId || p?.displayId || idx} problem={p} username={username} />
-        ))}
+      {/* ✅ CAMBIO: GRID para mostrar 4 tarjetas por fila */}
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "0 12px" }}>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 12,
+            alignItems: "stretch",
+          }}
+        >
+          {filtered.map((p, idx) => (
+            <div key={p?.problemId || p?.displayId || idx} style={{ minWidth: 0 }}>
+              <ProblemCard problem={p} username={ALWAYS_USERNAME} />
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
