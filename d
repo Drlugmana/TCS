@@ -149,6 +149,15 @@ export default function ProblemCard({ problem }) {
   const environmentRaw = pick(problem, "environment", "Environment") || "";
   const environment = normalizeEnvironment(environmentRaw);
 
+  // ✅ NUEVO: campos que vienen del backend latest (igual que Excel)
+  const comentarios = String(
+    pick(problem, "comentarios", "Comentarios") ?? ""
+  ).trim();
+
+  const detalleDeProblema = String(
+    pick(problem, "detalleDeProblema", "DetalleDeProblema", "detalleProblema", "DetalleProblema") ?? ""
+  ).trim();
+
   // ✅ AJUSTES PARA QUE ENTREN MÁS TARJETAS EN PANTALLA
   const TITLE_FS = "1.15rem";
   const TEXT_FS = ".95rem";
@@ -161,8 +170,8 @@ export default function ProblemCard({ problem }) {
         justifyContent: "space-between",
         alignItems: "center",
         borderRadius: "12px",
-        padding: ".6rem 1rem",          // ⬅️ antes 1rem 1.5rem
-        marginBottom: ".6rem",          // ⬅️ antes 1rem
+        padding: ".6rem 1rem",
+        marginBottom: ".6rem",
         backgroundColor: bgColor,
         boxShadow: "0 4px 10px rgba(0,0,0,.1)",
       }}
@@ -205,6 +214,44 @@ export default function ProblemCard({ problem }) {
             {equipos}
           </small>
         </p>
+
+        {/* ✅ NUEVO: Comentarios */}
+        {comentarios && (
+          <div style={{ marginTop: ".35rem", fontSize: TEXT_FS }}>
+            <strong>Comentarios:</strong>
+            <pre
+              style={{
+                margin: ".25rem 0 0 0",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: "rgba(255,255,255,.35)",
+                padding: ".35rem .5rem",
+                borderRadius: 8,
+              }}
+            >
+              {comentarios}
+            </pre>
+          </div>
+        )}
+
+        {/* ✅ NUEVO: Detalle de Problema */}
+        {detalleDeProblema && (
+          <div style={{ marginTop: ".35rem", fontSize: TEXT_FS }}>
+            <strong>Detalle de Problema:</strong>
+            <pre
+              style={{
+                margin: ".25rem 0 0 0",
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+                background: "rgba(255,255,255,.35)",
+                padding: ".35rem .5rem",
+                borderRadius: 8,
+              }}
+            >
+              {detalleDeProblema}
+            </pre>
+          </div>
+        )}
       </div>
 
       {/* CENTRO: ICONOS */}
@@ -213,9 +260,9 @@ export default function ProblemCard({ problem }) {
           display: "flex",
           justifyContent: "center",
           alignItems: "center",
-          gap: ".6rem",                 // ⬅️ menos gap
+          gap: ".6rem",
           flexShrink: 0,
-          minWidth: "170px",            // ⬅️ antes 220px
+          minWidth: "170px",
         }}
       >
         <img
