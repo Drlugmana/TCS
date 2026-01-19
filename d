@@ -2,6 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { getLatestProblems } from "../api/problems";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
+import { calcularCriticidadDetallada } from "../utils/slaUtils";
 
 function norm(s) {
   return String(s || "")
@@ -30,8 +32,18 @@ function normalizeJurisdiction(p) {
   return norm(p?.jurisdiction ?? p?.Jurisdiction ?? "");
 }
 
+// ✅ Orden criticidad BIA: S1 -> S2 -> S3 -> S4
+const CRIT_ORDER = { S1: 1, S2: 2, S3: 3, S4: 4 };
+function criticidadRank(c) {
+  return CRIT_ORDER[String(c || "").trim().toUpperCase()] ?? 99;
+}
+
 export default function OtherProblems() {
-  //  Eliminado: username
+  const { get: catalogGet } = useBiaCatalog();
+
+  // ✅ Username fijo (por si tu ProblemCard usa username para algo)
+  const ALWAYS_USERNAME = "SISTEMA";
+
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -66,24 +78,57 @@ export default function OtherProblems() {
     };
   }, []);
 
-  //  Todo lo que NO sea TCS (incluye NO TCS / No TCS / OTROS / vacío, etc.)
+  // ✅ Todo lo que NO sea TCS
   const otherOnly = useMemo(() => {
     return problems.filter((p) => normalizeJurisdiction(p) !== "TCS");
   }, [problems]);
 
+  // ✅ filtros + orden por criticidad (S1->S4) y luego StartTime desc
   const filtered = useMemo(() => {
-    return otherOnly.filter((p) => {
+    const list = otherOnly.filter((p) => {
       const env = normalizeEnvironment(p);
       const st = normalizeStatus(p);
 
       const passEnv =
-        envFilter === "ALL" ? true : envFilter === "PROD" ? env === "Productivo" : env !== "Productivo";
+        envFilter === "ALL"
+          ? true
+          : envFilter === "PROD"
+            ? env === "Productivo"
+            : env !== "Productivo";
 
-      const passStatus = statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
+      const passStatus =
+        statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
 
       return passEnv && passStatus;
     });
-  }, [otherOnly, envFilter, statusFilter]);
+
+    return list.sort((a, b) => {
+      let ca = "S4";
+      let cb = "S4";
+
+      try {
+        ca =
+          calcularCriticidadDetallada(a, {
+            catalogLookup: (ciName) => catalogGet(ciName),
+          })?.criticidad || "S4";
+      } catch {}
+
+      try {
+        cb =
+          calcularCriticidadDetallada(b, {
+            catalogLookup: (ciName) => catalogGet(ciName),
+          })?.criticidad || "S4";
+      } catch {}
+
+      const ra = criticidadRank(ca);
+      const rb = criticidadRank(cb);
+      if (ra !== rb) return ra - rb;
+
+      const ta = new Date(a?.startTime ?? a?.StartTime ?? 0).getTime();
+      const tb = new Date(b?.startTime ?? b?.StartTime ?? 0).getTime();
+      return tb - ta;
+    });
+  }, [otherOnly, envFilter, statusFilter, catalogGet]);
 
   const counts = useMemo(() => {
     const base = otherOnly;
@@ -100,8 +145,6 @@ export default function OtherProblems() {
       <h1 style={{ textAlign: "center", margin: "0 0 0.5rem 0" }}>
         Problemas Otros ({filtered.length})
       </h1>
-
-      {/*  Eliminado: ingreso de usuario */}
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
         <button
@@ -188,7 +231,11 @@ export default function OtherProblems() {
 
       <div style={{ maxWidth: 980, margin: "0 auto", padding: "0 12px" }}>
         {filtered.map((p, idx) => (
-          <ProblemCard key={p?.problemId || p?.displayId || idx} problem={p} />
+          <ProblemCard
+            key={p?.problemId || p?.displayId || idx}
+            problem={p}
+            username={ALWAYS_USERNAME}
+          />
         ))}
       </div>
     </div>
