@@ -2,6 +2,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { getLatestProblems } from "../api/problems";
+import { useBiaCatalog } from "../context/BiaCatalogContext";
+import { calcularCriticidadDetallada } from "../utils/slaUtils";
 
 // Helpers para normalizar
 function norm(s) {
@@ -31,16 +33,24 @@ function normalizeJurisdiction(p) {
   return norm(p?.jurisdiction ?? p?.Jurisdiction ?? "");
 }
 
+// ✅ Orden criticidad BIA: S1 -> S2 -> S3 -> S4
+const CRIT_ORDER = { S1: 1, S2: 2, S3: 3, S4: 4 };
+
+function criticidadRank(c) {
+  return CRIT_ORDER[String(c || "").trim().toUpperCase()] ?? 99;
+}
+
 export default function TCSProblems() {
+  const { get: catalogGet } = useBiaCatalog();
+
   // Username fijo para que el botón "Revisar problema" funcione SIEMPRE
-  // (ya no hay input ni depende del usuario)
   const ALWAYS_USERNAME = "SISTEMA";
 
   const [problems, setProblems] = useState([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // filtros UI (misma idea que ya tenías)
+  // filtros UI
   const [envFilter, setEnvFilter] = useState("ALL"); // PROD | NOPROD | ALL
   const [statusFilter, setStatusFilter] = useState("ALL"); // OPEN | CLOSED | ALL
 
@@ -52,7 +62,6 @@ export default function TCSProblems() {
       setLoading(true);
       setErr("");
       try {
-        // Traemos el rango automático de ayer → ahora (backend)
         const res = await getLatestProblems({ pageNumber: 1, pageSize: 1000 });
         if (!alive) return;
         setProblems(Array.isArray(res?.data) ? res.data : []);
@@ -73,25 +82,59 @@ export default function TCSProblems() {
     };
   }, []);
 
-  //  Solo TCS
+  // ✅ Solo TCS
   const tcsOnly = useMemo(() => {
     return problems.filter((p) => normalizeJurisdiction(p) === "TCS");
   }, [problems]);
 
-  // aplica filtros como antes
+  // ✅ aplica filtros + ordena por criticidad (S1->S4) y luego por StartTime desc
   const filtered = useMemo(() => {
-    return tcsOnly.filter((p) => {
+    const list = tcsOnly.filter((p) => {
       const env = normalizeEnvironment(p);
       const st = normalizeStatus(p);
 
       const passEnv =
-        envFilter === "ALL" ? true : envFilter === "PROD" ? env === "Productivo" : env !== "Productivo";
+        envFilter === "ALL"
+          ? true
+          : envFilter === "PROD"
+            ? env === "Productivo"
+            : env !== "Productivo";
 
-      const passStatus = statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
+      const passStatus =
+        statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
 
       return passEnv && passStatus;
     });
-  }, [tcsOnly, envFilter, statusFilter]);
+
+    // 🔥 Orden: S1 primero, luego S2, S3, S4 (desempate: más reciente primero)
+    return list.sort((a, b) => {
+      let ca = "S4";
+      let cb = "S4";
+
+      try {
+        ca =
+          calcularCriticidadDetallada(a, {
+            catalogLookup: (ciName) => catalogGet(ciName),
+          })?.criticidad || "S4";
+      } catch {}
+
+      try {
+        cb =
+          calcularCriticidadDetallada(b, {
+            catalogLookup: (ciName) => catalogGet(ciName),
+          })?.criticidad || "S4";
+      } catch {}
+
+      const ra = criticidadRank(ca);
+      const rb = criticidadRank(cb);
+
+      if (ra !== rb) return ra - rb;
+
+      const ta = new Date(a?.startTime ?? a?.StartTime ?? 0).getTime();
+      const tb = new Date(b?.startTime ?? b?.StartTime ?? 0).getTime();
+      return tb - ta;
+    });
+  }, [tcsOnly, envFilter, statusFilter, catalogGet]);
 
   // contadores
   const counts = useMemo(() => {
@@ -110,9 +153,7 @@ export default function TCSProblems() {
         Problemas TCS ({filtered.length})
       </h1>
 
-      {/*  Eliminado: ingreso de usuario */}
-
-      {/* BOTONES FILTRO (misma idea y estructura) */}
+      {/* BOTONES FILTRO */}
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
         <button
           onClick={() => setEnvFilter("PROD")}
@@ -201,7 +242,7 @@ export default function TCSProblems() {
           <ProblemCard
             key={p?.problemId || p?.displayId || idx}
             problem={p}
-            username={ALWAYS_USERNAME} // ✅ siempre hay username, el botón no se bloquea
+            username={ALWAYS_USERNAME}
           />
         ))}
       </div>
