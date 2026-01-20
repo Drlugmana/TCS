@@ -88,6 +88,24 @@ function getStableKey(p) {
   return String(p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? "").trim();
 }
 
+// ✅ NUEVO: detectar "verde" (tiene comentarios NO vacíos)
+function hasComments(p) {
+  const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
+  if (flat !== undefined && flat !== null) return String(flat).trim().length > 0;
+
+  const arr =
+    p?.recentComments?.comments ??
+    p?.RecentComments?.comments ??
+    p?.recentComments ??
+    p?.RecentComments;
+
+  if (!arr) return false;
+  if (Array.isArray(arr)) return arr.length > 0;
+  if (Array.isArray(arr?.comments)) return arr.comments.length > 0;
+
+  return false;
+}
+
 export default function TCSProblems() {
   const ALWAYS_USERNAME = "SISTEMA";
 
@@ -105,6 +123,7 @@ export default function TCSProblems() {
       setLoading(true);
       setErr("");
       try {
+        // Traemos el latest (tu api trae todo por paginación interna en problems.js)
         const res = await getLatestProblems({ pageNumber: 1, pageSize: 1000 });
         if (!alive) return;
         setProblems(Array.isArray(res?.data) ? res.data : []);
@@ -125,11 +144,12 @@ export default function TCSProblems() {
     };
   }, []);
 
+  // Solo TCS
   const tcsOnly = useMemo(() => {
     return problems.filter((p) => normalizeJurisdiction(p) === "TCS");
   }, [problems]);
 
-  // ✅ filtros + ✅ ORDEN por 4 criterios
+  // ✅ filtros + ✅ ORDEN
   const filtered = useMemo(() => {
     const base = tcsOnly.filter((p) => {
       const env = normalizeEnvironment(p);
@@ -143,23 +163,18 @@ export default function TCSProblems() {
       return passEnv && passStatus;
     });
 
-    // ✅ Orden:
-    // 1) comentarios en blanco primero
-    // 2) severidad S1..S4
-    // 3) fecha inicio (más antigua primero)
-    // 4) desempate estable por id
+    // ✅ Orden final:
+    // 1) NO verdes primero (sin comentarios), verdes al final
+    // 2) Dentro de CADA grupo: Criticidad S1 → S4
+    // 3) Desempate estable por ID (para no “bailar” la lista)
     return [...base].sort((a, b) => {
-      const aBlank = hasBlankComments(a) ? 0 : 1;
-      const bBlank = hasBlankComments(b) ? 0 : 1;
-      if (aBlank !== bBlank) return aBlank - bBlank;
+      const aGreen = hasComments(a) ? 1 : 0;
+      const bGreen = hasComments(b) ? 1 : 0;
+      if (aGreen !== bGreen) return aGreen - bGreen;
 
       const aRank = getBiaRank(a);
       const bRank = getBiaRank(b);
       if (aRank !== bRank) return aRank - bRank;
-
-      const aStart = getStartDateMs(a);
-      const bStart = getStartDateMs(b);
-      if (aStart !== bStart) return aStart - bStart;
 
       const ak = getStableKey(a);
       const bk = getStableKey(b);
@@ -167,6 +182,7 @@ export default function TCSProblems() {
     });
   }, [tcsOnly, envFilter, statusFilter]);
 
+  // contadores
   const counts = useMemo(() => {
     const base = tcsOnly;
     const prod = base.filter((p) => normalizeEnvironment(p) === "Productivo").length;
