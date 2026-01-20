@@ -79,6 +79,24 @@ function getStableKey(p) {
   return String(p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? "").trim();
 }
 
+// ✅ NUEVO: detectar "verde" (tiene comentarios NO vacíos)
+function hasComments(p) {
+  const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
+  if (flat !== undefined && flat !== null) return String(flat).trim().length > 0;
+
+  const arr =
+    p?.recentComments?.comments ??
+    p?.RecentComments?.comments ??
+    p?.recentComments ??
+    p?.RecentComments;
+
+  if (!arr) return false;
+  if (Array.isArray(arr)) return arr.length > 0;
+  if (Array.isArray(arr?.comments)) return arr.comments.length > 0;
+
+  return false;
+}
+
 export default function OtherProblems() {
   const ALWAYS_USERNAME = "SISTEMA";
 
@@ -116,6 +134,7 @@ export default function OtherProblems() {
     };
   }, []);
 
+  // Todo lo que NO sea TCS
   const otherOnly = useMemo(() => {
     return problems.filter((p) => normalizeJurisdiction(p) !== "TCS");
   }, [problems]);
@@ -133,18 +152,18 @@ export default function OtherProblems() {
       return passEnv && passStatus;
     });
 
+    // ✅ Orden final:
+    // 1) NO verdes primero (sin comentarios), verdes al final
+    // 2) Dentro de CADA grupo: Criticidad S1 → S4
+    // 3) Desempate estable por ID
     return [...base].sort((a, b) => {
-      const aBlank = hasBlankComments(a) ? 0 : 1;
-      const bBlank = hasBlankComments(b) ? 0 : 1;
-      if (aBlank !== bBlank) return aBlank - bBlank;
+      const aGreen = hasComments(a) ? 1 : 0;
+      const bGreen = hasComments(b) ? 1 : 0;
+      if (aGreen !== bGreen) return aGreen - bGreen;
 
       const aRank = getBiaRank(a);
       const bRank = getBiaRank(b);
       if (aRank !== bRank) return aRank - bRank;
-
-      const aStart = getStartDateMs(a);
-      const bStart = getStartDateMs(b);
-      if (aStart !== bStart) return aStart - bStart;
 
       const ak = getStableKey(a);
       const bk = getStableKey(b);
