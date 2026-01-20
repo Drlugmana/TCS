@@ -1,9 +1,8 @@
-// src/pages/TCSProblems.jsx
+// src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { getLatestProblems } from "../api/problems";
 
-// Helpers para normalizar
 function norm(s) {
   return String(s || "")
     .trim()
@@ -31,7 +30,7 @@ function normalizeJurisdiction(p) {
   return norm(p?.jurisdiction ?? p?.Jurisdiction ?? "");
 }
 
-// ✅ NUEVO: helpers para ordenar
+// ✅ helpers orden
 function getStartDateMs(p) {
   const raw = p?.startTime ?? p?.StartTime;
   const d = raw ? new Date(raw) : null;
@@ -39,15 +38,12 @@ function getStartDateMs(p) {
   return ms;
 }
 
-// Comentarios: detecta vacío (null/undefined/"") o lista vacía
 function hasBlankComments(p) {
-  // 1) Si backend ya manda un campo plano tipo "comentarios"
   const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
   if (flat !== undefined && flat !== null) {
     return String(flat).trim() === "";
   }
 
-  // 2) Si manda recentComments.comments
   const arr =
     p?.recentComments?.comments ??
     p?.RecentComments?.comments ??
@@ -56,14 +52,11 @@ function hasBlankComments(p) {
 
   if (!arr) return true;
   if (Array.isArray(arr)) return arr.length === 0;
-
-  // Si viene objeto con comments adentro
   if (Array.isArray(arr?.comments)) return arr.comments.length === 0;
 
   return true;
 }
 
-// Severidad BIA (criticidad): S1..S4 (si no existe, lo manda al final)
 function getBiaRank(p) {
   const c = String(p?.criticidad ?? p?.Criticidad ?? p?.bia ?? p?.Bia ?? "")
     .trim()
@@ -74,7 +67,6 @@ function getBiaRank(p) {
   if (c === "S3") return 3;
   if (c === "S4") return 4;
 
-  // Si viene "S1 - ..." o algo parecido
   if (c.includes("S1")) return 1;
   if (c.includes("S2")) return 2;
   if (c.includes("S3")) return 3;
@@ -83,30 +75,11 @@ function getBiaRank(p) {
   return 99;
 }
 
-// clave estable de desempate
 function getStableKey(p) {
   return String(p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? "").trim();
 }
 
-// ✅ NUEVO: detectar "verde" (tiene comentarios NO vacíos)
-function hasComments(p) {
-  const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
-  if (flat !== undefined && flat !== null) return String(flat).trim().length > 0;
-
-  const arr =
-    p?.recentComments?.comments ??
-    p?.RecentComments?.comments ??
-    p?.recentComments ??
-    p?.RecentComments;
-
-  if (!arr) return false;
-  if (Array.isArray(arr)) return arr.length > 0;
-  if (Array.isArray(arr?.comments)) return arr.comments.length > 0;
-
-  return false;
-}
-
-export default function TCSProblems() {
+export default function OtherProblems() {
   const ALWAYS_USERNAME = "SISTEMA";
 
   const [problems, setProblems] = useState([]);
@@ -123,7 +96,6 @@ export default function TCSProblems() {
       setLoading(true);
       setErr("");
       try {
-        // Traemos el latest (tu api trae todo por paginación interna en problems.js)
         const res = await getLatestProblems({ pageNumber: 1, pageSize: 1000 });
         if (!alive) return;
         setProblems(Array.isArray(res?.data) ? res.data : []);
@@ -144,14 +116,12 @@ export default function TCSProblems() {
     };
   }, []);
 
-  // Solo TCS
-  const tcsOnly = useMemo(() => {
-    return problems.filter((p) => normalizeJurisdiction(p) === "TCS");
+  const otherOnly = useMemo(() => {
+    return problems.filter((p) => normalizeJurisdiction(p) !== "TCS");
   }, [problems]);
 
-  // ✅ filtros + ✅ ORDEN
   const filtered = useMemo(() => {
-    const base = tcsOnly.filter((p) => {
+    const base = otherOnly.filter((p) => {
       const env = normalizeEnvironment(p);
       const st = normalizeStatus(p);
 
@@ -163,39 +133,39 @@ export default function TCSProblems() {
       return passEnv && passStatus;
     });
 
-    // ✅ Orden final:
-    // 1) NO verdes primero (sin comentarios), verdes al final
-    // 2) Dentro de CADA grupo: Criticidad S1 → S4
-    // 3) Desempate estable por ID (para no “bailar” la lista)
     return [...base].sort((a, b) => {
-      const aGreen = hasComments(a) ? 1 : 0;
-      const bGreen = hasComments(b) ? 1 : 0;
-      if (aGreen !== bGreen) return aGreen - bGreen;
+      const aBlank = hasBlankComments(a) ? 0 : 1;
+      const bBlank = hasBlankComments(b) ? 0 : 1;
+      if (aBlank !== bBlank) return aBlank - bBlank;
 
       const aRank = getBiaRank(a);
       const bRank = getBiaRank(b);
       if (aRank !== bRank) return aRank - bRank;
 
+      const aStart = getStartDateMs(a);
+      const bStart = getStartDateMs(b);
+      if (aStart !== bStart) return aStart - bStart;
+
       const ak = getStableKey(a);
       const bk = getStableKey(b);
       return ak.localeCompare(bk);
     });
-  }, [tcsOnly, envFilter, statusFilter]);
+  }, [otherOnly, envFilter, statusFilter]);
 
-  // contadores
   const counts = useMemo(() => {
-    const base = tcsOnly;
+    const base = otherOnly;
     const prod = base.filter((p) => normalizeEnvironment(p) === "Productivo").length;
     const noprod = base.length - prod;
     const open = base.filter((p) => normalizeStatus(p) === "OPEN").length;
     const closed = base.filter((p) => normalizeStatus(p) === "CLOSED").length;
+
     return { total: base.length, prod, noprod, open, closed };
-  }, [tcsOnly]);
+  }, [otherOnly]);
 
   return (
     <div style={{ padding: "1rem 0" }}>
       <h1 style={{ textAlign: "center", margin: "0 0 0.5rem 0" }}>
-        Problemas TCS ({filtered.length})
+        Problemas Otros ({filtered.length})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
