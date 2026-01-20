@@ -51,7 +51,7 @@ function towerToIconPath(towerKey) {
   return null;
 }
 
-// Limpia texto para que no se repita "COMENTARIO"/"DETALLE" y lo deje en 1 sola línea
+// Limpia texto para que no se repita "COMENTARIO"/"DETALLE"
 function normalizeOneLineText(input, removeWords = []) {
   let t = String(input ?? "").trim();
   if (!t) return "";
@@ -59,9 +59,9 @@ function normalizeOneLineText(input, removeWords = []) {
   // Quitar palabras repetidas tipo "COMENTARIO" o "DETALLE" (al inicio o en líneas)
   for (const w of removeWords) {
     const reLine = new RegExp(`(^|\\n)\\s*${w}\\s*(\\n|$)`, "gi");
-    t = t.replace(reLine, "\n"); // quita líneas que sean solo la palabra
+    t = t.replace(reLine, "\n");
     const reInline = new RegExp(`\\b${w}\\b\\s*[-:]*\\s*`, "gi");
-    t = t.replace(reInline, ""); // quita si viene como "COMENTARIO: ..."
+    t = t.replace(reInline, "");
   }
 
   // Convertir saltos de línea / tabs en separador " - "
@@ -102,7 +102,7 @@ export default function ProblemCard({ problem }) {
     return `${fecha}, ${hora}`;
   }
 
-  //  soporta startTime / StartTime
+  // soporta startTime / StartTime
   const start = useMemo(() => {
     const raw = pick(problem, "startTime", "StartTime");
     return raw ? new Date(raw) : new Date();
@@ -175,17 +175,8 @@ export default function ProblemCard({ problem }) {
   const environmentRaw = pick(problem, "environment", "Environment") || "";
   const environment = normalizeEnvironment(environmentRaw);
 
-  //  NUEVO: Comentarios y Detalle (desde latest)
-  const rawComments = pick(
-    problem,
-    "comentarios",
-    "Comentarios",
-    "commentsText",
-    "CommentsText",
-    "comments",
-    "Comments"
-  );
-
+  // ✅ Comentarios y Detalle (desde latest)
+  const rawComments = pick(problem, "comentarios", "Comentarios", "commentsText", "CommentsText", "comments", "Comments");
   const rawDetail = pick(
     problem,
     "detalleDeProblema",
@@ -206,14 +197,32 @@ export default function ProblemCard({ problem }) {
     [rawDetail]
   );
 
-  //  Si ya tiene comentarios, la tarjeta se pone verde
+  // Si ya tiene comentarios, la tarjeta se pone verde
   const hasComments = useMemo(() => String(commentsText || "").trim().length > 0, [commentsText]);
   const cardBg = hasComments ? "#b7f7c0" : bgColor; // verde claro
 
-  //  AJUSTES PARA QUE ENTREN MÁS TARJETAS EN PANTALLA
+  // Ajustes visuales
   const TITLE_FS = "1.15rem";
   const TEXT_FS = ".95rem";
   const ICON_SIZE = 70;
+
+  // ✅ NUEVO: estilo de resaltado para Comentarios/Detalle (sin cambiar lógica)
+  const HIGHLIGHT_BOX = {
+    display: "block",
+    marginTop: ".2rem",
+    padding: ".35rem .5rem",
+    borderRadius: "8px",
+    border: "1px solid rgba(0,0,0,.12)",
+    background: "rgba(255,255,255,.55)",
+
+    // ✅ CLAVE: mostrar TODO el texto (sin ellipsis) y que haga wrap
+    whiteSpace: "normal",
+    overflow: "visible",
+    textOverflow: "clip",
+    wordBreak: "break-word",
+    overflowWrap: "anywhere",
+    lineHeight: 1.25,
+  };
 
   return (
     <div
@@ -267,40 +276,20 @@ export default function ProblemCard({ problem }) {
           </small>
         </p>
 
-        {/*  NUEVO: Comentarios (1 sola línea, sin "COMENTARIO") */}
+        {/* ✅ Comentarios: resaltado + texto completo */}
         <p style={{ fontSize: TEXT_FS, margin: ".25rem 0" }}>
-          <strong>Comentarios:</strong>{" "}
-          <small
-            title={commentsText || ""}
-            style={{
-              display: "inline-block",
-              maxWidth: 520,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              verticalAlign: "bottom",
-            }}
-          >
+          <strong>Comentarios:</strong>
+          <span title={commentsText || ""} style={HIGHLIGHT_BOX}>
             {commentsText || "--"}
-          </small>
+          </span>
         </p>
 
-        {/*  NUEVO: Detalle de Problema (1 sola línea, sin "DETALLE") */}
+        {/* ✅ Detalle: resaltado + texto completo */}
         <p style={{ fontSize: TEXT_FS, margin: ".25rem 0" }}>
-          <strong>Detalle de Problema:</strong>{" "}
-          <small
-            title={detailText || ""}
-            style={{
-              display: "inline-block",
-              maxWidth: 520,
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              verticalAlign: "bottom",
-            }}
-          >
+          <strong>Detalle de Problema:</strong>
+          <span title={detailText || ""} style={HIGHLIGHT_BOX}>
             {detailText || "--"}
-          </small>
+          </span>
         </p>
       </div>
 
