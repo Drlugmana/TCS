@@ -27,6 +27,7 @@ namespace DynatraceProblemUpdater.Data.Repositories
                                    WHERE Status = 'open' AND Environment = @Environment";
 
             using var command = new SqlCommand(query, connection);
+            command.CommandTimeout = 180; // ✅ NUEVO: evita timeout en consultas lentas
             command.Parameters.AddWithValue("@Environment", environment);
 
             using var reader = await command.ExecuteReaderAsync();
@@ -132,6 +133,9 @@ namespace DynatraceProblemUpdater.Data.Repositories
                 foreach (var problem in problems)
                 {
                     using var command = new SqlCommand(query, connection, (SqlTransaction)transaction);
+
+                    command.CommandTimeout = 180; // ✅ NUEVO: evita timeout en MERGE pesado
+
                     command.Parameters.AddWithValue("@ProblemId", problem.ProblemId);
                     command.Parameters.AddWithValue("@SeverityLevel", problem.SeverityLevel);
                     command.Parameters.AddWithValue("@Status", problem.Status);
@@ -174,7 +178,6 @@ namespace DynatraceProblemUpdater.Data.Repositories
         /// <summary>
         /// Actualiza múltiples problemas en la base de datos en una sola transacción.
         /// </summary>
-        /// 
         public async Task UpdateProblemsBatchAsync(List<DBProblem> problems)
         {
             if (problems == null || problems.Count == 0) return;
@@ -233,6 +236,9 @@ namespace DynatraceProblemUpdater.Data.Repositories
                 foreach (var problem in problems)
                 {
                     using var command = new SqlCommand(query, connection, (SqlTransaction)transaction);
+
+                    command.CommandTimeout = 180; // ✅ NUEVO: evita timeout en UPDATE pesado
+
                     command.Parameters.AddWithValue("@ProblemId", problem.ProblemId);
                     command.Parameters.AddWithValue("@SeverityLevel", problem.SeverityLevel);
                     command.Parameters.AddWithValue("@Status", problem.Status);
@@ -259,7 +265,7 @@ namespace DynatraceProblemUpdater.Data.Repositories
                     command.Parameters.AddWithValue("@AffectedCI", problem.AffectedCI ?? (object)DBNull.Value);
                     command.Parameters.AddWithValue("@IncidentServiceNow", problem.IncidentServiceNow ?? (object)DBNull.Value);
                     command.Parameters.AddWithValue("@Jurisdiction", problem.Jurisdiction ?? (object)DBNull.Value);
-                 
+
                     await command.ExecuteNonQueryAsync();
                 }
 
