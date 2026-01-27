@@ -30,20 +30,18 @@ namespace DynatraceProblemUpdater.Services
             IOptions<List<APIToken>> apiTokens,
             DynatraceProblemRepository problemRepository,
             ServerMatcher serverMatcher
-        )
+            )
         {
             _logger = logger;
             _settings = settings.Value;
             _apiTokens = apiTokens.Value;
             _isHistorical = _settings.IsHistorical;
             _timeWaitLoop = _settings.UpdateIntervalSeconds * 1000 * 60 * 24 * 10;
-
             if (!_isHistorical)
             {
-                _apiTokens.RemoveAll(token => token.EndDate != null);
-                _timeWaitLoop = _settings.UpdateIntervalSeconds * 1000;
+                 _apiTokens.RemoveAll(token => token.EndDate != null);
+                 _timeWaitLoop = _settings.UpdateIntervalSeconds * 1000;
             }
-
             _problemRepository = problemRepository;
             _httpClient = new HttpClient();
             _httpClient.DefaultRequestHeaders.Clear();
@@ -64,89 +62,291 @@ namespace DynatraceProblemUpdater.Services
                 }
 
                 await Task.WhenAll(tasks);
-
-                _logger.LogInformation(
-                    $"✅ Proceso finalizado. Siguiente actualización en {TimeSpan.FromMilliseconds(_timeWaitLoop).TotalSeconds} segundos");
-
+                _logger.LogInformation($"✅ Proceso finalizado siguiente actualizacion de datos en {TimeSpan.FromMilliseconds(_timeWaitLoop).TotalSeconds} segundos");
                 await Task.Delay(_timeWaitLoop, stoppingToken);
             }
         }
 
         private async Task ProcessDynatraceData(APIToken token, CancellationToken stoppingToken)
         {
-            if (_isHistorical)
+            if(_isHistorical)
+            {
                 await LoadHistoricalDatabase(token, stoppingToken);
+            }
             else
+            {
                 await UpdateDatabaseInRealTime(token, stoppingToken);
+            }
         }
 
-        // ============================================================
-        // 🔴 CAMBIO CLAVE: refrescar PROBLEMAS OPEN existentes
-        // ============================================================
+        private async Task LoadHistoricalDatabase(APIToken token, CancellationToken stoppingToken)
+        {
+            DateTime startDate = token.StartDate;
+            DateTime endDate = token.EndDate ?? DateTime.Now;
+            int daysToAdd = 2;
+            for(var startTime = startDate; startTime <= endDate; startTime = startTime.AddDays(daysToAdd))
+            {
+                DateTime endTime = startTime.AddDays(daysToAdd) > endDate ? endDate : startTime.AddDays(daysToAdd);
+                var startTimeFilter = startTime.ToString("yyyy-MM-ddTHH:mm:ss");
+                var endTimeFilter = endTime.ToString("yyyy-MM-ddTHH:mm:ss");
+                var problemsIds = await FetchProblemIdsAsync(token, startTimeFilter, endTimeFilter, stoppingToken);
+                List<DBProblem> problems = await FetchProblemByIdsAsync(problemsIds, token, stoppingToken);
+                try
+                {
+                    if(problems.Count > 0)
+                    {
+                        _logger.LogInformation("🟢 Insertando {Count} nuevos problemas del tenant {Tenant} en la BD...", problems.Count, token.Tenant);
+                        await _problemRepository.InsertProblemsBatchAsync(problems);
+                        _logger.LogInformation("✅ {Count} problemas del tenant {Tenant} insertados correctamente.", problems.Count,token.Tenant);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"❌ Error al procesar los problemas de Dynatrace del Tenant {token.Tenant} entre el {startTimeFilter} - {endTimeFilter}.");
+                }
+            }
+        }
+
         private async Task UpdateDatabaseInRealTime(APIToken token, CancellationToken stoppingToken)
         {
-            // 1️⃣ OPEN actuales en Dynatrace
             var openDynatraceProblems = await FetchOpenProblemIdsAsync(token, stoppingToken);
-
-            // 2️⃣ OPEN actuales en BD
             var openProblemIds = await _problemRepository.GetOpenProblemIdsAsync(token.Environment);
-
-            // 3️⃣ Nuevos OPEN (no existen en BD)
-            var newProblemsIds = openDynatraceProblems
-                .Except(openProblemIds)
-                .ToList();
-
-            // 4️⃣ OPEN existentes → 🔴 SE REFRESCAN SIEMPRE (comentarios, evidencia, etc.)
-            var refreshProblemsIds = openDynatraceProblems
-                .Intersect(openProblemIds)
-                .ToList();
-
-            // 5️⃣ CLOSED (ya no están en Dynatrace)
-            var closedProblemsIds = openProblemIds
-                .Except(openDynatraceProblems)
-                .ToList();
-
-            // 6️⃣ Volver a pedir a Dynatrace (FUENTE DE VERDAD)
-            List<DBProblem> newProblems =
-                await FetchProblemByIdsAsync(newProblemsIds, token, stoppingToken);
-
-            List<DBProblem> refreshedOpenProblems =
-                await FetchProblemByIdsAsync(refreshProblemsIds, token, stoppingToken);
-
-            List<DBProblem> closedProblems =
-                await FetchProblemByIdsAsync(closedProblemsIds, token, stoppingToken);
-
-            // 7️⃣ Persistencia
-            if (newProblems.Count > 0)
-            {
-                _logger.LogInformation("🟢 Insertando {Count} nuevos problemas OPEN", newProblems.Count);
-                await _problemRepository.InsertProblemsBatchAsync(newProblems);
-            }
-
-            if (refreshedOpenProblems.Count > 0)
-            {
-                _logger.LogInformation("🔄 Refrescando {Count} problemas OPEN (comentarios, evidencia, etc.)",
-                    refreshedOpenProblems.Count);
-
-                await _problemRepository.UpdateProblemsBatchAsync(refreshedOpenProblems);
-            }
-
-            if (closedProblems.Count > 0)
-            {
-                _logger.LogInformation("🟡 Actualizando {Count} problemas CLOSED", closedProblems.Count);
-                await _problemRepository.UpdateProblemsBatchAsync(closedProblems);
-            }
+            var newProblemsIds = openDynatraceProblems.Except(openProblemIds).ToList();
+            var updateProblemsIds = openProblemIds.Except(openDynatraceProblems).ToList();
+            List<DBProblem> newProblems = await FetchProblemByIdsAsync(newProblemsIds, token, stoppingToken);
+            List<DBProblem> closedProblems = await FetchProblemByIdsAsync(updateProblemsIds, token, stoppingToken);
+            await UpdateProblemDatabase(newProblems, closedProblems);
         }
 
-        // ============================================================
-        // ⬇️ TODO LO DEMÁS QUEDA EXACTAMENTE IGUAL
-        // ============================================================
+        private async Task<List<string>> FetchOpenProblemIdsAsync(APIToken token, CancellationToken stoppingToken)
+        {
 
-        // FetchOpenProblemIdsAsync(...)
-        // FetchProblemIdsAsync(...)
-        // FetchProblemByIdsAsync(...)
-        // MapToDBProblems(...)
-        // UpdateProblemDatabase(...)
-        // (sin cambios)
+            // Set the variables return function and variables that help in the http request action
+            var problemIds = new List<string>();
+            string? nextPageKey = string.Empty;
+            var baseUrl = $"https://{token.Tenant}.live.dynatrace.com/api/v2/problems";
+            var pageSize = 500;
+
+            // Start do-while loop for manage the pagination API
+            do
+            {
+                // Build URL using query params
+                var queryParams = new Dictionary<string, string?>();
+                queryParams = string.IsNullOrEmpty(nextPageKey) ?
+                    new Dictionary<string, string?>
+                    {
+                        { "pageSize", pageSize.ToString() },
+                        { "from", "now-3h" },
+                        { "problemSelector", "status(\"open\")" }
+                    } :
+                    new Dictionary<string, string?>
+                    {
+                        { "nextPageKey", nextPageKey }
+                    };
+                string url = QueryHelpers.AddQueryString(baseUrl, queryParams);
+
+                // Create Http request
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add("Authorization", $"Api-Token {token.Token}");
+
+                // Send reqwuest and get response using stoppingToken in case need cancelation task
+                try
+                {
+                    var response = await _httpClient.SendAsync(request, stoppingToken);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var jsonResponse = await response.Content.ReadAsStringAsync(stoppingToken);
+                        var problemsResponse = JsonSerializer.Deserialize<DynatraceProblemResponse>(jsonResponse);
+
+                        // Add problemIds of problems OPEN to list
+                        if (problemsResponse?.Problems != null)
+                        {
+                            problemIds.AddRange(problemsResponse.Problems
+                                .Where(p => p != null)  // Filtra posibles nulos
+                                .Select(p => p.ProblemId)); // Extrae solo ProblemId
+
+                        }
+                        nextPageKey = problemsResponse?.NextPageKey;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"❌ Error en el Worker al obtener la lista de problemas de Dynatrace entorno {token.Environment} tenant {token.Tenant}.");
+                }
+            } while (!string.IsNullOrEmpty(nextPageKey));
+
+            return problemIds;
+        }
+
+        private async Task<List<string>> FetchProblemIdsAsync(APIToken token, string startTime, string endTime, CancellationToken stoppingToken)
+        {
+
+            // Set the variables return function and variables that help in the http request action
+            var problemIds = new List<string>();
+            string? nextPageKey = string.Empty;
+            var baseUrl = $"https://{token.Tenant}.live.dynatrace.com/api/v2/problems";
+            var pageSize = 500;
+
+            // Start do-while loop for manage the pagination API
+            do
+            {
+                // Build URL using query params
+                var queryParams = new Dictionary<string, string?>();
+                queryParams = string.IsNullOrEmpty(nextPageKey) ?
+                    new Dictionary<string, string?>
+                    {
+                        { "pageSize", pageSize.ToString() },
+                        { "from", startTime },
+                        { "to", endTime },
+                    } :
+                    new Dictionary<string, string?>
+                    {
+                        { "nextPageKey", nextPageKey }
+                    };
+                string url = QueryHelpers.AddQueryString(baseUrl, queryParams);
+
+                // Create Http request
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add("Authorization", $"Api-Token {token.Token}");
+
+                // Send reqwuest and get response using stoppingToken in case need cancelation task
+                try
+                {
+                    var response = await _httpClient.SendAsync(request, stoppingToken);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var jsonResponse = await response.Content.ReadAsStringAsync(stoppingToken);
+                        var problemsResponse = JsonSerializer.Deserialize<DynatraceProblemResponse>(jsonResponse);
+
+                        // Add problemIds of problems list
+                        if (problemsResponse?.Problems != null)
+                        {
+                            problemIds.AddRange(problemsResponse.Problems
+                                .Where(p => p != null)  // Filtra posibles nulos
+                                .Select(p => p.ProblemId)); // Extrae solo ProblemId
+
+                        }
+                        nextPageKey = problemsResponse?.NextPageKey;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"❌ Error en el Worker al obtener la lista de problemas de Dynatrace entorno {token.Environment} tenant {token.Tenant}.");
+                }
+            } while (!string.IsNullOrEmpty(nextPageKey));
+
+            return problemIds;
+        }
+
+        private async Task<List<DBProblem>> FetchProblemByIdsAsync(List<string> ids, APIToken token, CancellationToken stoppingToken)
+        {
+            // Set the variables return function and variables that help in the http request action
+            var problems = new List<DynatraceProblem>();
+            var baseUrl = $"https://{token.Tenant}.live.dynatrace.com/api/v2/problems";
+
+            foreach (var id in ids)
+            {
+                string url = $"{baseUrl}/{id}";
+
+                var request = new HttpRequestMessage(HttpMethod.Get, url);
+                request.Headers.Add("Authorization", $"Api-Token {token.Token}");
+
+                try
+                {
+                    using var response = await _httpClient.SendAsync(request, stoppingToken);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        var jsonResponse = await response.Content.ReadAsStringAsync(stoppingToken);
+                        DynatraceProblem? problemResponse = JsonSerializer.Deserialize<DynatraceProblem>(jsonResponse);
+                        if (problemResponse != null) 
+                        {
+                            problems.Add(problemResponse);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, $"❌ Error en el Worker al obtener los datos del problema {id} de Dynatrace entorno {token.Environment} tenant {token.Tenant}.");
+                }
+            }
+
+            return await MapToDBProblems(problems, token);
+        }
+
+        private async Task<List<DBProblem>> MapToDBProblems(List<DynatraceProblem> problems, APIToken token)
+        {
+            // 1) Calcular descripciones únicas y precargar/renovar predicciones en caché
+            var uniqueDescriptions = problems
+                .Select(p => p?.Title)                              // usamos Title como texto de entrada al modelo
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            await PredictionCache.UpdateOrStorePredictionsAsync(uniqueDescriptions, _predictor);
+
+            // 2) Mapear a DBProblem
+            var dbProblems = new List<DBProblem>();
+
+            foreach (var problem in problems)
+            {
+                if (problem is null) continue;
+
+                // Asegurar entradas no nulas para el matcher
+                var impacted = problem.ImpactedEntities ?? new List<ProblemEntity>();
+                var evidence = problem.EvidenceDetails ?? new EvidenceDetails();
+
+                // Resolver servidores afectados (si aplica en tu lógica)
+                var affectedCI = await _serverMatcher.FindAffectedServersAsync(impacted, evidence);
+
+                // Usamos Title como "ShortDescription"
+                var shortDescription = problem.Title ?? string.Empty;
+
+                // === NUEVA LÓGICA: consultar caché ML para etiqueta y probabilidad ===
+                string jurisdiction = "Unknown";
+                float probability = 0f;
+
+                if (!string.IsNullOrWhiteSpace(shortDescription) &&
+                    PredictionCache.TryGetPrediction(shortDescription, out bool isTcs, out probability))
+                {
+                    jurisdiction = isTcs ? "TCS" : "NO TCS";
+                }
+
+                // Construcción del registro para la BD
+                dbProblems.Add(new DBProblem(
+                    problem,
+                    token.Environment,
+                    token.Tenant,
+                    shortDescription,
+                    affectedCI,
+                    jurisdiction
+                // ,probability  // <- descomenta si tu constructor de DBProblem tiene este campo
+                ));
+            }
+
+            return dbProblems;
+        }
+private async Task UpdateProblemDatabase(List<DBProblem> newProblems, List<DBProblem> updateProblems)
+        {
+            try
+            {
+                if(newProblems.Count > 0)
+                {
+                    _logger.LogInformation("🟢 Insertando {Count} nuevos problemas en la BD...", newProblems.Count);
+                    await _problemRepository.InsertProblemsBatchAsync(newProblems);
+                    _logger.LogInformation("✅ {Count} problemas insertados correctamente.", newProblems.Count);
+                }
+
+                if(updateProblems.Count > 0)
+                {
+                    _logger.LogInformation("🟡 Actualizando {Count} problemas cerrados en la BD...", updateProblems.Count);
+                    await _problemRepository.UpdateProblemsBatchAsync(updateProblems);
+                    _logger.LogInformation("✅ {Count} problemas actualizados correctamente.", updateProblems.Count);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "❌ Error al procesar los problemas de Dynatrace.");
+            }
+        }
     }
 }
