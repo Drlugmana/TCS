@@ -1,284 +1,152 @@
-// src/pages/OtherProblems.jsx
-import React, { useEffect, useMemo, useState } from "react";
-import ProblemCard from "../components/ProblemCard";
-import { getLatestProblems } from "../api/problems";
+      [HttpGet("latest")]
+      public async Task<ActionResult<PagedResponse<ProblemDynatraceResponse>>> GetProblemsLatest(
+          [FromQuery] int pageNumber = 1,
+          [FromQuery] int pageSize = 50,
+          [FromQuery] string? jurisdiction = null
+      )
+      {
+          var closedStartDate = DateTime.Today.AddDays(-2);
+          var now = DateTime.Now;
 
-function norm(s) {
-  return String(s || "")
-    .trim()
-    .toUpperCase()
-    .replace(/\s+/g, "");
-}
+          // 1) TODOS los OPEN
+          var openQuery = _context.DynatraceProblems
+              .AsNoTracking()
+              .Where(p => p.Status == "OPEN");
 
-function normalizeStatus(p) {
-  const raw = p?.status ?? p?.Status ?? p?.problemStatus ?? p?.problemState ?? "";
-  const s = String(raw || "").trim().toUpperCase();
-  if (s.includes("OPEN")) return "OPEN";
-  if (s.includes("CLOSED") || s.includes("RESOLVED")) return "CLOSED";
-  return p?.endTime ? "CLOSED" : "OPEN";
-}
+          if (!string.IsNullOrWhiteSpace(jurisdiction))
+              openQuery = openQuery.Where(p => p.Jurisdiction == jurisdiction);
 
-function normalizeEnvironment(p) {
-  const raw = p?.environment ?? p?.Environment ?? "";
-  const s = norm(raw);
-  if (s === "PRODUCTIVO") return "Productivo";
-  if (s.includes("NOPRODUCTIVO") || s.includes("NO")) return "NoProductivo";
-  return raw || "";
-}
+          // 2) CLOSED recientes (Top N)
+          var closedTop = 50;
 
-function normalizeJurisdiction(p) {
-  return norm(p?.jurisdiction ?? p?.Jurisdiction ?? "");
-}
+          var closedQuery = _context.DynatraceProblems
+              .AsNoTracking()
+              .Where(p => p.Status == "CLOSED"
+                       && p.StartTime >= closedStartDate
+                       && p.StartTime <= now);
 
-// ✅ helpers orden
-function getStartDateMs(p) {
-  const raw = p?.startTime ?? p?.StartTime;
-  const d = raw ? new Date(raw) : null;
-  const ms = d && !isNaN(d.getTime()) ? d.getTime() : 0;
-  return ms;
-}
+          if (!string.IsNullOrWhiteSpace(jurisdiction))
+              closedQuery = closedQuery.Where(p => p.Jurisdiction == jurisdiction);
 
-function hasBlankComments(p) {
-  const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
-  if (flat !== undefined && flat !== null) {
-    return String(flat).trim() === "";
-  }
+          var openList = await openQuery
+              .OrderByDescending(p => p.StartTime)
+              .ToListAsync();
 
-  const arr =
-    p?.recentComments?.comments ??
-    p?.RecentComments?.comments ??
-    p?.recentComments ??
-    p?.RecentComments;
+          var closedList = await closedQuery
+              .OrderByDescending(p => p.StartTime)
+              .Take(closedTop)
+              .ToListAsync();
 
-  if (!arr) return true;
-  if (Array.isArray(arr)) return arr.length === 0;
-  if (Array.isArray(arr?.comments)) return arr.comments.length === 0;
+          // 3) Merge sin duplicados
+          var merged = openList
+              .Concat(closedList)
+              .GroupBy(p => p.ProblemId)
+              .Select(g => g.First())
+              .OrderByDescending(p => p.StartTime)
+              .ToList();
 
-  return true;
-}
+          // 4) Paginación final
+          var totalRecords = merged.Count;
 
-function getBiaRank(p) {
-  const c = String(p?.criticidad ?? p?.Criticidad ?? p?.bia ?? p?.Bia ?? "")
-    .trim()
-    .toUpperCase();
+          var page = merged
+              .Skip((pageNumber - 1) * pageSize)
+              .Take(pageSize)
+              .ToList();
 
-  if (c === "S1") return 1;
-  if (c === "S2") return 2;
-  if (c === "S3") return 3;
-  if (c === "S4") return 4;
+          // ✅ Helpers iguales al Excel pero para devolver string
+          static string BuildComments(RecentComments? recentComments)
+          {
+              if (recentComments?.comments == null || recentComments.comments.Count == 0)
+                  return "";
 
-  if (c.includes("S1")) return 1;
-  if (c.includes("S2")) return 2;
-  if (c.includes("S3")) return 3;
-  if (c.includes("S4")) return 4;
+              var sb = new StringBuilder();
 
-  return 99;
-}
+              foreach (var comment in recentComments.comments)
+              {
+                  sb.AppendLine("COMENTARIO");
 
-function getStableKey(p) {
-  return String(p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? "").trim();
-}
+                  if (!string.IsNullOrWhiteSpace(comment.authorName))
+                      sb.AppendLine(comment.authorName);
 
-// ✅ NUEVO: detectar "verde" (tiene comentarios NO vacíos)
-function hasComments(p) {
-  const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
-  if (flat !== undefined && flat !== null) return String(flat).trim().length > 0;
+                  if (!string.IsNullOrWhiteSpace(comment.content))
+                      sb.AppendLine(comment.content);
 
-  const arr =
-    p?.recentComments?.comments ??
-    p?.RecentComments?.comments ??
-    p?.recentComments ??
-    p?.RecentComments;
+                  if (!string.IsNullOrWhiteSpace(comment.context))
+                      sb.AppendLine(comment.context);
 
-  if (!arr) return false;
-  if (Array.isArray(arr)) return arr.length > 0;
-  if (Array.isArray(arr?.comments)) return arr.comments.length > 0;
+                  sb.AppendLine();
+              }
 
-  return false;
-}
+              return sb.ToString().Trim();
+          }
 
-export default function OtherProblems() {
-  const ALWAYS_USERNAME = "SISTEMA";
+          static string BuildEvidenceDetails(EvidenceDetails? evidenceDetails)
+          {
+              if (evidenceDetails?.details == null || evidenceDetails.details.Count == 0)
+                  return "";
 
-  const [problems, setProblems] = useState([]);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState("");
+              var sb = new StringBuilder();
 
-  const [envFilter, setEnvFilter] = useState("ALL");
-  const [statusFilter, setStatusFilter] = useState("ALL");
+              foreach (var detail in evidenceDetails.details)
+              {
+                  sb.AppendLine("DETALLE");
 
-  useEffect(() => {
-    let alive = true;
+                  var entityName = detail?.entity?.name;
+                  if (!string.IsNullOrWhiteSpace(entityName))
+                      sb.AppendLine(entityName);
 
-    async function load() {
-      setLoading(true);
-      setErr("");
-      try {
-        const res = await getLatestProblems({ pageNumber: 1, pageSize: 1000 });
-        if (!alive) return;
-        setProblems(Array.isArray(res?.data) ? res.data : []);
-      } catch (e) {
-        if (!alive) return;
-        setErr(e?.message || "Error consultando problemas");
-        setProblems([]);
-      } finally {
-        if (alive) setLoading(false);
+                  if (!string.IsNullOrWhiteSpace(detail?.displayName))
+                      sb.AppendLine(detail.displayName);
+
+                  var properties = detail?.data?.properties;
+                  if (properties != null && properties.Count > 0)
+                  {
+                      var description = properties.FirstOrDefault(p => p.key == "dt.event.description")?.value ?? "";
+                      var affectedRequest = properties.FirstOrDefault(p => p.key == "dt.event.baseline.affected_load")?.value ?? "";
+
+                      if (!string.IsNullOrWhiteSpace(description))
+                          sb.AppendLine(description);
+
+                      if (!string.IsNullOrWhiteSpace(affectedRequest))
+                          sb.AppendLine($"Affected request: {affectedRequest} /min");
+                  }
+
+                  sb.AppendLine();
+              }
+
+              return sb.ToString().Trim();
+          }
+
+          // 5) Deserialización + set de 2 columnas nuevas
+          var deserializedProblems = page
+              .Select(dbProblem =>
+              {
+                  try
+                  {
+                      var p = convertProblemJSON(dbProblem);
+
+                      // ✅ Aquí agregas las 2 “columnas” como strings
+                      p.Comentarios = BuildComments(p.recentComments);
+                      p.DetalleDeProblema = BuildEvidenceDetails(p.evidenceDetails);
+
+                      return p;
+                  }
+                  catch (JsonException)
+                  {
+                      return null;
+                  }
+              })
+              .Where(p => p != null)
+              .ToList()!;
+
+          var response = new PagedResponse<ProblemDynatraceResponse>
+          {
+              TotalRecords = totalRecords,
+              TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
+              PageNumber = pageNumber,
+              PageSize = pageSize,
+              Data = deserializedProblems
+          };
+
+          return response;
       }
-    }
-
-    load();
-    const interval = setInterval(load, 60000);
-    return () => {
-      alive = false;
-      clearInterval(interval);
-    };
-  }, []);
-
-  // Todo lo que NO sea TCS
-  const otherOnly = useMemo(() => {
-    return problems.filter((p) => normalizeJurisdiction(p) !== "TCS");
-  }, [problems]);
-
-  const filtered = useMemo(() => {
-    const base = otherOnly.filter((p) => {
-      const env = normalizeEnvironment(p);
-      const st = normalizeStatus(p);
-
-      const passEnv =
-        envFilter === "ALL" ? true : envFilter === "PROD" ? env === "Productivo" : env !== "Productivo";
-
-      const passStatus = statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
-
-      return passEnv && passStatus;
-    });
-
-    // ✅ Orden final:
-    // 1) NO verdes primero (sin comentarios), verdes al final
-    // 2) Dentro de CADA grupo: Criticidad S1 → S4
-    // 3) Desempate estable por ID
-    return [...base].sort((a, b) => {
-      const aGreen = hasComments(a) ? 1 : 0;
-      const bGreen = hasComments(b) ? 1 : 0;
-      if (aGreen !== bGreen) return aGreen - bGreen;
-
-      const aRank = getBiaRank(a);
-      const bRank = getBiaRank(b);
-      if (aRank !== bRank) return aRank - bRank;
-
-      const ak = getStableKey(a);
-      const bk = getStableKey(b);
-      return ak.localeCompare(bk);
-    });
-  }, [otherOnly, envFilter, statusFilter]);
-
-  const counts = useMemo(() => {
-    const base = otherOnly;
-    const prod = base.filter((p) => normalizeEnvironment(p) === "Productivo").length;
-    const noprod = base.length - prod;
-    const open = base.filter((p) => normalizeStatus(p) === "OPEN").length;
-    const closed = base.filter((p) => normalizeStatus(p) === "CLOSED").length;
-
-    return { total: base.length, prod, noprod, open, closed };
-  }, [otherOnly]);
-
-  return (
-    <div style={{ padding: "1rem 0" }}>
-      <h1 style={{ textAlign: "center", margin: "0 0 0.5rem 0" }}>
-        Problemas Otros ({filtered.length})
-      </h1>
-
-      <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
-        <button
-          onClick={() => setEnvFilter("PROD")}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 16,
-            border: "1px solid #cfcfcf",
-            background: envFilter === "PROD" ? "#3b82f6" : "#e5e7eb",
-            color: envFilter === "PROD" ? "#fff" : "#111",
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}
-        >
-          Productivo ({counts.prod})
-        </button>
-
-        <button
-          onClick={() => setEnvFilter("NOPROD")}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 16,
-            border: "1px solid #cfcfcf",
-            background: envFilter === "NOPROD" ? "#9ca3af" : "#e5e7eb",
-            color: "#111",
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}
-        >
-          No Productivo ({counts.noprod})
-        </button>
-
-        <button
-          onClick={() => setStatusFilter("OPEN")}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 16,
-            border: "1px solid #cfcfcf",
-            background: statusFilter === "OPEN" ? "#f59e0b" : "#e5e7eb",
-            color: "#111",
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}
-        >
-          Abiertas ({counts.open})
-        </button>
-
-        <button
-          onClick={() => setStatusFilter("CLOSED")}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 16,
-            border: "1px solid #cfcfcf",
-            background: statusFilter === "CLOSED" ? "#10b981" : "#e5e7eb",
-            color: "#111",
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}
-        >
-          Cerradas ({counts.closed})
-        </button>
-
-        <button
-          onClick={() => {
-            setEnvFilter("ALL");
-            setStatusFilter("ALL");
-          }}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 16,
-            border: "1px solid #cfcfcf",
-            background: envFilter === "ALL" && statusFilter === "ALL" ? "#d1d5db" : "#e5e7eb",
-            color: "#111",
-            fontWeight: "bold",
-            cursor: "pointer",
-          }}
-        >
-          Todos
-        </button>
-      </div>
-
-      {loading && <div style={{ textAlign: "center" }}>Cargando...</div>}
-      {!!err && <div style={{ textAlign: "center", color: "red" }}>{err}</div>}
-
-      <div style={{ maxWidth: 980, margin: "0 auto", padding: "0 12px" }}>
-        {filtered.map((p, idx) => (
-          <ProblemCard
-            key={p?.problemId || p?.displayId || idx}
-            problem={p}
-            username={ALWAYS_USERNAME}
-          />
-        ))}
-      </div>
-    </div>
-  );
-}
