@@ -1,9 +1,8 @@
-// src/pages/TCSProblems.jsx
+// src/pages/OtherProblems.jsx
 import React, { useEffect, useMemo, useState } from "react";
 import ProblemCard from "../components/ProblemCard";
 import { getLatestProblems } from "../api/problems";
 
-// Helpers para normalizar
 function norm(s) {
   return String(s || "")
     .trim()
@@ -31,7 +30,7 @@ function normalizeJurisdiction(p) {
   return norm(p?.jurisdiction ?? p?.Jurisdiction ?? "");
 }
 
-// Helpers fechas
+// ✅ helpers orden
 function getStartDateMs(p) {
   const raw = p?.startTime ?? p?.StartTime;
   const d = raw ? new Date(raw) : null;
@@ -39,7 +38,6 @@ function getStartDateMs(p) {
   return ms;
 }
 
-// Comentarios vacíos
 function hasBlankComments(p) {
   const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
   if (flat !== undefined && flat !== null) {
@@ -59,11 +57,15 @@ function hasBlankComments(p) {
   return true;
 }
 
-// Criticidad S1 → S4
 function getBiaRank(p) {
   const c = String(p?.criticidad ?? p?.Criticidad ?? p?.bia ?? p?.Bia ?? "")
     .trim()
     .toUpperCase();
+
+  if (c === "S1") return 1;
+  if (c === "S2") return 2;
+  if (c === "S3") return 3;
+  if (c === "S4") return 4;
 
   if (c.includes("S1")) return 1;
   if (c.includes("S2")) return 2;
@@ -73,23 +75,14 @@ function getBiaRank(p) {
   return 99;
 }
 
-// clave estable
 function getStableKey(p) {
-  return String(
-    p?.problemId ??
-    p?.ProblemId ??
-    p?.displayId ??
-    p?.DisplayId ??
-    ""
-  ).trim();
+  return String(p?.problemId ?? p?.ProblemId ?? p?.displayId ?? p?.DisplayId ?? "").trim();
 }
 
-// VERDE = tiene comentarios reales
+// ✅ NUEVO: detectar "verde" (tiene comentarios NO vacíos)
 function hasComments(p) {
   const flat = p?.comentarios ?? p?.Comentarios ?? p?.commentsText ?? p?.CommentsText;
-  if (flat !== undefined && flat !== null) {
-    return String(flat).trim().length > 0;
-  }
+  if (flat !== undefined && flat !== null) return String(flat).trim().length > 0;
 
   const arr =
     p?.recentComments?.comments ??
@@ -104,7 +97,7 @@ function hasComments(p) {
   return false;
 }
 
-export default function TCSProblems() {
+export default function OtherProblems() {
   const ALWAYS_USERNAME = "SISTEMA";
 
   const [problems, setProblems] = useState([]);
@@ -141,34 +134,28 @@ export default function TCSProblems() {
     };
   }, []);
 
-  // Solo TCS
-  const tcsOnly = useMemo(() => {
-    return problems.filter((p) => normalizeJurisdiction(p) === "TCS");
+  // Todo lo que NO sea TCS
+  const otherOnly = useMemo(() => {
+    return problems.filter((p) => normalizeJurisdiction(p) !== "TCS");
   }, [problems]);
 
-  // FILTROS + ORDEN FINAL
   const filtered = useMemo(() => {
-    const base = tcsOnly.filter((p) => {
+    const base = otherOnly.filter((p) => {
       const env = normalizeEnvironment(p);
       const st = normalizeStatus(p);
 
       const passEnv =
-        envFilter === "ALL"
-          ? true
-          : envFilter === "PROD"
-          ? env === "Productivo"
-          : env !== "Productivo";
+        envFilter === "ALL" ? true : envFilter === "PROD" ? env === "Productivo" : env !== "Productivo";
 
-      const passStatus =
-        statusFilter === "ALL"
-          ? true
-          : statusFilter === "OPEN"
-          ? st === "OPEN"
-          : st === "CLOSED";
+      const passStatus = statusFilter === "ALL" ? true : statusFilter === "OPEN" ? st === "OPEN" : st === "CLOSED";
 
       return passEnv && passStatus;
     });
 
+    // ✅ Orden final:
+    // 1) NO verdes primero (sin comentarios), verdes al final
+    // 2) Dentro de CADA grupo: Criticidad S1 → S4
+    // 3) Desempate estable por ID
     return [...base].sort((a, b) => {
       const aGreen = hasComments(a) ? 1 : 0;
       const bGreen = hasComments(b) ? 1 : 0;
@@ -178,23 +165,26 @@ export default function TCSProblems() {
       const bRank = getBiaRank(b);
       if (aRank !== bRank) return aRank - bRank;
 
-      return getStableKey(a).localeCompare(getStableKey(b));
+      const ak = getStableKey(a);
+      const bk = getStableKey(b);
+      return ak.localeCompare(bk);
     });
-  }, [tcsOnly, envFilter, statusFilter]);
+  }, [otherOnly, envFilter, statusFilter]);
 
   const counts = useMemo(() => {
-    const base = tcsOnly;
+    const base = otherOnly;
     const prod = base.filter((p) => normalizeEnvironment(p) === "Productivo").length;
     const noprod = base.length - prod;
     const open = base.filter((p) => normalizeStatus(p) === "OPEN").length;
     const closed = base.filter((p) => normalizeStatus(p) === "CLOSED").length;
+
     return { total: base.length, prod, noprod, open, closed };
-  }, [tcsOnly]);
+  }, [otherOnly]);
 
   return (
     <div style={{ padding: "1rem 0" }}>
       <h1 style={{ textAlign: "center", margin: "0 0 0.5rem 0" }}>
-        Problemas TCS ({filtered.length})
+        Problemas Otros ({filtered.length})
       </h1>
 
       <div style={{ display: "flex", justifyContent: "center", gap: "10px", flexWrap: "wrap", marginBottom: "1rem" }}>
