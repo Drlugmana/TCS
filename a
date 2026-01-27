@@ -1,152 +1,100 @@
-      [HttpGet("latest")]
-      public async Task<ActionResult<PagedResponse<ProblemDynatraceResponse>>> GetProblemsLatest(
-          [FromQuery] int pageNumber = 1,
-          [FromQuery] int pageSize = 50,
-          [FromQuery] string? jurisdiction = null
-      )
-      {
-          var closedStartDate = DateTime.Today.AddDays(-2);
-          var now = DateTime.Now;
-
-          // 1) TODOS los OPEN
-          var openQuery = _context.DynatraceProblems
-              .AsNoTracking()
-              .Where(p => p.Status == "OPEN");
-
-          if (!string.IsNullOrWhiteSpace(jurisdiction))
-              openQuery = openQuery.Where(p => p.Jurisdiction == jurisdiction);
-
-          // 2) CLOSED recientes (Top N)
-          var closedTop = 50;
-
-          var closedQuery = _context.DynatraceProblems
-              .AsNoTracking()
-              .Where(p => p.Status == "CLOSED"
-                       && p.StartTime >= closedStartDate
-                       && p.StartTime <= now);
-
-          if (!string.IsNullOrWhiteSpace(jurisdiction))
-              closedQuery = closedQuery.Where(p => p.Jurisdiction == jurisdiction);
-
-          var openList = await openQuery
-              .OrderByDescending(p => p.StartTime)
-              .ToListAsync();
-
-          var closedList = await closedQuery
-              .OrderByDescending(p => p.StartTime)
-              .Take(closedTop)
-              .ToListAsync();
-
-          // 3) Merge sin duplicados
-          var merged = openList
-              .Concat(closedList)
-              .GroupBy(p => p.ProblemId)
-              .Select(g => g.First())
-              .OrderByDescending(p => p.StartTime)
-              .ToList();
-
-          // 4) Paginación final
-          var totalRecords = merged.Count;
-
-          var page = merged
-              .Skip((pageNumber - 1) * pageSize)
-              .Take(pageSize)
-              .ToList();
-
-          // ✅ Helpers iguales al Excel pero para devolver string
-          static string BuildComments(RecentComments? recentComments)
-          {
-              if (recentComments?.comments == null || recentComments.comments.Count == 0)
-                  return "";
-
-              var sb = new StringBuilder();
-
-              foreach (var comment in recentComments.comments)
-              {
-                  sb.AppendLine("COMENTARIO");
-
-                  if (!string.IsNullOrWhiteSpace(comment.authorName))
-                      sb.AppendLine(comment.authorName);
-
-                  if (!string.IsNullOrWhiteSpace(comment.content))
-                      sb.AppendLine(comment.content);
-
-                  if (!string.IsNullOrWhiteSpace(comment.context))
-                      sb.AppendLine(comment.context);
-
-                  sb.AppendLine();
-              }
-
-              return sb.ToString().Trim();
-          }
-
-          static string BuildEvidenceDetails(EvidenceDetails? evidenceDetails)
-          {
-              if (evidenceDetails?.details == null || evidenceDetails.details.Count == 0)
-                  return "";
-
-              var sb = new StringBuilder();
-
-              foreach (var detail in evidenceDetails.details)
-              {
-                  sb.AppendLine("DETALLE");
-
-                  var entityName = detail?.entity?.name;
-                  if (!string.IsNullOrWhiteSpace(entityName))
-                      sb.AppendLine(entityName);
-
-                  if (!string.IsNullOrWhiteSpace(detail?.displayName))
-                      sb.AppendLine(detail.displayName);
-
-                  var properties = detail?.data?.properties;
-                  if (properties != null && properties.Count > 0)
-                  {
-                      var description = properties.FirstOrDefault(p => p.key == "dt.event.description")?.value ?? "";
-                      var affectedRequest = properties.FirstOrDefault(p => p.key == "dt.event.baseline.affected_load")?.value ?? "";
-
-                      if (!string.IsNullOrWhiteSpace(description))
-                          sb.AppendLine(description);
-
-                      if (!string.IsNullOrWhiteSpace(affectedRequest))
-                          sb.AppendLine($"Affected request: {affectedRequest} /min");
-                  }
-
-                  sb.AppendLine();
-              }
-
-              return sb.ToString().Trim();
-          }
-
-          // 5) Deserialización + set de 2 columnas nuevas
-          var deserializedProblems = page
-              .Select(dbProblem =>
-              {
-                  try
-                  {
-                      var p = convertProblemJSON(dbProblem);
-
-                      // ✅ Aquí agregas las 2 “columnas” como strings
-                      p.Comentarios = BuildComments(p.recentComments);
-                      p.DetalleDeProblema = BuildEvidenceDetails(p.evidenceDetails);
-
-                      return p;
-                  }
-                  catch (JsonException)
-                  {
-                      return null;
-                  }
-              })
-              .Where(p => p != null)
-              .ToList()!;
-
-          var response = new PagedResponse<ProblemDynatraceResponse>
-          {
-              TotalRecords = totalRecords,
-              TotalPages = (int)Math.Ceiling(totalRecords / (double)pageSize),
-              PageNumber = pageNumber,
-              PageSize = pageSize,
-              Data = deserializedProblems
-          };
-
-          return response;
-      }
+CREATE VIEW [dbo].[vw_DynatraceProblems]
+AS
+SELECT 
+    [ProblemId],
+    [Environment],
+    [Tenant],
+    [DisplayId],
+    [Title],
+	[ShortDescription],
+    [ImpactLevel],
+    [SeverityLevel],
+    [Status],
+    [StartTime],
+    [EndTime],
+    -- VENTANA DE MANTENIMIENTO
+    CASE 
+        WHEN ISJSON([EvidenceDetails]) > 0 AND JSON_VALUE([EvidenceDetails], '$.details[0].data.underMaintenance') = 'true' 
+        THEN 'VERDADERO' 
+        ELSE 'FALSO'
+    END AS [UnderMaintenance],
+    -- ENTIDADES IMPACTADAS
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.name') AS NVARCHAR(MAX)), ', ') 
+     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.name'))
+     FROM OPENJSON(CASE WHEN ISJSON(ImpactedEntities) > 0 THEN ImpactedEntities ELSE '[]' END)) AS [ImpactedEntities],
+    -- NUMERO DE ENTIDADES AFECTADAS
+    (SELECT COUNT(*)
+     FROM OPENJSON(CASE WHEN ISJSON(AffectedEntities) > 0 THEN AffectedEntities ELSE '[]' END)) AS [AffectedEntitiesCount],
+    -- CAUSA RAIZ
+    CASE 
+        WHEN ISJSON([RootCauseEntity]) > 0 THEN JSON_VALUE([RootCauseEntity], '$.name') 
+        ELSE NULL 
+    END AS [RootCause],
+    -- ZONAS DE GESTION
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.name') AS NVARCHAR(MAX)), ', ') 
+     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.name'))
+     FROM OPENJSON(CASE WHEN ISJSON(ManagementZones) > 0 THEN ManagementZones ELSE '[]' END)) AS [ManagementZones],
+    -- ETIQUETAS DE ENTIDADES
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.stringRepresentation') AS NVARCHAR(MAX)), ', ') 
+     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.stringRepresentation'))
+     FROM OPENJSON(CASE WHEN ISJSON(EntityTags) > 0 THEN EntityTags ELSE '[]' END)) AS [EntityTags],
+    -- DURACIÓN EN MINUTOS
+    CASE 
+        WHEN [Status] = 'CLOSED' THEN DATEDIFF(MINUTE, [StartTime], [EndTime])
+        ELSE DATEDIFF(MINUTE, [StartTime], SYSDATETIMEOFFSET() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time')
+    END AS [DurationMinutes],
+    -- DÍA DE LA SEMANA EN QUITO
+    DATENAME(WEEKDAY, [StartTime] AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time') AS [DayOfWeekQuito],
+    -- HORA DE INICIO EN QUITO
+    DATEPART(HOUR, [StartTime] AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time') AS [StartHourQuito],
+	-- DETALLES DE EVIDENCIA
+    (SELECT STRING_AGG(
+        CAST(COALESCE(EntityName + '; ', '') AS NVARCHAR(MAX)) +
+        CAST(COALESCE(DisplayName + '; ', '')AS NVARCHAR(MAX)) +
+        CAST(COALESCE(Description + '; ', '') AS NVARCHAR(MAX)) +
+        CAST(COALESCE('Affected request: ' + AffectedRequest + ' /min' + '; ', '') AS NVARCHAR(MAX)), '')
+    FROM (
+        SELECT
+    JSON_VALUE(detail.value, '$.entity.name') AS EntityName,
+            JSON_VALUE(detail.value, '$.displayName') AS DisplayName,
+            (SELECT TOP 1 JSON_VALUE(prop.value, '$.value')
+    FROM OPENJSON(JSON_QUERY(detail.value, '$.data.properties')) AS prop
+            WHERE JSON_VALUE(prop.value, '$.key') = 'dt.event.description') AS Description,
+            (SELECT TOP 1 JSON_VALUE(prop.value, '$.value')
+    FROM OPENJSON(JSON_QUERY(detail.value, '$.data.properties')) AS prop
+            WHERE JSON_VALUE(prop.value, '$.key') = 'dt.event.baseline.affected_load') AS AffectedRequest
+        FROM OPENJSON(CASE WHEN ISJSON([EvidenceDetails]) > 0 THEN JSON_QUERY([EvidenceDetails], '$.details') ELSE '[]' END) AS detail
+    ) AS EvidenceDetailsSubquery) AS [EvidenceDetails],
+	-- COMENTARIOS RECIENTES
+    (SELECT STRING_AGG(
+        CAST('COMENTARIO' + '; ' +
+        COALESCE(JSON_VALUE(comment.value, '$.authorName') + '; ', '') +
+        COALESCE(JSON_VALUE(comment.value, '$.content') + '; ', '') +
+        COALESCE(JSON_VALUE(comment.value, '$.context') + '; ', '') AS NVARCHAR(MAX)), '')
+    FROM OPENJSON(CASE WHEN ISJSON([RecentComments]) > 0 THEN JSON_QUERY([RecentComments], '$.comments') ELSE '[]' END) AS comment) AS [RecentComments],
+    -- CI Afectado
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Nombre') AS NVARCHAR(MAX)), ', ')
+     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIName],
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Clase') AS NVARCHAR(MAX)), ', ')
+     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIClass],
+    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Grupo') AS NVARCHAR(MAX)), ', ')
+     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIGroup],
+	 -- IncidentServiceNow
+    CASE 
+        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Number') 
+        ELSE NULL 
+    END AS [IncidentNumber],
+    CASE 
+        WHEN ISJSON([IncidentServiceNow]) > 0 THEN TRY_CONVERT(datetime, JSON_VALUE([IncidentServiceNow], '$.Fecha_de_Abierto'), 103) 
+        ELSE NULL 
+    END AS [IncidentOpenDate],
+    CASE 
+        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Prioridad') 
+        ELSE NULL 
+    END AS [IncidentPriority],
+    CASE 
+        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Grupo_Asignacion') 
+        ELSE NULL 
+    END AS [IncidentAssignmentGroup],
+	Jurisdiction
+FROM DynatraceProblems;
