@@ -1,100 +1,275 @@
-CREATE VIEW [dbo].[vw_DynatraceProblems]
-AS
-SELECT 
-    [ProblemId],
-    [Environment],
-    [Tenant],
-    [DisplayId],
-    [Title],
-	[ShortDescription],
-    [ImpactLevel],
-    [SeverityLevel],
-    [Status],
-    [StartTime],
-    [EndTime],
-    -- VENTANA DE MANTENIMIENTO
-    CASE 
-        WHEN ISJSON([EvidenceDetails]) > 0 AND JSON_VALUE([EvidenceDetails], '$.details[0].data.underMaintenance') = 'true' 
-        THEN 'VERDADERO' 
-        ELSE 'FALSO'
-    END AS [UnderMaintenance],
-    -- ENTIDADES IMPACTADAS
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.name') AS NVARCHAR(MAX)), ', ') 
-     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.name'))
-     FROM OPENJSON(CASE WHEN ISJSON(ImpactedEntities) > 0 THEN ImpactedEntities ELSE '[]' END)) AS [ImpactedEntities],
-    -- NUMERO DE ENTIDADES AFECTADAS
-    (SELECT COUNT(*)
-     FROM OPENJSON(CASE WHEN ISJSON(AffectedEntities) > 0 THEN AffectedEntities ELSE '[]' END)) AS [AffectedEntitiesCount],
-    -- CAUSA RAIZ
-    CASE 
-        WHEN ISJSON([RootCauseEntity]) > 0 THEN JSON_VALUE([RootCauseEntity], '$.name') 
-        ELSE NULL 
-    END AS [RootCause],
-    -- ZONAS DE GESTION
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.name') AS NVARCHAR(MAX)), ', ') 
-     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.name'))
-     FROM OPENJSON(CASE WHEN ISJSON(ManagementZones) > 0 THEN ManagementZones ELSE '[]' END)) AS [ManagementZones],
-    -- ETIQUETAS DE ENTIDADES
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.stringRepresentation') AS NVARCHAR(MAX)), ', ') 
-     WITHIN GROUP (ORDER BY JSON_VALUE(value, '$.stringRepresentation'))
-     FROM OPENJSON(CASE WHEN ISJSON(EntityTags) > 0 THEN EntityTags ELSE '[]' END)) AS [EntityTags],
-    -- DURACIÓN EN MINUTOS
-    CASE 
-        WHEN [Status] = 'CLOSED' THEN DATEDIFF(MINUTE, [StartTime], [EndTime])
-        ELSE DATEDIFF(MINUTE, [StartTime], SYSDATETIMEOFFSET() AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time')
-    END AS [DurationMinutes],
-    -- DÍA DE LA SEMANA EN QUITO
-    DATENAME(WEEKDAY, [StartTime] AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time') AS [DayOfWeekQuito],
-    -- HORA DE INICIO EN QUITO
-    DATEPART(HOUR, [StartTime] AT TIME ZONE 'UTC' AT TIME ZONE 'SA Pacific Standard Time') AS [StartHourQuito],
-	-- DETALLES DE EVIDENCIA
-    (SELECT STRING_AGG(
-        CAST(COALESCE(EntityName + '; ', '') AS NVARCHAR(MAX)) +
-        CAST(COALESCE(DisplayName + '; ', '')AS NVARCHAR(MAX)) +
-        CAST(COALESCE(Description + '; ', '') AS NVARCHAR(MAX)) +
-        CAST(COALESCE('Affected request: ' + AffectedRequest + ' /min' + '; ', '') AS NVARCHAR(MAX)), '')
-    FROM (
-        SELECT
-    JSON_VALUE(detail.value, '$.entity.name') AS EntityName,
-            JSON_VALUE(detail.value, '$.displayName') AS DisplayName,
-            (SELECT TOP 1 JSON_VALUE(prop.value, '$.value')
-    FROM OPENJSON(JSON_QUERY(detail.value, '$.data.properties')) AS prop
-            WHERE JSON_VALUE(prop.value, '$.key') = 'dt.event.description') AS Description,
-            (SELECT TOP 1 JSON_VALUE(prop.value, '$.value')
-    FROM OPENJSON(JSON_QUERY(detail.value, '$.data.properties')) AS prop
-            WHERE JSON_VALUE(prop.value, '$.key') = 'dt.event.baseline.affected_load') AS AffectedRequest
-        FROM OPENJSON(CASE WHEN ISJSON([EvidenceDetails]) > 0 THEN JSON_QUERY([EvidenceDetails], '$.details') ELSE '[]' END) AS detail
-    ) AS EvidenceDetailsSubquery) AS [EvidenceDetails],
-	-- COMENTARIOS RECIENTES
-    (SELECT STRING_AGG(
-        CAST('COMENTARIO' + '; ' +
-        COALESCE(JSON_VALUE(comment.value, '$.authorName') + '; ', '') +
-        COALESCE(JSON_VALUE(comment.value, '$.content') + '; ', '') +
-        COALESCE(JSON_VALUE(comment.value, '$.context') + '; ', '') AS NVARCHAR(MAX)), '')
-    FROM OPENJSON(CASE WHEN ISJSON([RecentComments]) > 0 THEN JSON_QUERY([RecentComments], '$.comments') ELSE '[]' END) AS comment) AS [RecentComments],
-    -- CI Afectado
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Nombre') AS NVARCHAR(MAX)), ', ')
-     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIName],
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Clase') AS NVARCHAR(MAX)), ', ')
-     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIClass],
-    (SELECT STRING_AGG(CAST(JSON_VALUE(value, '$.Grupo') AS NVARCHAR(MAX)), ', ')
-     FROM OPENJSON(CASE WHEN ISJSON([AffectedCI]) > 0 THEN JSON_QUERY([AffectedCI]) ELSE '[]' END)) AS [AffectedCIGroup],
-	 -- IncidentServiceNow
-    CASE 
-        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Number') 
-        ELSE NULL 
-    END AS [IncidentNumber],
-    CASE 
-        WHEN ISJSON([IncidentServiceNow]) > 0 THEN TRY_CONVERT(datetime, JSON_VALUE([IncidentServiceNow], '$.Fecha_de_Abierto'), 103) 
-        ELSE NULL 
-    END AS [IncidentOpenDate],
-    CASE 
-        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Prioridad') 
-        ELSE NULL 
-    END AS [IncidentPriority],
-    CASE 
-        WHEN ISJSON([IncidentServiceNow]) > 0 THEN JSON_VALUE([IncidentServiceNow], '$.Grupo_Asignacion') 
-        ELSE NULL 
-    END AS [IncidentAssignmentGroup],
-	Jurisdiction
-FROM DynatraceProblems;
+using DynatraceProblemUpdater.Models.Dynatrace;
+using DynatraceProblemUpdater.Models.ProblemsDB;
+using Microsoft.Data.SqlClient;
+
+namespace DynatraceProblemUpdater.Data.Repositories
+{
+    public class DynatraceProblemRepository
+    {
+        private readonly string _connectionString;
+
+        public DynatraceProblemRepository(string connectionString)
+        {
+            _connectionString = connectionString;
+        }
+
+        /// <summary>
+        /// Obtiene la lista de ProblemId de todos los problemas con estado 'open' filtrados por Environment.
+        /// </summary>
+        public async Task<List<string>> GetOpenProblemIdsAsync(string environment)
+        {
+            var problemIds = new List<string>();
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+
+            const string query = @"SELECT ProblemId FROM DynatraceProblems 
+                                   WHERE Status = 'open' AND Environment = @Environment";
+
+            using var command = new SqlCommand(query, connection);
+            command.Parameters.AddWithValue("@Environment", environment);
+
+            using var reader = await command.ExecuteReaderAsync();
+
+            while (await reader.ReadAsync())
+            {
+                problemIds.Add(reader.GetString(0));
+            }
+
+            return problemIds;
+        }
+
+        public async Task InsertProblemsBatchAsync(List<DBProblem> problems)
+        {
+            if (problems == null || problems.Count == 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = await connection.BeginTransactionAsync();
+
+            try
+            {
+                const string query = @"
+                    MERGE INTO dbo.DynatraceProblems AS target
+                    USING (
+                        VALUES (
+                            @ProblemId, @SeverityLevel, @Status, @Title, @DisplayId, @StartTime, @EndTime, @ImpactLevel,
+                            @ClusterName, @ClusterUid, @NamespaceName, @AffectedEntities, @EntityTags, @EvidenceDetails,
+                            @ImpactAnalysis, @ImpactedEntities, @ManagementZones, @ProblemFilters, @RecentComments,
+                            @RootCauseEntity, @Environment, @Tenant, @ShortDescription, @AffectedCI, @IncidentServiceNow,
+                            @Jurisdiction)) 
+                        AS source (ProblemId, SeverityLevel, Status, Title, DisplayId, StartTime, EndTime, ImpactLevel,
+                            ClusterName, ClusterUid, NamespaceName, AffectedEntities, EntityTags, EvidenceDetails,
+                            ImpactAnalysis, ImpactedEntities, ManagementZones, ProblemFilters, RecentComments,
+                            RootCauseEntity, Environment, Tenant, ShortDescription, AffectedCI, IncidentServiceNow,
+                            Jurisdiction)
+                    ON  target.ProblemId   = source.ProblemId AND target.Environment = source.Environment AND target.Tenant = source.Tenant
+                    WHEN MATCHED THEN
+                        UPDATE SET
+                            SeverityLevel     = source.SeverityLevel,
+                            Status            = source.Status,
+                            Title             = source.Title,
+                            DisplayId         = source.DisplayId,
+                            StartTime         = source.StartTime,
+                            EndTime           = source.EndTime,
+                            ImpactLevel       = source.ImpactLevel,
+                            ClusterName       = source.ClusterName,
+                            ClusterUid        = source.ClusterUid,
+                            NamespaceName     = source.NamespaceName,
+                            AffectedEntities  = source.AffectedEntities,
+                            EntityTags        = source.EntityTags,
+                            EvidenceDetails   = source.EvidenceDetails,
+                            ImpactAnalysis    = source.ImpactAnalysis,
+                            ImpactedEntities  = source.ImpactedEntities,
+                            ManagementZones   = source.ManagementZones,
+                            ProblemFilters    = source.ProblemFilters,
+                            RecentComments    = source.RecentComments,
+                            RootCauseEntity   = source.RootCauseEntity,
+
+                        -- Jurisdiction: actualizar solo si viene con valor
+                        Jurisdiction = CASE
+                            WHEN source.Jurisdiction IS NOT NULL AND LTRIM(RTRIM(source.Jurisdiction)) <> ''
+                                 THEN source.Jurisdiction
+                            ELSE target.Jurisdiction
+                        END,
+
+                        -- ShortDescription: corregir si quedó nula/'Unknown'/'TCS'/'No TCS'
+                        ShortDescription = CASE
+                            WHEN target.ShortDescription IS NULL
+                              OR target.ShortDescription IN ('Unknown','TCS','No TCS')
+                                 THEN source.ShortDescription
+                            ELSE target.ShortDescription
+                        END,
+
+                        AffectedCI = CASE
+                            WHEN target.AffectedCI IS NULL OR target.AffectedCI = '[]'
+                                 THEN source.AffectedCI
+                            ELSE target.AffectedCI
+                        END,
+                        IncidentServiceNow = CASE 
+                            WHEN target.IncidentServiceNow IS NULL OR target.IncidentServiceNow = '{}' 
+                            THEN source.IncidentServiceNow 
+                            ELSE target.IncidentServiceNow 
+                        END
+                    WHEN NOT MATCHED THEN
+                    INSERT (
+                        ProblemId, SeverityLevel, Status, Title, DisplayId, StartTime, EndTime, ImpactLevel,
+                        ClusterName, ClusterUid, NamespaceName, AffectedEntities, EntityTags, EvidenceDetails,
+                        ImpactAnalysis, ImpactedEntities, ManagementZones, ProblemFilters, RecentComments,
+                        RootCauseEntity, Environment, Tenant, ShortDescription, AffectedCI, IncidentServiceNow,
+                        Jurisdiction
+                    )
+                    VALUES (
+                        source.ProblemId, source.SeverityLevel, source.Status, source.Title, source.DisplayId,
+                        source.StartTime, source.EndTime, source.ImpactLevel, source.ClusterName, source.ClusterUid,
+                        source.NamespaceName, source.AffectedEntities, source.EntityTags, source.EvidenceDetails,
+                        source.ImpactAnalysis, source.ImpactedEntities, source.ManagementZones, source.ProblemFilters,
+                        source.RecentComments, source.RootCauseEntity, source.Environment, source.Tenant,
+                        source.ShortDescription, source.AffectedCI, source.IncidentServiceNow, source.Jurisdiction
+                    );
+                ";
+
+                foreach (var problem in problems)
+                {
+                    using var command = new SqlCommand(query, connection, (SqlTransaction)transaction);
+                    command.Parameters.AddWithValue("@ProblemId", problem.ProblemId);
+                    command.Parameters.AddWithValue("@SeverityLevel", problem.SeverityLevel);
+                    command.Parameters.AddWithValue("@Status", problem.Status);
+                    command.Parameters.AddWithValue("@Title", problem.Title);
+                    command.Parameters.AddWithValue("@DisplayId", problem.DisplayId);
+                    command.Parameters.AddWithValue("@StartTime", problem.StartTime);
+                    command.Parameters.AddWithValue("@EndTime", problem.EndTime ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactLevel", problem.ImpactLevel);
+                    command.Parameters.AddWithValue("@ClusterName", problem.ClusterName ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ClusterUid", problem.ClusterUid ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@NamespaceName", problem.NamespaceName ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@AffectedEntities", problem.AffectedEntities ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@EntityTags", problem.EntityTags ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@EvidenceDetails", problem.EvidenceDetails ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactAnalysis", problem.ImpactAnalysis ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactedEntities", problem.ImpactedEntities ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ManagementZones", problem.ManagementZones ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ProblemFilters", problem.ProblemFilters ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@RecentComments", problem.RecentComments ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@RootCauseEntity", problem.RootCauseEntity ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@Environment", problem.Environment);
+                    command.Parameters.AddWithValue("@Tenant", problem.Tenant);
+                    command.Parameters.AddWithValue("@ShortDescription", problem.ShortDescription ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@AffectedCI", problem.AffectedCI ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@IncidentServiceNow", problem.IncidentServiceNow ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@Jurisdiction", problem.Jurisdiction ?? (object)DBNull.Value);
+
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await transaction.CommitAsync();
+            }
+            catch (Exception)
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+        }
+
+        /// <summary>
+        /// Actualiza múltiples problemas en la base de datos en una sola transacción.
+        /// </summary>
+        /// 
+        public async Task UpdateProblemsBatchAsync(List<DBProblem> problems)
+        {
+            if (problems == null || problems.Count == 0) return;
+
+            using var connection = new SqlConnection(_connectionString);
+            await connection.OpenAsync();
+            using var transaction = await connection.BeginTransactionAsync();
+
+            try
+            {
+                const string query = @"
+                    UPDATE DynatraceProblems 
+                    SET SeverityLevel = @SeverityLevel, 
+                        Status = @Status, 
+                        Title = @Title, 
+                        DisplayId = @DisplayId, 
+                        StartTime = @StartTime, 
+                        EndTime = @EndTime, 
+                        ImpactLevel = @ImpactLevel, 
+                        ClusterName = @ClusterName, 
+                        ClusterUid = @ClusterUid, 
+                        NamespaceName = @NamespaceName, 
+                        AffectedEntities = @AffectedEntities, 
+                        EntityTags = @EntityTags, 
+                        EvidenceDetails = @EvidenceDetails, 
+                        ImpactAnalysis = @ImpactAnalysis, 
+                        ImpactedEntities = @ImpactedEntities, 
+                        ManagementZones = @ManagementZones, 
+                        ProblemFilters = @ProblemFilters, 
+                        RecentComments = @RecentComments, 
+                        RootCauseEntity = @RootCauseEntity,
+                        Jurisdiction = @Jurisdiction,
+
+                        -- ✅ Actualizar AffectedCI solo si es NULL o []
+                        AffectedCI = CASE 
+                                        WHEN AffectedCI IS NULL OR AffectedCI = '[]' THEN @AffectedCI 
+                                        ELSE AffectedCI 
+                                    END,
+
+                        -- ✅ Actualizar ShortDescription solo si es NULL o 'Unknown'
+                        ShortDescription = CASE 
+                                            WHEN ShortDescription IS NULL OR ShortDescription = 'Unknown' THEN @ShortDescription 
+                                            ELSE ShortDescription 
+                                        END,
+
+                          -- ✅ Actualizar IncidentServiceNow solo si es NULL o '{}'
+                        IncidentServiceNow = CASE 
+                                                WHEN IncidentServiceNow IS NULL OR IncidentServiceNow = '{}' THEN @IncidentServiceNow 
+                                                ELSE IncidentServiceNow 
+                                            END
+
+                    WHERE ProblemId = @ProblemId 
+                    AND Environment = @Environment 
+                    AND Tenant = @Tenant";
+
+                foreach (var problem in problems)
+                {
+                    using var command = new SqlCommand(query, connection, (SqlTransaction)transaction);
+                    command.Parameters.AddWithValue("@ProblemId", problem.ProblemId);
+                    command.Parameters.AddWithValue("@SeverityLevel", problem.SeverityLevel);
+                    command.Parameters.AddWithValue("@Status", problem.Status);
+                    command.Parameters.AddWithValue("@Title", problem.Title);
+                    command.Parameters.AddWithValue("@DisplayId", problem.DisplayId);
+                    command.Parameters.AddWithValue("@StartTime", problem.StartTime);
+                    command.Parameters.AddWithValue("@EndTime", problem.EndTime ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactLevel", problem.ImpactLevel);
+                    command.Parameters.AddWithValue("@ClusterName", problem.ClusterName ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ClusterUid", problem.ClusterUid ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@NamespaceName", problem.NamespaceName ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@AffectedEntities", problem.AffectedEntities ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@EntityTags", problem.EntityTags ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@EvidenceDetails", problem.EvidenceDetails ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactAnalysis", problem.ImpactAnalysis ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ImpactedEntities", problem.ImpactedEntities ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ManagementZones", problem.ManagementZones ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@ProblemFilters", problem.ProblemFilters ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@RecentComments", problem.RecentComments ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@RootCauseEntity", problem.RootCauseEntity ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@Environment", problem.Environment);
+                    command.Parameters.AddWithValue("@Tenant", problem.Tenant);
+                    command.Parameters.AddWithValue("@ShortDescription", problem.ShortDescription ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@AffectedCI", problem.AffectedCI ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@IncidentServiceNow", problem.IncidentServiceNow ?? (object)DBNull.Value);
+                    command.Parameters.AddWithValue("@Jurisdiction", problem.Jurisdiction ?? (object)DBNull.Value);
+                 
+                    await command.ExecuteNonQueryAsync();
+                }
+
+                await transaction.CommitAsync();
+            }
+            catch (Exception)
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+        }
+    }
+}
